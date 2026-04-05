@@ -1,0 +1,32 @@
+# Python/Node environments
+.venv/
+venv/
+node_modules/
+
+# Editor/OS
+.DS_Store
+*.swp
+
+# Logs/caches
+*.log
+.cache/
+.pytest_cache/
+.mypy_cache/
+
+# Build artifacts
+build/
+dist/
+
+# Generated analysis outputs
+repo-analysis/data/raw/**
+repo-analysis/data/parsed/**
+repo-analysis/data/graph/**
+repo-analysis/data/search/**
+repo-analysis/data/summaries/**
+repo-analysis/data/eval/**
+!repo-analysis/data/raw/.gitkeep
+!repo-analysis/data/parsed/.gitkeep
+!repo-analysis/data/graph/.gitkeep
+!repo-analysis/data/search/.gitkeep
+!repo-analysis/data/summaries/.gitkeep
+!repo-analysis/data/eval/.gitkeep
