@@ -1,0 +1,1 @@
+"""Yellowstone Vixen adapter."""

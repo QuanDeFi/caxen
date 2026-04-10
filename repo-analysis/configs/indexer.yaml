@@ -1,0 +1,2 @@
+repos: [carbon, yellowstone-vixen]
+parsers: [tree-sitter, rust-analyzer]

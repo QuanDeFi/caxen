@@ -1,0 +1,6 @@
+[submodule "carbon"]
+	path = carbon
+	url = https://github.com/sevenlabs-hq/carbon.git
+[submodule "yellowstone-vixen"]
+	path = yellowstone-vixen
+	url = https://github.com/rpcpool/yellowstone-vixen.git
