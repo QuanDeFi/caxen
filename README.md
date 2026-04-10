@@ -18,6 +18,8 @@ git submodule update --init --recursive
 ./repo-analysis/scripts/sync_repos.sh --verify
 ./repo-analysis/scripts/parse_repos.sh
 ./repo-analysis/scripts/build_index.sh
+./repo-analysis/scripts/build_search.sh
+./repo-analysis/scripts/export_summaries.sh
 ```
 
 ## Repository policy highlights
@@ -25,4 +27,4 @@ git submodule update --init --recursive
 - Do not move or flatten upstream repository content.
 - Keep retrieval parser-first, symbol-aware, graph-backed, and selective.
 - Keep implementation details in `repo-analysis/docs/` and code in `repo-analysis/src/`.
-- Treat retrieval as parser-first, starting from raw inventory plus deterministic Rust symbol, SQLite, and graph artifacts.
+- Treat retrieval as parser-first, starting from raw inventory plus deterministic Rust symbol, lexical search, summary, and graph artifacts.

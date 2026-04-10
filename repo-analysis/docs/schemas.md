@@ -255,6 +255,37 @@ Each parsed repo now also writes:
   - reports whether parquet export ran on the current machine
   - when parquet export is available, the parsed directory also includes `files.parquet`, `symbols.parquet`, `imports.parquet`, and `references.parquet`
 
+## Search Schema
+
+`build-search` writes:
+
+- `data/search/<repo>/search.sqlite3`
+  - tables: `metadata`, `documents`, `lexical_documents`
+  - `lexical_documents` is an SQLite FTS5 virtual table over repo, directory, file, and symbol documents
+- `data/search/<repo>/search_manifest.json`
+
+High-level manifest shape:
+
+```json
+{
+  "schema_version": "0.1.0",
+  "repo": "carbon",
+  "generated_at": "2026-04-10T12:00:00Z",
+  "artifacts": {
+    "sqlite": "search.sqlite3"
+  },
+  "summary": {
+    "documents": 1234,
+    "document_kind_counts": [
+      {
+        "kind": "symbol",
+        "count": 900
+      }
+    ]
+  }
+}
+```
+
 ## Graph Schema
 
 The first Phase 3 slice writes `data/graph/<repo>/graph.json`.
@@ -315,3 +346,85 @@ High-level shape:
 - The current graph now includes first semantic edges for imports, calls, uses, and impl relationships.
 - SQLite persistence is always available; parquet export is optional per-environment.
 - Future phases can add higher-fidelity parsers and richer graph edges without replacing the JSON-first contract.
+
+## Summary Schemas
+
+`build-summaries` writes:
+
+- `project.json`
+- `directories.json`
+- `files.json`
+- `symbols.json`
+- `summary_manifest.json`
+
+High-level `project.json` shape:
+
+```json
+{
+  "repo": "yellowstone-vixen",
+  "focus": "a Rust-first Solana parsing/runtime workspace centered on runtime handlers, parsers, and sources",
+  "analysis_surfaces": ["crates", "examples"],
+  "parser_relevant_source_roots": ["crates/proc-macro/src"],
+  "build_commands": ["cargo build --workspace"],
+  "test_commands": ["cargo test --workspace"],
+  "language_mix": ["Rust:100"],
+  "top_symbol_kinds": ["function:20", "struct:10"],
+  "summary": "..."
+}
+```
+
+High-level `files.json` entry shape:
+
+```json
+{
+  "path": "crates/proc-macro/src/lib.rs",
+  "crate": "yellowstone-vixen-proc-macro",
+  "module_path": "yellowstone_vixen_proc_macro",
+  "language": "Rust",
+  "symbols": 7,
+  "imports": 2,
+  "public_symbols": ["yellowstone_vixen_proc_macro::vixen"],
+  "top_symbols": ["yellowstone_vixen_proc_macro::vixen"],
+  "tags": ["parser"],
+  "summary": "..."
+}
+```
+
+## Evaluation Schema
+
+`run-benchmarks` writes `data/eval/benchmarks.json`.
+
+High-level shape:
+
+```json
+{
+  "schema_version": "0.1.0",
+  "generated_at": "2026-04-10T12:00:00Z",
+  "summary": {
+    "runs": 8,
+    "modes": [
+      {
+        "mode": "lexical",
+        "runs": 4,
+        "exact_hits": 3,
+        "path_hits": 4,
+        "avg_latency_ms": 4.2
+      }
+    ]
+  },
+  "runs": [
+    {
+      "name": "yellowstone_vixen_attr_macro",
+      "repo": "yellowstone-vixen",
+      "query": "vixen proc macro attribute",
+      "mode": "lexical_graph",
+      "expected_path": "crates/proc-macro/src/lib.rs",
+      "expected_name": "vixen",
+      "latency_ms": 3.1,
+      "exact_hit": true,
+      "path_hit": true,
+      "selected": []
+    }
+  ]
+}
+```

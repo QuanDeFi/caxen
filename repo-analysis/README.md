@@ -19,8 +19,12 @@ The implemented slice in this repository now covers the Phase 0-3 foundation:
 - first Rust-oriented parser ingestion
 - deterministic symbol, SQLite, and graph artifacts for scoped Rust source paths
 - first semantic graph edges for imports, impls, calls, and uses
+- SQLite FTS-based lexical search artifacts over repo/file/symbol documents
+- deterministic project/directory/file/symbol summaries
+- agent-facing CLI operations for repo overview, symbol lookup, call tracing, and context prep
+- a lightweight benchmark harness for lexical-only vs lexical-plus-graph retrieval
 
-Lexical search, summaries, and evaluation remain future phases.
+Compiler-backed parsing, richer graph semantics, embeddings, and broader evaluation coverage remain future phases.
 
 ## Quickstart
 
@@ -30,6 +34,9 @@ Lexical search, summaries, and evaluation remain future phases.
 ./scripts/sync_repos.sh --verify
 ./scripts/parse_repos.sh
 ./scripts/build_index.sh
+./scripts/build_search.sh
+./scripts/export_summaries.sh
+./scripts/run_benchmarks.sh
 ```
 
 ## Structure
@@ -57,3 +64,31 @@ Lexical search, summaries, and evaluation remain future phases.
 - `data/graph/<repo>/graph.json`
 
 When `pyarrow` is available, `build_index.sh` also writes parquet tables for files, symbols, imports, and references under `data/parsed/<repo>/`.
+
+`build_search.sh` writes lexical search artifacts to:
+
+- `data/search/<repo>/search.sqlite3`
+- `data/search/<repo>/search_manifest.json`
+
+`export_summaries.sh` writes deterministic summary artifacts to:
+
+- `data/summaries/<repo>/project.json`
+- `data/summaries/<repo>/directories.json`
+- `data/summaries/<repo>/files.json`
+- `data/summaries/<repo>/symbols.json`
+- `data/summaries/<repo>/summary_manifest.json`
+
+## Toolkit
+
+The CLI now exposes:
+
+- `repo-overview`
+- `find-symbol`
+- `trace-calls`
+- `compare-repos`
+- `find-parsers`
+- `find-datasources`
+- `find-decoders`
+- `find-runtime-handlers`
+- `summarize-path`
+- `prepare-context`

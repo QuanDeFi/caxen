@@ -41,6 +41,7 @@ Create and preserve this top-level layout:
     │   ├── sync_repos.sh
     │   ├── parse_repos.sh
     │   ├── build_index.sh
+    │   ├── build_search.sh
     │   ├── run_benchmarks.sh
     │   └── export_summaries.sh
     ├── data/
@@ -91,6 +92,20 @@ Create and preserve this top-level layout:
 ## Why this structure
 
 Codex reads `AGENTS.md` before starting work and applies the closest file along the working-directory path, so this root file should define the durable workspace rules and leave package-specific behavior to deeper documentation if needed. The Codex docs also recommend keeping the main `AGENTS.md` practical and concise, and referencing additional task-specific docs when instructions grow. Carbon itself is organized around `crates`, `datasources`, `decoders`, `examples`, `metrics`, `packages`, and `scripts`, while Yellowstone Vixen describes a runtime-plus-parser architecture for program-aware Solana data pipelines. The plan below preserves both upstream trees and places all analysis tooling in a third folder. citeturn2view2turn2view3turn2view0turn2view1
+
+## Plan vs Implementation
+
+This file is the target architecture for the workspace, not a claim that every phase below is already implemented.
+
+Current implementation status:
+
+- Phase 0 and Phase 1 workspace setup are in place.
+- Phase 2 raw inventory is implemented and produces normalized `manifest.json` and `repo_map.json`.
+- Phase 3 currently exists as an initial Rust-only parser/symbol/graph slice.
+- Later Phase 3 goals such as statement-level nodes, control-flow/data-flow/dependence edges, and compiler-backed resolution are not implemented yet.
+- Phase 4 and beyond remain planned work unless `repo-analysis/docs/architecture.md` says otherwise.
+
+When there is any ambiguity, treat `repo-analysis/docs/architecture.md` and the code under `repo-analysis/src/` as the source of truth for what actually works today.
 
 ## Phase 0: bootstrap the workspace
 
