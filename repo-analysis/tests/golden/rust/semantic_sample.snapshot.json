@@ -1,0 +1,165 @@
+{
+  "summary": {
+    "rust_files": 1,
+    "symbols": 12,
+    "imports": 2,
+    "references": 5,
+    "kind_counts": [
+      {
+        "kind": "enum",
+        "count": 1
+      },
+      {
+        "kind": "field",
+        "count": 2
+      },
+      {
+        "kind": "function",
+        "count": 2
+      },
+      {
+        "kind": "impl",
+        "count": 1
+      },
+      {
+        "kind": "local",
+        "count": 1
+      },
+      {
+        "kind": "method",
+        "count": 1
+      },
+      {
+        "kind": "struct",
+        "count": 2
+      },
+      {
+        "kind": "variant",
+        "count": 2
+      }
+    ],
+    "reference_kind_counts": [
+      {
+        "kind": "call",
+        "count": 2
+      },
+      {
+        "kind": "use",
+        "count": 3
+      }
+    ]
+  },
+  "symbols": [
+    {
+      "kind": "struct",
+      "qualified_name": "demo_crate::Helper"
+    },
+    {
+      "kind": "function",
+      "qualified_name": "demo_crate::call_helper"
+    },
+    {
+      "kind": "function",
+      "qualified_name": "demo_crate::make_count"
+    },
+    {
+      "kind": "struct",
+      "qualified_name": "demo_crate::Service"
+    },
+    {
+      "kind": "enum",
+      "qualified_name": "demo_crate::Mode"
+    },
+    {
+      "kind": "impl",
+      "qualified_name": "demo_crate::impl Service"
+    },
+    {
+      "kind": "method",
+      "qualified_name": "demo_crate::Service::build"
+    },
+    {
+      "kind": "field",
+      "qualified_name": "demo_crate::Service::helper"
+    },
+    {
+      "kind": "field",
+      "qualified_name": "demo_crate::Service::count"
+    },
+    {
+      "kind": "variant",
+      "qualified_name": "demo_crate::Mode::Idle"
+    },
+    {
+      "kind": "variant",
+      "qualified_name": "demo_crate::Mode::Active"
+    },
+    {
+      "kind": "local",
+      "qualified_name": "demo_crate::Service::build::count@L23"
+    }
+  ],
+  "imports": [
+    {
+      "target": "crate::call_helper",
+      "target_qualified_name": "demo_crate::call_helper"
+    },
+    {
+      "target": "crate::Helper",
+      "target_qualified_name": "demo_crate::Helper"
+    }
+  ],
+  "references": [
+    {
+      "kind": "use",
+      "container": "demo_crate::call_helper",
+      "target": "demo_crate::Helper"
+    },
+    {
+      "kind": "use",
+      "container": "demo_crate::Service::helper",
+      "target": "demo_crate::Helper"
+    },
+    {
+      "kind": "use",
+      "container": "demo_crate::Service::build",
+      "target": "demo_crate::Helper"
+    },
+    {
+      "kind": "call",
+      "container": "demo_crate::Service::build",
+      "target": "demo_crate::make_count"
+    },
+    {
+      "kind": "call",
+      "container": "demo_crate::Service::build",
+      "target": "demo_crate::call_helper"
+    }
+  ],
+  "graph_edge_counts": [
+    {
+      "type": "CALLS",
+      "count": 2
+    },
+    {
+      "type": "CONTAINS",
+      "count": 7
+    },
+    {
+      "type": "DEFINES",
+      "count": 6
+    },
+    {
+      "type": "IMPORTS",
+      "count": 2
+    },
+    {
+      "type": "REFERENCES",
+      "count": 1
+    },
+    {
+      "type": "USES",
+      "count": 3
+    }
+  ]
+}

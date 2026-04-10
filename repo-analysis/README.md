@@ -17,7 +17,8 @@ The implemented slice in this repository now covers the Phase 0-3 foundation:
 - raw repo inventory adapters
 - normalized `manifest.json` and `repo_map.json` outputs
 - first Rust-oriented parser ingestion
-- deterministic symbol and graph artifacts for scoped Rust source paths
+- deterministic symbol, SQLite, and graph artifacts for scoped Rust source paths
+- first semantic graph edges for imports, impls, calls, and uses
 
 Lexical search, summaries, and evaluation remain future phases.
 
@@ -51,4 +52,8 @@ Lexical search, summaries, and evaluation remain future phases.
 `build_index.sh` writes the first parser/symbol/graph artifacts to:
 
 - `data/parsed/<repo>/symbols.json`
+- `data/parsed/<repo>/symbols.sqlite3`
+- `data/parsed/<repo>/parquet_status.json`
 - `data/graph/<repo>/graph.json`
+
+When `pyarrow` is available, `build_index.sh` also writes parquet tables for files, symbols, imports, and references under `data/parsed/<repo>/`.

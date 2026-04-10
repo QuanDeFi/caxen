@@ -55,6 +55,29 @@ pub mod api {
         self.assertTrue(tests_module.is_test)
         self.assertTrue(smoke_test.is_test)
 
+    def test_tracks_struct_and_enum_container_spans(self) -> None:
+        source = """
+pub struct Service {
+    pub helper: Helper,
+    count: u64,
+}
+
+pub enum Mode {
+    Idle,
+    Active,
+}
+"""
+        parsed = parse_rust_file("src/lib.rs", source, "demo-crate", "demo_crate")
+        symbols_by_key = {(symbol.kind, symbol.name): symbol for symbol in parsed.symbols}
+
+        service = symbols_by_key[("struct", "Service")]
+        mode = symbols_by_key[("enum", "Mode")]
+
+        self.assertEqual(service.span.start_line, 2)
+        self.assertEqual(service.span.end_line, 5)
+        self.assertEqual(mode.span.start_line, 7)
+        self.assertEqual(mode.span.end_line, 10)
+
     def test_handles_multiline_impl_and_function_signatures(self) -> None:
         source = """
 impl<T> Builder<T>

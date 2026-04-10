@@ -259,6 +259,11 @@ def strip_rust_non_code(line: str, state: _LexState) -> str:
     return "".join(output)
 
 
+def clean_rust_source_lines(source: str) -> List[str]:
+    state = _LexState()
+    return [strip_rust_non_code(line, state) for line in source.splitlines()]
+
+
 def parse_rust_file(path: str, source: str, crate_name: str, module_path: str) -> ParsedRustFile:
     brace_depth = 0
     containers: List[_Container] = []
@@ -357,7 +362,7 @@ def parse_rust_file(path: str, source: str, crate_name: str, module_path: str) -
         symbol_lookup[symbol.local_id] = symbol
         next_local_id += 1
 
-        if "{" in declaration_text and kind in {"function", "impl", "method", "module", "trait"}:
+        if "{" in declaration_text and kind in {"function", "impl", "method", "module", "trait", "struct", "enum", "union"}:
             containers.append(
                 _Container(
                     local_id=symbol.local_id,

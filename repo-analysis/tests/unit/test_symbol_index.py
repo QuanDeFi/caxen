@@ -29,11 +29,15 @@ class SymbolIndexTest(unittest.TestCase):
                     [
                         "use crate::support::Helper;",
                         "",
+                        "pub fn helper() -> u64 {",
+                        "    7",
+                        "}",
+                        "",
                         "pub struct Demo;",
                         "",
                         "impl Demo {",
                         "    pub fn answer(&self) -> u64 {",
-                        "        42",
+                        "        helper()",
                         "    }",
                         "}",
                     ]
@@ -58,12 +62,15 @@ class SymbolIndexTest(unittest.TestCase):
             self.assertEqual(artifact["summary"]["rust_files"], 1)
             self.assertEqual(artifact["files"][0]["crate"], "demo-crate")
             self.assertEqual(artifact["imports"][0]["target"], "crate::support::Helper")
+            self.assertGreater(artifact["summary"]["references"], 0)
 
             impl_symbol = next(item for item in artifact["symbols"] if item["kind"] == "impl")
             method_symbol = next(item for item in artifact["symbols"] if item["name"] == "answer")
+            call_reference = next(item for item in artifact["references"] if item["kind"] == "call")
 
             self.assertEqual(method_symbol["container_symbol_id"], impl_symbol["symbol_id"])
             self.assertEqual(method_symbol["module_path"], "demo_crate")
+            self.assertEqual(call_reference["container_symbol_id"], method_symbol["symbol_id"])
 
 
 if __name__ == "__main__":

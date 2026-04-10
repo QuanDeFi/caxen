@@ -25,4 +25,4 @@ git submodule update --init --recursive
 - Do not move or flatten upstream repository content.
 - Keep retrieval parser-first, symbol-aware, graph-backed, and selective.
 - Keep implementation details in `repo-analysis/docs/` and code in `repo-analysis/src/`.
-- Treat retrieval as parser-first, starting from raw inventory plus deterministic Rust symbol and graph artifacts.
+- Treat retrieval as parser-first, starting from raw inventory plus deterministic Rust symbol, SQLite, and graph artifacts.

@@ -27,6 +27,7 @@ This gives later retrieval and summary stages a stable inventory and symbol subs
 - `scripts/bootstrap.sh`
   - prepares generated data directories
   - reports local toolchain availability
+  - reports whether optional parquet export support is available
 - `scripts/sync_repos.sh`
   - initializes submodules
   - verifies that recorded gitlinks match checked-out submodule refs
@@ -74,6 +75,7 @@ Each adapter contributes:
 
 - strips comments and strings before structural scanning
 - recognizes modules, imports, impl blocks, functions, methods, and core type declarations
+- tracks multi-line struct/enum/union container spans
 - carries doc comments, visibility, test markers, and spans into parsed symbols
 
 ### Symbol Index
@@ -81,8 +83,18 @@ Each adapter contributes:
 `src/symbols/indexer.py` consumes raw inventory roots and writes:
 
 - `data/parsed/<repo>/symbols.json`
+- `data/parsed/<repo>/symbols.sqlite3`
+- `data/parsed/<repo>/parquet_status.json`
 
 The current artifact is deterministic and scoped to Rust source files discovered from `parser_relevant_source_roots`.
+It now includes:
+
+- expanded import records
+- struct fields, enum variants, and simple local variables
+- resolved import and impl links where the current symbol table can support them
+- symbol-level reference records for call and use sites
+
+SQLite persistence is always written. Parquet export is implemented as an optional path that activates when `pyarrow` is installed.
 
 ### Graph Layer
 
@@ -90,7 +102,15 @@ The current artifact is deterministic and scoped to Rust source files discovered
 
 - `data/graph/<repo>/graph.json`
 
-The current graph includes repository, file, symbol, and reference nodes with `CONTAINS`, `DEFINES`, `IMPORTS`, `REFERENCES`, and `IMPLEMENTS` edges where available.
+The current graph includes repository, file, symbol, and reference nodes with:
+
+- `CONTAINS`
+- `DEFINES`
+- `IMPORTS`
+- `REFERENCES`
+- `IMPLEMENTS`
+- `CALLS`
+- `USES`
 
 ## Output Model
 
@@ -118,16 +138,21 @@ The current parser slice also emits:
   - Rust file rollups
   - extracted symbols with spans, docstrings, visibility, and container links
   - normalized import records
+  - reference records for calls and uses
+- `symbols.sqlite3`
+  - queryable local persistence for files, symbols, imports, and references
+- `parquet_status.json`
+  - whether parquet export ran on the current machine
 - `graph.json`
   - repository/file/symbol/reference nodes
-  - structural edges derived from the symbol artifact
+  - structural and first semantic edges derived from the symbol artifact
 
 ## Future Phases
 
 The next architectural layers build on top of raw inventory:
 
 1. higher-fidelity Rust parsing beyond the initial deterministic slice
-2. symbol table persistence in columnar and database-backed forms
+2. wider parquet availability across environments without relying on machine-local setup drift
 3. broader graph construction and query APIs
 4. lexical retrieval
 5. rerank and optional embedding sidecar
@@ -136,9 +161,12 @@ The next architectural layers build on top of raw inventory:
 
 ## Explicit Future-Work Note
 
-The current Phase 3 implementation intentionally stops at deterministic JSON artifacts:
+The current Phase 3 implementation now includes deterministic JSON artifacts, SQLite persistence, and first semantic graph edges.
 
-- parquet and database-backed symbol persistence are not implemented yet
-- broader semantic graph edges such as `CALLS`, resolved `USES`, control-flow, data-flow, and dependence edges are not implemented yet
+The next unresolved layers are still important:
+
+- parquet export depends on `pyarrow` being present in the active Python environment
+- cross-file symbol resolution is still heuristic rather than compiler-backed
+- control-flow, data-flow, dependence, and deeper statement-level graph edges are not implemented yet
 
 Those should be treated as the next expansion layers on top of the current Rust parser/symbol/graph foundation rather than as missing bug fixes in the current slice.

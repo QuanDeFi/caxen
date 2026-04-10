@@ -121,10 +121,10 @@ High-level shape:
 
 ```json
 {
-  "schema_version": "0.2.0",
+  "schema_version": "0.3.0",
   "repo": "yellowstone-vixen",
   "generated_at": "2026-04-10T12:00:00Z",
-  "parser": "rust-simple-v1",
+  "parser": "rust-simple-v2",
   "source_roots": ["crates/proc-macro/src"],
   "path_prefixes": ["crates/proc-macro/src/lib.rs"],
   "files": [
@@ -165,7 +165,11 @@ High-level shape:
       "attributes": ["proc_macro_attribute"],
       "is_test": false,
       "impl_target": null,
-      "impl_trait": null
+      "impl_trait": null,
+      "resolved_impl_target_symbol_id": null,
+      "resolved_impl_target_qualified_name": null,
+      "resolved_impl_trait_symbol_id": null,
+      "resolved_impl_trait_qualified_name": null
     }
   ],
   "imports": [
@@ -178,7 +182,10 @@ High-level shape:
       "language": "Rust",
       "visibility": "private",
       "signature": "use proc_macro::TokenStream;",
+      "raw_target": "proc_macro::TokenStream",
       "target": "proc_macro::TokenStream",
+      "normalized_target": "proc_macro::TokenStream",
+      "alias": null,
       "span": {
         "start_line": 1,
         "start_column": 1,
@@ -186,22 +193,67 @@ High-level shape:
         "end_column": 30
       },
       "container_symbol_id": null,
-      "container_qualified_name": null
+      "container_qualified_name": null,
+      "target_symbol_id": null,
+      "target_qualified_name": "proc_macro::TokenStream",
+      "target_kind": null
+    }
+  ],
+  "references": [
+    {
+      "reference_id": "ref:ghi789",
+      "repo": "yellowstone-vixen",
+      "path": "crates/proc-macro/src/lib.rs",
+      "crate": "yellowstone-vixen-proc-macro",
+      "module_path": "yellowstone_vixen_proc_macro",
+      "language": "Rust",
+      "kind": "use",
+      "name": "TokenStream",
+      "qualified_name_hint": "proc_macro::TokenStream",
+      "span": {
+        "start_line": 23,
+        "start_column": 19,
+        "end_line": 23,
+        "end_column": 30
+      },
+      "container_symbol_id": "sym:abc123",
+      "container_qualified_name": "yellowstone_vixen_proc_macro::vixen",
+      "scope_symbol_id": "sym:abc123",
+      "target_symbol_id": null,
+      "target_qualified_name": "proc_macro::TokenStream",
+      "target_kind": null
     }
   ],
   "summary": {
     "rust_files": 1,
     "symbols": 7,
     "imports": 2,
+    "references": 1,
     "kind_counts": [
       {
         "kind": "function",
         "count": 2
       }
+    ],
+    "reference_kind_counts": [
+      {
+        "kind": "use",
+        "count": 1
+      }
     ]
   }
 }
 ```
+
+## Parsed Persistence Files
+
+Each parsed repo now also writes:
+
+- `symbols.sqlite3`
+  - tables: `metadata`, `files`, `symbols`, `imports`, `symbol_references`
+- `parquet_status.json`
+  - reports whether parquet export ran on the current machine
+  - when parquet export is available, the parsed directory also includes `files.parquet`, `symbols.parquet`, `imports.parquet`, and `references.parquet`
 
 ## Graph Schema
 
@@ -211,7 +263,7 @@ High-level shape:
 
 ```json
 {
-  "schema_version": "0.1.0",
+  "schema_version": "0.2.0",
   "repo": "yellowstone-vixen",
   "generated_at": "2026-04-10T12:00:00Z",
   "nodes": [
@@ -234,17 +286,25 @@ High-level shape:
   "edges": [
     {
       "edge_id": "edge:ghi789",
-      "type": "DEFINES",
+      "type": "CALLS",
       "from": "file:def456",
       "to": "sym:jkl012",
       "metadata": {
-        "path": "crates/proc-macro/src/lib.rs"
+        "path": "crates/proc-macro/src/lib.rs",
+        "line": 23,
+        "kind": "call"
       }
     }
   ],
   "summary": {
     "nodes": 11,
-    "edges": 10
+    "edges": 10,
+    "edge_counts": [
+      {
+        "type": "CALLS",
+        "count": 1
+      }
+    ]
   }
 }
 ```
@@ -252,5 +312,6 @@ High-level shape:
 ## Phase 3 Notes
 
 - The current parser is intentionally deterministic and Rust-only.
-- The current graph is structural rather than fully semantic.
+- The current graph now includes first semantic edges for imports, calls, uses, and impl relationships.
+- SQLite persistence is always available; parquet export is optional per-environment.
 - Future phases can add higher-fidelity parsers and richer graph edges without replacing the JSON-first contract.

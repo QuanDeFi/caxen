@@ -15,6 +15,7 @@ from adapters.yellowstone_vixen.adapter import inventory as inventory_yellowston
 from common.inventory import write_inventory
 from graph.builder import build_graph_artifact, write_graph_artifact
 from symbols.indexer import build_symbol_index, write_symbol_index
+from symbols.persistence import write_symbol_database, write_symbol_parquet_bundle
 
 
 ADAPTERS = {
@@ -129,6 +130,8 @@ def handle_build_index(args: argparse.Namespace) -> int:
         graph_artifact = build_graph_artifact(symbol_index)
 
         write_symbol_index(parsed_root, repo_name, symbol_index)
+        write_symbol_database(parsed_root, repo_name, symbol_index)
+        write_symbol_parquet_bundle(parsed_root, repo_name, symbol_index)
         write_graph_artifact(graph_root, repo_name, graph_artifact)
 
         print(f"Wrote parsed symbols for {repo_name} to {parsed_root / repo_name}")

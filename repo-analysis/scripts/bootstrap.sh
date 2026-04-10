@@ -12,6 +12,15 @@ done
 
 if command -v python3 >/dev/null 2>&1; then
   echo "python3: $(python3 --version 2>&1)"
+  if python3 - <<'PY' >/dev/null 2>&1
+import importlib.util
+raise SystemExit(0 if importlib.util.find_spec("pyarrow") else 1)
+PY
+  then
+    echo "pyarrow: available"
+  else
+    echo "pyarrow: not installed (parquet export will emit status only)"
+  fi
 else
   echo "WARNING: python3 not found; inventory tooling will not run." >&2
 fi

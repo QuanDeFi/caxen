@@ -8,4 +8,4 @@ requires-python = ">=3.10"
 testpaths = ["tests/unit", "tests/integration"]
 
 [tool.repo_analysis]
-implemented_phase = "bootstrap_inventory_and_rust_symbol_slice"
+implemented_phase = "bootstrap_inventory_and_rust_semantic_graph_slice"
