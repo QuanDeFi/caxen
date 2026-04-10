@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Phase 3+ is not implemented yet. Run ./scripts/parse_repos.sh for the current milestone."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+exec "$PYTHON_BIN" "$SCRIPT_DIR/../src/cli/main.py" build-index \
+  --workspace-root "$ROOT_DIR" \
+  --raw-root "$SCRIPT_DIR/../data/raw" \
+  --parsed-root "$SCRIPT_DIR/../data/parsed" \
+  --graph-root "$SCRIPT_DIR/../data/graph" \
+  "$@"

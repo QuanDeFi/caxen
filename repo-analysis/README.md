@@ -11,13 +11,15 @@ Analysis toolkit for Carbon and Yellowstone Vixen.
 
 ## Current Milestone
 
-The implemented slice in this repository is the Phase 0-2 foundation:
+The implemented slice in this repository now covers the Phase 0-3 foundation:
 
 - workspace bootstrap and verification
 - raw repo inventory adapters
 - normalized `manifest.json` and `repo_map.json` outputs
+- first Rust-oriented parser ingestion
+- deterministic symbol and graph artifacts for scoped Rust source paths
 
-Parser-first symbol extraction, graph building, lexical search, summaries, and evaluation remain future phases.
+Lexical search, summaries, and evaluation remain future phases.
 
 ## Quickstart
 
@@ -26,6 +28,7 @@ Parser-first symbol extraction, graph building, lexical search, summaries, and e
 ./scripts/sync_repos.sh
 ./scripts/sync_repos.sh --verify
 ./scripts/parse_repos.sh
+./scripts/build_index.sh
 ```
 
 ## Structure
@@ -44,3 +47,8 @@ Parser-first symbol extraction, graph building, lexical search, summaries, and e
 - `data/raw/carbon/repo_map.json`
 - `data/raw/yellowstone-vixen/manifest.json`
 - `data/raw/yellowstone-vixen/repo_map.json`
+
+`build_index.sh` writes the first parser/symbol/graph artifacts to:
+
+- `data/parsed/<repo>/symbols.json`
+- `data/graph/<repo>/graph.json`
