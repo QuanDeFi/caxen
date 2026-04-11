@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from common.native_tool import probe_rust_file_native
 
 ITEM_NODE_TYPES = {
     "const": {"const_item"},
@@ -55,6 +56,11 @@ IMPL_HEAD_RE = re.compile(
 
 def probe_tree_sitter(path: Path, source: str) -> Dict[str, object]:
     started = time.perf_counter()
+    native_probe = probe_rust_file_native(path)
+    if native_probe:
+        native_probe["latency_ms"] = round((time.perf_counter() - started) * 1000, 3)
+        return native_probe
+
     parser, diagnostics = load_rust_parser()
     if parser is None:
         return unavailable_payload(path, diagnostics, started)

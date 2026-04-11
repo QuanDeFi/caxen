@@ -6,10 +6,12 @@ from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from common.native_tool import build_bm25_index, native_worker_available, query_bm25_index
+from common.query_manifest import update_query_manifest
 from symbols.indexer import stable_id, timestamp_now
 
 
-SCHEMA_VERSION = "0.1.0"
+SCHEMA_VERSION = "0.2.0"
 TEXT_EXTENSIONS = {
     ".c",
     ".cc",
@@ -58,6 +60,26 @@ def build_search_index(
         sqlite_path.unlink()
     write_search_database(sqlite_path, documents)
 
+    documents_path = repo_output / "documents.jsonl"
+    write_documents_jsonl(documents_path, documents)
+
+    bm25_artifact = {
+        "available": False,
+        "built": False,
+    }
+    tantivy_dir = repo_output / "tantivy"
+    if native_worker_available():
+        try:
+            bm25_artifact = build_bm25_index(documents_path, tantivy_dir)
+            bm25_artifact["available"] = True
+            bm25_artifact["built"] = True
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            bm25_artifact = {
+                "available": True,
+                "built": False,
+                "reason": str(exc),
+            }
+
     counts = Counter(document["kind"] for document in documents)
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -65,7 +87,10 @@ def build_search_index(
         "generated_at": timestamp_now(),
         "artifacts": {
             "sqlite": "search.sqlite3",
+            "documents_jsonl": "documents.jsonl",
+            "tantivy": "tantivy" if bm25_artifact.get("built") else None,
         },
+        "bm25": bm25_artifact,
         "summary": {
             "documents": len(documents),
             "document_kind_counts": [
@@ -80,6 +105,21 @@ def build_search_index(
     with (repo_output / "search_manifest.json").open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=False)
         handle.write("\n")
+    update_query_manifest(
+        parsed_root,
+        repo_name,
+        artifacts={
+            "search_sqlite": "data/search/{repo}/search.sqlite3".format(repo=repo_name),
+            "search_documents_jsonl": "data/search/{repo}/documents.jsonl".format(repo=repo_name),
+            "search_tantivy": "data/search/{repo}/tantivy".format(repo=repo_name) if bm25_artifact.get("built") else None,
+        },
+        features={
+            "bm25_default": bool(bm25_artifact.get("built")),
+        },
+        build={
+            "bm25": bm25_artifact,
+        },
+    )
     return payload
 
 
@@ -92,9 +132,18 @@ def search_documents(
     kinds: Sequence[str] = (),
 ) -> List[Dict[str, object]]:
     sqlite_path = search_root / repo_name / "search.sqlite3"
+    tantivy_dir = search_root / repo_name / "tantivy"
     tokens = tokenize(query)
-    if not tokens or not sqlite_path.exists():
+    if not tokens or (not sqlite_path.exists() and not tantivy_dir.exists()):
         return []
+
+    if tantivy_dir.exists():
+        try:
+            results = query_bm25_index(tantivy_dir, query, limit=limit, kinds=kinds)
+            if results:
+                return results
+        except Exception:
+            pass
 
     with sqlite3.connect(sqlite_path) as connection:
         connection.row_factory = sqlite3.Row
@@ -413,6 +462,13 @@ def summarize_preview(value: str, limit: int = 180) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: limit - 3].rstrip() + "..."
+
+
+def write_documents_jsonl(path: Path, documents: Sequence[Dict[str, object]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for document in documents:
+            json.dump(document, handle, sort_keys=False)
+            handle.write("\n")
 
 
 def tokenize(query: str) -> List[str]:

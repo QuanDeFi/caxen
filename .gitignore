@@ -19,6 +19,8 @@ __pycache__/
 # Build artifacts
 build/
 dist/
+repo-analysis/native/target/
+repo-analysis/native/.build_failed.json
 
 # Generated analysis outputs
 repo-analysis/data/raw/**

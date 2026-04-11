@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
@@ -13,25 +13,38 @@ if str(SRC_ROOT) not in sys.path:
 
 from agents.toolkit import (
     adjacent_symbols,
+    callers_of,
     compare_repos,
+    execute_graph_query,
     find_datasources,
     find_decoders,
     find_parsers,
     find_runtime_handlers,
     find_symbol,
+    path_between,
+    plan_query,
     prepare_context,
+    prepare_answer_bundle,
+    reads_of,
     repo_overview,
+    retrieve_iterative,
+    score_external_answers,
     summarize_path,
+    statement_slice,
     trace_calls,
     where_defined,
+    writes_of,
     who_imports,
 )
 from adapters.carbon.adapter import inventory as inventory_carbon
 from adapters.yellowstone_vixen.adapter import inventory as inventory_yellowstone_vixen
 from common.inventory import write_inventory
+from common.native_tool import probe_native_worker
+from common.query_manifest import update_query_manifest
 from embeddings.indexer import build_embedding_index, query_embedding_index
-from evaluation.harness import run_benchmarks
+from evaluation.harness import export_benchmark_prompts, run_benchmarks, score_answer_bundles
 from graph.builder import build_graph_artifact, write_graph_artifact
+from graph.store import write_graph_database
 from search.indexer import build_search_index
 from summaries.builder import build_summary_artifacts, write_summary_artifacts
 from symbols.indexer import build_symbol_index, write_symbol_index
@@ -238,6 +251,127 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_context_cmd.add_argument("--repo", choices=sorted(ADAPTERS))
     prepare_context_cmd.add_argument("task")
     prepare_context_cmd.add_argument("--limit", type=int, default=8)
+
+    graph_query_cmd = subparsers.add_parser("graph-query", help="Execute a graph query request.")
+    graph_query_cmd.add_argument("--search-root", required=True)
+    graph_query_cmd.add_argument("--parsed-root", required=True)
+    graph_query_cmd.add_argument("--graph-root", required=True)
+    graph_query_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    graph_query_cmd.add_argument("--request-file")
+    graph_query_cmd.add_argument("--request-json")
+    graph_query_cmd.add_argument("--operation")
+    graph_query_cmd.add_argument("--seed")
+    graph_query_cmd.add_argument("--target")
+    graph_query_cmd.add_argument("--edge-type", action="append")
+    graph_query_cmd.add_argument("--direction", choices=("incoming", "outgoing", "both"))
+    graph_query_cmd.add_argument("--depth", type=int, default=1)
+    graph_query_cmd.add_argument("--node-kind", action="append")
+    graph_query_cmd.add_argument("--limit", type=int, default=20)
+    graph_query_cmd.add_argument("--window", type=int, default=8)
+
+    path_between_cmd = subparsers.add_parser("path-between", help="Find graph paths between two symbols or files.")
+    path_between_cmd.add_argument("--search-root", required=True)
+    path_between_cmd.add_argument("--parsed-root", required=True)
+    path_between_cmd.add_argument("--graph-root", required=True)
+    path_between_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    path_between_cmd.add_argument("source")
+    path_between_cmd.add_argument("target")
+    path_between_cmd.add_argument("--edge-type", action="append")
+    path_between_cmd.add_argument("--direction", choices=("incoming", "outgoing", "both"), default="both")
+    path_between_cmd.add_argument("--limit", type=int, default=5)
+
+    statement_slice_cmd = subparsers.add_parser("statement-slice", help="Show a statement-level slice for a symbol.")
+    statement_slice_cmd.add_argument("--search-root", required=True)
+    statement_slice_cmd.add_argument("--parsed-root", required=True)
+    statement_slice_cmd.add_argument("--graph-root", required=True)
+    statement_slice_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    statement_slice_cmd.add_argument("symbol")
+    statement_slice_cmd.add_argument("--limit", type=int, default=20)
+    statement_slice_cmd.add_argument("--window", type=int, default=8)
+
+    callers_of_cmd = subparsers.add_parser("callers-of", help="List callers of a symbol.")
+    callers_of_cmd.add_argument("--search-root", required=True)
+    callers_of_cmd.add_argument("--parsed-root", required=True)
+    callers_of_cmd.add_argument("--graph-root", required=True)
+    callers_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    callers_of_cmd.add_argument("symbol")
+    callers_of_cmd.add_argument("--limit", type=int, default=20)
+
+    callees_of_cmd = subparsers.add_parser("callees-of", help="List callees of a symbol.")
+    callees_of_cmd.add_argument("--search-root", required=True)
+    callees_of_cmd.add_argument("--parsed-root", required=True)
+    callees_of_cmd.add_argument("--graph-root", required=True)
+    callees_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    callees_of_cmd.add_argument("symbol")
+    callees_of_cmd.add_argument("--limit", type=int, default=20)
+
+    reads_of_cmd = subparsers.add_parser("reads-of", help="List read relationships for a symbol.")
+    reads_of_cmd.add_argument("--search-root", required=True)
+    reads_of_cmd.add_argument("--parsed-root", required=True)
+    reads_of_cmd.add_argument("--graph-root", required=True)
+    reads_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    reads_of_cmd.add_argument("symbol")
+    reads_of_cmd.add_argument("--limit", type=int, default=20)
+
+    writes_of_cmd = subparsers.add_parser("writes-of", help="List write relationships for a symbol.")
+    writes_of_cmd.add_argument("--search-root", required=True)
+    writes_of_cmd.add_argument("--parsed-root", required=True)
+    writes_of_cmd.add_argument("--graph-root", required=True)
+    writes_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    writes_of_cmd.add_argument("symbol")
+    writes_of_cmd.add_argument("--limit", type=int, default=20)
+
+    plan_query_cmd = subparsers.add_parser("plan-query", help="Plan the retrieval recipe for a task.")
+    plan_query_cmd.add_argument("--search-root", required=True)
+    plan_query_cmd.add_argument("--graph-root", required=True)
+    plan_query_cmd.add_argument("--parsed-root", required=True)
+    plan_query_cmd.add_argument("--summary-root")
+    plan_query_cmd.add_argument("--repo", choices=sorted(ADAPTERS))
+    plan_query_cmd.add_argument("task")
+    plan_query_cmd.add_argument("--limit", type=int, default=8)
+
+    prepare_bundle_cmd = subparsers.add_parser("prepare-answer-bundle", help="Prepare an answer bundle for an external LLM consumer.")
+    prepare_bundle_cmd.add_argument("--search-root", required=True)
+    prepare_bundle_cmd.add_argument("--summary-root", required=True)
+    prepare_bundle_cmd.add_argument("--graph-root", required=True)
+    prepare_bundle_cmd.add_argument("--parsed-root", required=True)
+    prepare_bundle_cmd.add_argument("--repo", choices=sorted(ADAPTERS))
+    prepare_bundle_cmd.add_argument("task")
+    prepare_bundle_cmd.add_argument("--hint", action="append")
+    prepare_bundle_cmd.add_argument("--limit", type=int, default=8)
+
+    retrieve_iterative_cmd = subparsers.add_parser("retrieve-iterative", help="Refine retrieval using a prior answer bundle and new hints.")
+    retrieve_iterative_cmd.add_argument("--search-root", required=True)
+    retrieve_iterative_cmd.add_argument("--summary-root", required=True)
+    retrieve_iterative_cmd.add_argument("--graph-root", required=True)
+    retrieve_iterative_cmd.add_argument("--parsed-root", required=True)
+    retrieve_iterative_cmd.add_argument("--repo", choices=sorted(ADAPTERS))
+    retrieve_iterative_cmd.add_argument("task")
+    retrieve_iterative_cmd.add_argument("--prior-bundle")
+    retrieve_iterative_cmd.add_argument("--hint", action="append")
+    retrieve_iterative_cmd.add_argument("--limit", type=int, default=8)
+
+    export_prompts_cmd = subparsers.add_parser("export-benchmark-prompts", help="Export deterministic benchmark prompt packages.")
+    export_prompts_cmd.add_argument("--search-root", required=True)
+    export_prompts_cmd.add_argument("--graph-root", required=True)
+    export_prompts_cmd.add_argument("--parsed-root", required=True)
+    export_prompts_cmd.add_argument("--summary-root", required=True)
+    export_prompts_cmd.add_argument("--eval-root", required=True)
+    export_prompts_cmd.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
+    export_prompts_cmd.add_argument("--limit", type=int, default=8)
+
+    score_bundles_cmd = subparsers.add_parser("score-answer-bundles", help="Score whether prepared answer bundles are sufficient.")
+    score_bundles_cmd.add_argument("--search-root", required=True)
+    score_bundles_cmd.add_argument("--graph-root", required=True)
+    score_bundles_cmd.add_argument("--parsed-root", required=True)
+    score_bundles_cmd.add_argument("--summary-root", required=True)
+    score_bundles_cmd.add_argument("--eval-root", required=True)
+    score_bundles_cmd.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
+    score_bundles_cmd.add_argument("--limit", type=int, default=8)
+
+    score_external_cmd = subparsers.add_parser("score-external-answers", help="Score externally produced answers against benchmark expectations.")
+    score_external_cmd.add_argument("--eval-root", required=True)
+    score_external_cmd.add_argument("--answers-path", required=True)
     return parser
 
 
@@ -275,6 +409,7 @@ def handle_build_index(args: argparse.Namespace) -> int:
         if not repo_root.exists():
             raise FileNotFoundError(f"Missing repo root: {repo_root}")
 
+        native_worker = probe_native_worker()
         symbol_index = build_symbol_index(
             repo_name,
             repo_root,
@@ -287,6 +422,30 @@ def handle_build_index(args: argparse.Namespace) -> int:
         write_symbol_database(parsed_root, repo_name, symbol_index)
         write_symbol_parquet_bundle(parsed_root, repo_name, symbol_index)
         write_graph_artifact(graph_root, repo_name, graph_artifact)
+        graph_db_path = write_graph_database(graph_root, repo_name, graph_artifact)
+        update_query_manifest(
+            parsed_root,
+            repo_name,
+            artifacts={
+                "symbols_json": f"data/parsed/{repo_name}/symbols.json",
+                "symbols_sqlite3": f"data/parsed/{repo_name}/symbols.sqlite3",
+                "graph_json": f"data/graph/{repo_name}/graph.json",
+                "graph_sqlite3": f"data/graph/{repo_name}/graph.sqlite3",
+            },
+            features={
+                "graph_sqlite": True,
+                "iterative_retrieval": True,
+                "answer_bundle": True,
+            },
+            build={
+                "parser": symbol_index["parser"],
+                "primary_parser_backends": symbol_index.get("primary_parser_backends", []),
+                "parser_backends": symbol_index.get("parser_backends", {}),
+                "native_worker": native_worker,
+                "path_prefixes": list(path_prefixes),
+                "graph_database": graph_db_path.name,
+            },
+        )
 
         print(f"Wrote parsed symbols for {repo_name} to {parsed_root / repo_name}")
         print(f"Wrote graph artifact for {repo_name} to {graph_root / repo_name}")
@@ -346,6 +505,35 @@ def handle_run_benchmarks(args: argparse.Namespace) -> int:
     )
     print_json(payload)
     return 0
+
+
+def handle_graph_query(args: argparse.Namespace) -> int:
+    request: Dict[str, object]
+    if args.request_file:
+        request = json.loads(Path(args.request_file).read_text(encoding="utf-8"))
+    elif args.request_json:
+        request = json.loads(args.request_json)
+    else:
+        request = {
+            "operation": args.operation or "neighbors",
+            "seed": args.seed,
+            "target": args.target,
+            "edge_types": list(args.edge_type or ()),
+            "direction": args.direction or "both",
+            "depth": args.depth,
+            "node_kinds": list(args.node_kind or ()),
+            "limit": args.limit,
+            "window": args.window,
+        }
+    return print_json(
+        execute_graph_query(
+            Path(args.search_root).resolve(),
+            Path(args.parsed_root).resolve(),
+            Path(args.graph_root).resolve(),
+            args.repo,
+            request,
+        )
+    )
 
 
 def print_json(payload: object) -> int:
@@ -458,6 +646,151 @@ def main(argv: Optional[List[str]] = None) -> int:
                 args.task,
                 repo_name=args.repo,
                 limit=args.limit,
+            )
+        )
+    if args.command == "graph-query":
+        return handle_graph_query(args)
+    if args.command == "path-between":
+        return print_json(
+            path_between(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.graph_root).resolve(),
+                args.repo,
+                args.source,
+                args.target,
+                limit=args.limit,
+                edge_types=tuple(args.edge_type or ()),
+                direction=args.direction,
+            )
+        )
+    if args.command == "statement-slice":
+        return print_json(
+            statement_slice(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.graph_root).resolve(),
+                args.repo,
+                args.symbol,
+                limit=args.limit,
+                window=args.window,
+            )
+        )
+    if args.command == "callers-of":
+        return print_json(
+            callers_of(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.graph_root).resolve(),
+                args.repo,
+                args.symbol,
+                limit=args.limit,
+            )
+        )
+    if args.command == "callees-of":
+        return print_json(
+            callees_of(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.graph_root).resolve(),
+                args.repo,
+                args.symbol,
+                limit=args.limit,
+            )
+        )
+    if args.command == "reads-of":
+        return print_json(
+            reads_of(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.graph_root).resolve(),
+                args.repo,
+                args.symbol,
+                limit=args.limit,
+            )
+        )
+    if args.command == "writes-of":
+        return print_json(
+            writes_of(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.graph_root).resolve(),
+                args.repo,
+                args.symbol,
+                limit=args.limit,
+            )
+        )
+    if args.command == "plan-query":
+        return print_json(
+            plan_query(
+                Path(args.search_root).resolve(),
+                Path(args.graph_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                args.task,
+                repo_name=args.repo,
+                summary_root=Path(args.summary_root).resolve() if args.summary_root else None,
+                limit=args.limit,
+            )
+        )
+    if args.command == "prepare-answer-bundle":
+        return print_json(
+            prepare_answer_bundle(
+                Path(args.search_root).resolve(),
+                Path(args.summary_root).resolve(),
+                Path(args.graph_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                args.task,
+                repo_name=args.repo,
+                limit=args.limit,
+                refinement_hints=tuple(args.hint or ()),
+            )
+        )
+    if args.command == "retrieve-iterative":
+        prior_bundle = None
+        if args.prior_bundle:
+            prior_bundle = json.loads(Path(args.prior_bundle).read_text(encoding="utf-8"))
+        return print_json(
+            retrieve_iterative(
+                Path(args.search_root).resolve(),
+                Path(args.summary_root).resolve(),
+                Path(args.graph_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                args.task,
+                repo_name=args.repo,
+                limit=args.limit,
+                prior_bundle=prior_bundle,
+                refinement_hints=tuple(args.hint or ()),
+            )
+        )
+    if args.command == "export-benchmark-prompts":
+        return print_json(
+            export_benchmark_prompts(
+                Path(args.search_root).resolve(),
+                Path(args.graph_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.summary_root).resolve(),
+                Path(args.eval_root).resolve(),
+                repos=tuple(args.repo or ()),
+                limit=args.limit,
+            )
+        )
+    if args.command == "score-answer-bundles":
+        return print_json(
+            score_answer_bundles(
+                Path(args.search_root).resolve(),
+                Path(args.graph_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.summary_root).resolve(),
+                Path(args.eval_root).resolve(),
+                repos=tuple(args.repo or ()),
+                limit=args.limit,
+            )
+        )
+    if args.command == "score-external-answers":
+        return print_json(
+            score_external_answers(
+                Path(args.eval_root).resolve(),
+                Path(args.answers_path).resolve(),
             )
         )
 

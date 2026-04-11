@@ -19,16 +19,18 @@ The implemented slice in this repository now covers the current Phase 0-6 founda
 - first Rust-oriented parser ingestion
 - deterministic symbol, SQLite, and graph artifacts for scoped Rust source paths
 - first semantic graph edges for imports, impls, calls, and uses
-- SQLite FTS-based lexical search artifacts over repo/file/symbol documents
+- a native Rust helper for tree-sitter-backed inspection and local BM25 index builds
+- SQLite metadata plus Tantivy BM25 lexical search artifacts over repo/file/symbol documents
 - `rustc` AST probe metadata and persisted statement artifacts
 - statement-level graph nodes with first `CONTROL_FLOW`, `DATA_FLOW`, `DEPENDENCE`, `READS`, `WRITES`, and `REFS` edges
 - backend-preferred parser fusion that uses `rust-analyzer` document symbols or `tree-sitter` symbols when available and records the chosen primary backend per file
 - workspace-aware cross-crate resolution using Cargo metadata with dependency-alias support
 - interprocedural semantic summaries propagated across direct call chains
+- canonical `graph.sqlite3` storage and `query_manifest.json` build metadata
 - a provider-based embedding sidecar over indexed search documents with an OpenAI-backed path when configured
 - deterministic project/directory/file/symbol summaries
-- agent-facing CLI operations for repo overview, symbol lookup, graph queries, call tracing, and context prep
-- a broader benchmark harness for lexical, graph, rerank, summary-aware, vector, and selective retrieval modes with answer-quality scoring
+- graph-query, retrieval-planning, iterative retrieval, and answer-bundle CLI operations
+- a broader benchmark harness for lexical, graph, rerank, summary-aware, vector, and selective retrieval modes with answer-quality, bundle-sufficiency, prompt-export, and offline answer scoring
 
 The remaining work is now about fidelity and coverage rather than missing subsystems: deeper compiler/LSP-backed resolution, stronger interprocedural precision, broader benchmark coverage, and wider optional-backend availability across environments.
 
@@ -68,13 +70,17 @@ The remaining work is now about fidelity and coverage rather than missing subsys
 - `data/parsed/<repo>/symbols.json`
 - `data/parsed/<repo>/symbols.sqlite3`
 - `data/parsed/<repo>/parquet_status.json`
+- `data/parsed/<repo>/query_manifest.json`
 - `data/graph/<repo>/graph.json`
+- `data/graph/<repo>/graph.sqlite3`
 
 When `pyarrow` is available, `build_index.sh` also writes parquet tables for files, symbols, imports, and references under `data/parsed/<repo>/`.
 
 `build_search.sh` writes lexical search artifacts to:
 
 - `data/search/<repo>/search.sqlite3`
+- `data/search/<repo>/documents.jsonl`
+- `data/search/<repo>/tantivy/`
 - `data/search/<repo>/search_manifest.json`
 
 `build_embeddings.sh` writes the optional embedding sidecar to:
@@ -110,3 +116,16 @@ The CLI now exposes:
 - `find-runtime-handlers`
 - `summarize-path`
 - `prepare-context`
+- `graph-query`
+- `path-between`
+- `statement-slice`
+- `callers-of`
+- `callees-of`
+- `reads-of`
+- `writes-of`
+- `plan-query`
+- `prepare-answer-bundle`
+- `retrieve-iterative`
+- `export-benchmark-prompts`
+- `score-answer-bundles`
+- `score-external-answers`

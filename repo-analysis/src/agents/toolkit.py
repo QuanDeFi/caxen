@@ -4,10 +4,26 @@ import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
-from graph.query import adjacent_symbols as graph_adjacent_symbols
-from graph.query import where_defined as graph_where_defined
-from graph.query import who_imports as graph_who_imports
-from retrieval.engine import graph_indexes, retrieve_context
+from graph.query import (
+    adjacent_symbols as graph_adjacent_symbols,
+    callers_of as graph_callers_of,
+    callees_of as graph_callees_of,
+    execute_graph_query as execute_graph_request,
+    path_between as graph_path_between,
+    reads_of as graph_reads_of,
+    refs_of as graph_refs_of,
+    statement_slice as graph_statement_slice,
+    symbol_summary as graph_symbol_summary,
+    where_defined as graph_where_defined,
+    who_imports as graph_who_imports,
+    writes_of as graph_writes_of,
+)
+from retrieval.engine import retrieve_context
+from retrieval.planner import (
+    plan_query as build_query_plan,
+    prepare_answer_bundle as build_answer_bundle,
+    retrieve_iterative as build_iterative_bundle,
+)
 from search.indexer import list_documents, search_documents
 from summaries.builder import load_summary_artifacts
 
@@ -41,39 +57,21 @@ def trace_calls(
     *,
     limit: int = 10,
 ) -> Dict[str, object]:
-    resolved = resolve_symbol(search_root, parsed_root, repo_name, symbol_query)
-    if not resolved:
+    resolved = where_defined(search_root, parsed_root, repo_name, symbol_query, limit=1)
+    if not resolved["matches"]:
         return {
             "repo": repo_name,
             "query": symbol_query,
             "error": "symbol not found",
         }
-
-    graph = load_json(graph_root / repo_name / "graph.json")
-    node_by_id, outgoing, incoming = graph_indexes(graph)
-
-    callers = []
-    callees = []
-    for edge in incoming.get(resolved["symbol_id"], []):
-        if edge["type"] != "CALLS":
-            continue
-        caller = node_by_id.get(edge["from"])
-        if caller:
-            callers.append(describe_node(caller, edge))
-
-    for edge in outgoing.get(resolved["symbol_id"], []):
-        if edge["type"] != "CALLS":
-            continue
-        callee = node_by_id.get(edge["to"])
-        if callee:
-            callees.append(describe_node(callee, edge))
-
+    callers = callers_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+    callees = callees_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
     return {
         "repo": repo_name,
         "query": symbol_query,
-        "resolved_symbol": resolved,
-        "callers": callers[:limit],
-        "callees": callees[:limit],
+        "resolved_symbol": resolved["matches"][0],
+        "callers": callers["neighbors"],
+        "callees": callees["neighbors"],
     }
 
 
@@ -89,29 +87,25 @@ def compare_repos(
 ) -> Dict[str, object]:
     comparisons = []
     for repo_name in repos:
-        overview = repo_overview(summary_root, repo_name)
-        context = retrieve_context(
+        bundle = prepare_answer_bundle(
             search_root,
+            summary_root,
             graph_root,
             parsed_root,
-            repo_name,
             query,
-            summary_root=summary_root,
+            repo_name=repo_name,
             limit=limit,
-            use_summaries=True,
         )
+        repo_bundle = bundle["bundles"][0]
         comparisons.append(
             {
                 "repo": repo_name,
-                "focus": overview["project"]["focus"],
-                "top_context": context["selected_context"],
+                "focus": repo_bundle["focus"],
+                "top_context": repo_bundle["selected_context"],
+                "bundle_summary": repo_bundle["bundle_summary"],
             }
         )
-
-    return {
-        "query": query,
-        "comparisons": comparisons,
-    }
+    return {"query": query, "comparisons": comparisons}
 
 
 def find_parsers(search_root: Path, repo_name: str, *, limit: int = 10) -> Dict[str, object]:
@@ -147,17 +141,14 @@ def summarize_path(summary_root: Path, repo_name: str, path: str) -> Dict[str, o
     for file_summary in summaries["files"]:
         if file_summary["path"] == path:
             return {"repo": repo_name, "path": path, "kind": "file", "summary": file_summary}
-
     for directory_summary in summaries["directories"]:
         if directory_summary["path"] == path:
             return {"repo": repo_name, "path": path, "kind": "directory", "summary": directory_summary}
-
     matching_prefix = None
     for directory_summary in summaries["directories"]:
         if path.startswith(f"{directory_summary['path']}/") or path == directory_summary["path"]:
             if matching_prefix is None or len(directory_summary["path"]) > len(matching_prefix["path"]):
                 matching_prefix = directory_summary
-
     return {
         "repo": repo_name,
         "path": path,
@@ -176,26 +167,23 @@ def prepare_context(
     repo_name: Optional[str] = None,
     limit: int = 8,
 ) -> Dict[str, object]:
-    repos = (repo_name,) if repo_name else DEFAULT_REPOS
+    bundle = prepare_answer_bundle(
+        search_root,
+        summary_root,
+        graph_root,
+        parsed_root,
+        task,
+        repo_name=repo_name,
+        limit=limit,
+    )
     contexts = []
-    for current_repo in repos:
-        context = retrieve_context(
-            search_root,
-            graph_root,
-            parsed_root,
-            current_repo,
-            task,
-            summary_root=summary_root,
-            limit=limit,
-            use_summaries=True,
-        )
-        overview = repo_overview(summary_root, current_repo)
+    for repo_bundle in bundle["bundles"]:
         contexts.append(
             {
-                "repo": current_repo,
-                "focus": overview["project"]["focus"],
-                "project_summary": overview["project"]["summary"],
-                "selected_context": context["selected_context"],
+                "repo": repo_bundle["repo"],
+                "focus": repo_bundle["focus"],
+                "project_summary": repo_bundle["project_summary"],
+                "selected_context": repo_bundle["selected_context"],
             }
         )
     return {
@@ -250,6 +238,204 @@ def adjacent_symbols(
     )
 
 
+def callers_of(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 20,
+) -> Dict[str, object]:
+    return graph_callers_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+
+
+def callees_of(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 20,
+) -> Dict[str, object]:
+    return graph_callees_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+
+
+def reads_of(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 20,
+) -> Dict[str, object]:
+    return graph_reads_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+
+
+def writes_of(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 20,
+) -> Dict[str, object]:
+    return graph_writes_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+
+
+def refs_of(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 20,
+) -> Dict[str, object]:
+    return graph_refs_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+
+
+def statement_slice(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 20,
+    window: int = 8,
+) -> Dict[str, object]:
+    return graph_statement_slice(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit, window=window)
+
+
+def path_between(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    source_query: str,
+    target_query: str,
+    *,
+    limit: int = 5,
+    edge_types: Sequence[str] = (),
+    direction: str = "both",
+) -> Dict[str, object]:
+    return graph_path_between(
+        search_root,
+        parsed_root,
+        graph_root,
+        repo_name,
+        source_query,
+        target_query,
+        limit=limit,
+        edge_types=edge_types,
+        direction=direction,
+    )
+
+
+def execute_graph_query(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    request: Dict[str, object],
+) -> Dict[str, object]:
+    return execute_graph_request(search_root, parsed_root, graph_root, repo_name, request)
+
+
+def symbol_summary(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 5,
+) -> Dict[str, object]:
+    return graph_symbol_summary(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+
+
+def plan_query(
+    search_root: Path,
+    graph_root: Path,
+    parsed_root: Path,
+    task: str,
+    *,
+    repo_name: Optional[str] = None,
+    summary_root: Optional[Path] = None,
+    limit: int = 8,
+) -> Dict[str, object]:
+    return build_query_plan(
+        search_root,
+        graph_root,
+        parsed_root,
+        task,
+        repo_name=repo_name,
+        summary_root=summary_root,
+        limit=limit,
+    )
+
+
+def prepare_answer_bundle(
+    search_root: Path,
+    summary_root: Path,
+    graph_root: Path,
+    parsed_root: Path,
+    task: str,
+    *,
+    repo_name: Optional[str] = None,
+    limit: int = 8,
+    refinement_hints: Sequence[str] = (),
+) -> Dict[str, object]:
+    return build_answer_bundle(
+        search_root,
+        summary_root,
+        graph_root,
+        parsed_root,
+        task,
+        repo_name=repo_name,
+        limit=limit,
+        refinement_hints=refinement_hints,
+    )
+
+
+def retrieve_iterative(
+    search_root: Path,
+    summary_root: Path,
+    graph_root: Path,
+    parsed_root: Path,
+    task: str,
+    *,
+    repo_name: Optional[str] = None,
+    limit: int = 8,
+    prior_bundle: Optional[Dict[str, object]] = None,
+    refinement_hints: Sequence[str] = (),
+) -> Dict[str, object]:
+    return build_iterative_bundle(
+        search_root,
+        summary_root,
+        graph_root,
+        parsed_root,
+        task,
+        repo_name=repo_name,
+        limit=limit,
+        prior_bundle=prior_bundle,
+        refinement_hints=refinement_hints,
+    )
+
+
+def score_external_answers(
+    eval_root: Path,
+    answers_path: Path,
+) -> Dict[str, object]:
+    from evaluation.harness import score_external_answers as score_external_answers_payload
+
+    return score_external_answers_payload(eval_root, answers_path)
+
+
 def themed_results(
     search_root: Path,
     repo_name: str,
@@ -274,44 +460,6 @@ def themed_results(
     if filtered:
         return filtered[:limit]
     return list_documents(search_root, repo_name, limit=limit, kinds=("directory", "file"))
-
-
-def resolve_symbol(
-    search_root: Path,
-    parsed_root: Path,
-    repo_name: str,
-    symbol_query: str,
-) -> Optional[Dict[str, object]]:
-    exact_results = search_documents(search_root, repo_name, symbol_query, limit=10, kinds=("symbol",))
-    if exact_results:
-        normalized_query = symbol_query.lower()
-        for result in exact_results:
-            if str(result.get("qualified_name") or "").lower() == normalized_query:
-                return load_symbol(parsed_root, repo_name, result["symbol_id"])
-        for result in exact_results:
-            if str(result.get("name") or "").lower() == normalized_query:
-                return load_symbol(parsed_root, repo_name, result["symbol_id"])
-        return load_symbol(parsed_root, repo_name, exact_results[0]["symbol_id"])
-    return None
-
-
-def load_symbol(parsed_root: Path, repo_name: str, symbol_id: str) -> Optional[Dict[str, object]]:
-    payload = load_json(parsed_root / repo_name / "symbols.json")
-    for symbol in payload.get("symbols", []):
-        if symbol["symbol_id"] == symbol_id:
-            return symbol
-    return None
-
-
-def describe_node(node: Dict[str, object], edge: Dict[str, object]) -> Dict[str, object]:
-    return {
-        "kind": node["kind"],
-        "name": node.get("name"),
-        "qualified_name": node.get("qualified_name"),
-        "path": node.get("path"),
-        "edge": edge["type"],
-        "metadata": edge.get("metadata", {}),
-    }
 
 
 def load_json(path: Path) -> Dict[str, object]:

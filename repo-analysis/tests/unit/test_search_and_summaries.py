@@ -9,10 +9,24 @@ SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from agents.toolkit import find_symbol, prepare_context, repo_overview, summarize_path, trace_calls
+from agents.toolkit import (
+    execute_graph_query,
+    find_symbol,
+    path_between,
+    plan_query,
+    prepare_answer_bundle,
+    prepare_context,
+    repo_overview,
+    retrieve_iterative,
+    statement_slice,
+    summarize_path,
+    trace_calls,
+)
+from common.query_manifest import load_query_manifest
 from embeddings.indexer import build_embedding_index, query_embedding_index
-from evaluation.harness import run_benchmarks
+from evaluation.harness import export_benchmark_prompts, run_benchmarks, score_answer_bundles, score_external_answers
 from graph.builder import build_graph_artifact, write_graph_artifact
+from graph.store import write_graph_database
 from retrieval.engine import retrieve_context
 from search.indexer import build_search_index, search_documents
 from summaries.builder import build_summary_artifacts, write_summary_artifacts
@@ -95,6 +109,7 @@ def seed_demo_workspace(root: Path) -> dict[str, Path]:
     write_symbol_index(parsed_root, "demo", symbol_index)
     graph = build_graph_artifact(symbol_index)
     write_graph_artifact(graph_root, "demo", graph)
+    write_graph_database(graph_root, "demo", graph)
     build_search_index("demo", repo_root, raw_root, parsed_root, search_root)
     build_embedding_index(search_root, "demo")
     summary_artifacts = build_summary_artifacts("demo", raw_root, parsed_root, graph_root)
@@ -119,15 +134,18 @@ class SearchAndSummaryTest(unittest.TestCase):
 
             self.assertGreater(len(results), 0)
             self.assertTrue(any(item["name"] == "helper" for item in symbol_hits))
+            self.assertTrue((paths["search_root"] / "demo" / "tantivy").exists())
 
     def test_parser_probe_and_embedding_sidecar_are_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = seed_demo_workspace(Path(tmpdir))
             symbols = json.loads((paths["parsed_root"] / "demo" / "symbols.json").read_text(encoding="utf-8"))
+            query_manifest = load_query_manifest(paths["parsed_root"], "demo")
 
             self.assertIn("parser_backends", symbols)
             self.assertTrue(symbols["parser_backends"]["rustc_ast_probe"]["available"])
             self.assertGreater(symbols["summary"]["statements"], 0)
+            self.assertIn("search_sqlite", query_manifest["artifacts"])
 
             embedding_results = query_embedding_index(paths["search_root"], "demo", "helper answer", limit=5)
             self.assertGreater(len(embedding_results), 0)
@@ -221,6 +239,146 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertGreater(run["answer_quality"]["score"], 0.5)
             self.assertIn("avg_answer_score", payload["summary"]["modes"][0])
             self.assertTrue((eval_root / "benchmarks.json").exists())
+
+    def test_graph_query_and_bundle_planner_return_deterministic_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = seed_demo_workspace(Path(tmpdir))
+
+            neighbors = execute_graph_query(
+                paths["search_root"],
+                paths["parsed_root"],
+                paths["graph_root"],
+                "demo",
+                {
+                    "operation": "callers_of",
+                    "seed": "helper",
+                    "limit": 5,
+                },
+            )
+            self.assertEqual(neighbors["operation"], "callers_of")
+            self.assertTrue(any(item["name"] == "answer" for item in neighbors["results"]))
+
+            slice_payload = statement_slice(
+                paths["search_root"],
+                paths["parsed_root"],
+                paths["graph_root"],
+                "demo",
+                "answer",
+                limit=5,
+            )
+            self.assertGreater(len(slice_payload["statements"]), 0)
+            self.assertTrue(any(item["calls"] for item in slice_payload["statements"]))
+
+            path_payload = path_between(
+                paths["search_root"],
+                paths["parsed_root"],
+                paths["graph_root"],
+                "demo",
+                "answer",
+                "helper",
+                limit=3,
+            )
+            self.assertGreater(len(path_payload["paths"]), 0)
+            self.assertEqual(path_payload["paths"][0]["target"]["name"], "helper")
+
+            plan_payload = plan_query(
+                paths["search_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                "find the helper implementation",
+                repo_name="demo",
+                summary_root=paths["summary_root"],
+                limit=5,
+            )
+            self.assertEqual(plan_payload["plans"][0]["repo"], "demo")
+
+            bundle = prepare_answer_bundle(
+                paths["search_root"],
+                paths["summary_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                "find the helper call path",
+                repo_name="demo",
+                limit=5,
+            )
+            repo_bundle = bundle["bundles"][0]
+            self.assertGreater(len(repo_bundle["evidence"]), 0)
+            self.assertTrue(all(item["provenance"]["path"] for item in repo_bundle["evidence"]))
+
+            refined = retrieve_iterative(
+                paths["search_root"],
+                paths["summary_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                "find the helper call path",
+                repo_name="demo",
+                limit=5,
+                prior_bundle=bundle,
+                refinement_hints=("answer method",),
+            )
+            self.assertEqual(refined["iteration"]["iteration_count"], 1)
+            self.assertGreater(len(refined["bundles"][0]["selected_context"]), 0)
+
+    def test_prompt_export_and_bundle_scoring_are_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            paths = seed_demo_workspace(root)
+            eval_root = root / "eval"
+            benchmark = [
+                {
+                    "name": "demo_answer_bundle",
+                    "repo": "demo",
+                    "task_type": "symbol_lookup",
+                    "query": "answer helper",
+                    "expected_path": "src/lib.rs",
+                    "expected_name": "answer",
+                    "expected_terms": ["answer", "helper"],
+                }
+            ]
+
+            prompts = export_benchmark_prompts(
+                paths["search_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                paths["summary_root"],
+                eval_root,
+                repos=("demo",),
+                limit=5,
+                benchmarks=benchmark,
+            )
+            self.assertEqual(prompts["summary"]["exports"], 1)
+            self.assertTrue((eval_root / "prompt_exports" / "demo_answer_bundle.json").exists())
+
+            bundle_scores = score_answer_bundles(
+                paths["search_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                paths["summary_root"],
+                eval_root,
+                repos=("demo",),
+                limit=5,
+                benchmarks=benchmark,
+            )
+            self.assertGreater(bundle_scores["scores"][0]["score"], 0.5)
+
+            answers_path = eval_root / "answers.json"
+            answers_path.write_text(
+                json.dumps(
+                    {
+                        "answers": [
+                            {
+                                "name": "demo_answer_bundle",
+                                "answer": "The answer method in src/lib.rs calls helper.",
+                                "cited_paths": ["src/lib.rs"],
+                                "cited_symbols": ["answer", "helper"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            external_scores = score_external_answers(eval_root, answers_path, benchmarks=benchmark)
+            self.assertGreater(external_scores["scores"][0]["score"], 0.7)
 
 
 if __name__ == "__main__":

@@ -57,6 +57,8 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+            self.assertTrue((graph_root / "yellowstone-vixen" / "graph.sqlite3").exists())
+            self.assertTrue((parsed_root / "yellowstone-vixen" / "query_manifest.json").exists())
             subprocess.run(
                 [
                     "python3",
@@ -113,6 +115,7 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             )
 
             self.assertTrue((search_root / "yellowstone-vixen" / "search.sqlite3").exists())
+            self.assertTrue((search_root / "yellowstone-vixen" / "tantivy").exists())
             self.assertTrue((search_root / "yellowstone-vixen" / "embedding_index.json").exists())
             self.assertTrue((summary_root / "yellowstone-vixen" / "project.json").exists())
 
@@ -195,6 +198,30 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             self.assertEqual(context["contexts"][0]["repo"], "yellowstone-vixen")
             self.assertGreater(len(context["contexts"][0]["selected_context"]), 0)
 
+            plan_query = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "plan-query",
+                    "--search-root",
+                    str(search_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--summary-root",
+                    str(summary_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "proc macro attribute",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            plan_payload = json.loads(plan_query.stdout)
+            self.assertEqual(plan_payload["plans"][0]["repo"], "yellowstone-vixen")
+
             where_defined = subprocess.run(
                 [
                     "python3",
@@ -263,6 +290,130 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             imports_payload = json.loads(imports.stdout)
             self.assertGreaterEqual(len(imports_payload["matches"]), 1)
 
+            graph_query = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "graph-query",
+                    "--search-root",
+                    str(search_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "--operation",
+                    "callers_of",
+                    "--seed",
+                    "vixen",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            graph_payload = json.loads(graph_query.stdout)
+            self.assertEqual(graph_payload["operation"], "callers_of")
+
+            path_between = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "path-between",
+                    "--search-root",
+                    str(search_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "include_vixen_parser",
+                    "vixen_parser",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            path_payload = json.loads(path_between.stdout)
+            self.assertGreaterEqual(len(path_payload["paths"]), 1)
+
+            statement_slice = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "statement-slice",
+                    "--search-root",
+                    str(search_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "include_vixen_parser",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            statement_payload = json.loads(statement_slice.stdout)
+            self.assertGreaterEqual(len(statement_payload["statements"]), 1)
+
+            prepare_bundle = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "prepare-answer-bundle",
+                    "--search-root",
+                    str(search_root),
+                    "--summary-root",
+                    str(summary_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "proc macro attribute",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            bundle_payload = json.loads(prepare_bundle.stdout)
+            self.assertGreater(len(bundle_payload["bundles"][0]["evidence"]), 0)
+            eval_root.mkdir(parents=True, exist_ok=True)
+            (eval_root / "prior_bundle.json").write_text(json.dumps(bundle_payload), encoding="utf-8")
+
+            retrieve_iterative = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "retrieve-iterative",
+                    "--search-root",
+                    str(search_root),
+                    "--summary-root",
+                    str(summary_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "--prior-bundle",
+                    str(eval_root / "prior_bundle.json"),
+                    "--hint",
+                    "macro",
+                    "proc macro attribute",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            iterative_payload = json.loads(retrieve_iterative.stdout)
+            self.assertEqual(iterative_payload["iteration"]["iteration_count"], 1)
+
             benchmarks = subprocess.run(
                 [
                     "python3",
@@ -294,6 +445,91 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             self.assertIn("avg_answer_score", benchmark_payload["summary"]["modes"][0])
             self.assertIn("answer_quality", benchmark_payload["runs"][0])
             self.assertTrue((eval_root / "benchmarks.json").exists())
+            self.assertIn("consumer_readiness", benchmark_payload["summary"])
+
+            prompt_exports = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "export-benchmark-prompts",
+                    "--search-root",
+                    str(search_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--summary-root",
+                    str(summary_root),
+                    "--eval-root",
+                    str(eval_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            prompt_payload = json.loads(prompt_exports.stdout)
+            self.assertGreaterEqual(prompt_payload["summary"]["exports"], 1)
+
+            bundle_scores = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "score-answer-bundles",
+                    "--search-root",
+                    str(search_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--summary-root",
+                    str(summary_root),
+                    "--eval-root",
+                    str(eval_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            bundle_score_payload = json.loads(bundle_scores.stdout)
+            self.assertGreater(bundle_score_payload["summary"]["avg_bundle_score"], 0)
+
+            answers_path = eval_root / "answers.json"
+            answers_path.write_text(
+                json.dumps(
+                    {
+                        "answers": [
+                            {
+                                "name": "yellowstone_vixen_attr_macro",
+                                "answer": "The vixen proc macro attribute is defined in crates/proc-macro/src/lib.rs.",
+                                "cited_paths": ["crates/proc-macro/src/lib.rs"],
+                                "cited_symbols": ["vixen"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            external_scores = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "score-external-answers",
+                    "--eval-root",
+                    str(eval_root),
+                    "--answers-path",
+                    str(answers_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            external_payload = json.loads(external_scores.stdout)
+            self.assertGreaterEqual(external_payload["summary"]["cases"], 1)
 
 
 if __name__ == "__main__":

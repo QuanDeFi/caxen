@@ -30,8 +30,9 @@ This gives later comparison, retrieval, and planning stages a stable inventory/s
 
 The current implemented subset is narrower than the full roadmap:
 
-- implemented: workspace bootstrap, repo sync/verification, normalized raw inventory, initial Rust parser ingestion, symbol artifacts, SQLite persistence, optional parquet export path, first semantic graph edges, SQLite FTS lexical search, graph-backed retrieval, deterministic summaries, agent toolkit commands, and a lightweight benchmark harness
+- implemented: workspace bootstrap, repo sync/verification, normalized raw inventory, initial Rust parser ingestion, symbol artifacts, SQLite persistence, optional parquet export path, first semantic graph edges, graph-backed retrieval, deterministic summaries, agent toolkit commands, and a lightweight benchmark harness
 - implemented: `rustc` AST probing, backend-preferred symbol fusion that uses `rust-analyzer` document symbols or `tree-sitter` symbols when available, Cargo-metadata-backed workspace dependency resolution, persisted statement artifacts, interprocedural semantic summaries, a graph query API, answer-quality grading in evaluation, and a provider-based embedding sidecar with an OpenAI-backed path when credentials are configured
+- implemented: a native Rust helper for tree-sitter-backed inspection and local BM25 indexing, canonical `graph.sqlite3` storage, `query_manifest.json` build metadata, retrieval planning, iterative retrieval, answer-bundle preparation, prompt export, bundle sufficiency scoring, and offline external-answer grading
 - still heuristic: optional backend availability depends on the local environment, symbol resolution is workspace-aware rather than fully compiler-semantic, and interprocedural data/control semantics are still conservative rollups rather than full program analysis
 
 Use this document and the code under `src/` as the source of truth for current behavior. Use `AGENTS.md` as the roadmap for the next layers.
@@ -76,6 +77,19 @@ Current subcommand:
 - `find-runtime-handlers`
 - `summarize-path`
 - `prepare-context`
+- `graph-query`
+- `path-between`
+- `statement-slice`
+- `callers-of`
+- `callees-of`
+- `reads-of`
+- `writes-of`
+- `plan-query`
+- `prepare-answer-bundle`
+- `retrieve-iterative`
+- `export-benchmark-prompts`
+- `score-answer-bundles`
+- `score-external-answers`
 
 ### Adapters
 
@@ -125,6 +139,12 @@ Each adapter contributes:
 - primary parser fusion that prefers `rust-analyzer`, then `tree-sitter`, then the deterministic parser
 - aggregated backend availability and sample counts under `parser_backends`
 
+`native/` adds the local Rust helper used by the Python orchestration layer:
+
+- tree-sitter-backed Rust inspection for deterministic syntax counts and symbol extraction
+- Tantivy BM25 index build/query support over JSONL search documents
+- local-only operation with no hosted search or model dependency
+
 ### Symbol Index
 
 `src/symbols/indexer.py` consumes raw inventory roots and writes:
@@ -132,6 +152,7 @@ Each adapter contributes:
 - `data/parsed/<repo>/symbols.json`
 - `data/parsed/<repo>/symbols.sqlite3`
 - `data/parsed/<repo>/parquet_status.json`
+- `data/parsed/<repo>/query_manifest.json`
 
 The current artifact is deterministic and scoped to Rust source files discovered from `parser_relevant_source_roots`.
 It now includes:
@@ -154,6 +175,7 @@ SQLite persistence is always written. Parquet export is implemented as an option
 `src/graph/builder.py` derives a first code graph from the symbol artifact and writes:
 
 - `data/graph/<repo>/graph.json`
+- `data/graph/<repo>/graph.sqlite3`
 
 The current graph includes repository, file, symbol, and reference nodes with:
 
@@ -178,9 +200,10 @@ The current graph includes repository, file, symbol, and reference nodes with:
 `src/search/indexer.py` builds a lexical search database under `data/search/<repo>/`:
 
 - indexes repo, directory, file, and symbol documents
-- stores searchable content in SQLite FTS5
+- stores searchable content in SQLite metadata tables and a Tantivy BM25 sidecar
+- persists `documents.jsonl` as the deterministic bridge into the native BM25 builder
 - preserves metadata for paths, symbol IDs, crates, modules, and tags
-- enables BM25-style lexical pruning without external search infrastructure
+- enables local BM25 lexical pruning without external search infrastructure
 
 ### Retrieval Layer
 
@@ -193,6 +216,13 @@ The current graph includes repository, file, symbol, and reference nodes with:
 - summary-aware score bonuses
 - a heuristic selective retrieval gate
 - lightweight score fusion for final context selection
+
+`src/retrieval/planner.py` adds the consumer-facing retrieval orchestration layer:
+
+- query intent classification and retrieval-plan generation
+- answer-bundle preparation for external LLM consumers
+- iterative retrieval refinement from prior bundle state plus explicit hints
+- deterministic provenance and evidence packaging
 
 ### Embedding Sidecar
 
@@ -232,6 +262,16 @@ These summaries are generated from raw inventory, symbol artifacts, and graph ed
 - `find-runtime-handlers`
 - `summarize-path`
 - `prepare-context`
+- `graph-query`
+- `path-between`
+- `statement-slice`
+- `callers-of`
+- `callees-of`
+- `reads-of`
+- `writes-of`
+- `plan-query`
+- `prepare-answer-bundle`
+- `retrieve-iterative`
 
 ### Evaluation
 
@@ -240,6 +280,9 @@ These summaries are generated from raw inventory, symbol artifacts, and graph ed
 - lexical-only, graph, rerank, summary-aware, vector-recall, and selective-retrieval comparisons
 - deterministic query cases over the pinned upstream repos
 - deterministic answer-quality grading derived from prepared context
+- deterministic prompt export for external LLM consumers
+- bundle sufficiency scoring
+- offline external-answer grading against expected entities, terms, and provenance
 - JSON output under `data/eval/benchmarks.json`
 
 ## Output Model
@@ -278,8 +321,16 @@ The current parser slice also emits:
 - `graph.json`
   - repository/file/symbol/reference nodes
   - structural and first semantic edges derived from the symbol artifact
+- `graph.sqlite3`
+  - canonical local graph query store for nodes, edges, and metadata
+- `query_manifest.json`
+  - build metadata, feature flags, and local artifact locations for parsed/search/query surfaces
 - `search.sqlite3`
-  - SQLite FTS5 lexical search over repo, directory, file, symbol, and statement documents
+  - SQLite metadata and fallback lexical search over repo, directory, file, symbol, and statement documents
+- `documents.jsonl`
+  - deterministic search document export used by the native BM25 builder
+- `tantivy/`
+  - local BM25 index sidecar
 - `search_manifest.json`
   - search document counts and artifact metadata
 - `embedding_index.json`
@@ -290,6 +341,8 @@ The current parser slice also emits:
   - deterministic summary artifacts for agent-facing navigation
 - `benchmarks.json`
   - retrieval benchmark results for the current harness
+- `prompt_exports/*.json`
+  - deterministic prompt packages and bundled evidence for external LLM consumers
 
 ## Future Phases
 

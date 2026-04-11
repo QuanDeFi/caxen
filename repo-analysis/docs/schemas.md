@@ -344,6 +344,144 @@ High-level shape:
 }
 ```
 
+## `query_manifest.json`
+
+`build-index` and `build-search` maintain `data/parsed/<repo>/query_manifest.json` as the build-local contract for queryable artifacts.
+
+High-level shape:
+
+```json
+{
+  "schema_version": "0.1.0",
+  "repo": "yellowstone-vixen",
+  "generated_at": "2026-04-11T12:00:00Z",
+  "artifacts": {
+    "symbols_json": "data/parsed/yellowstone-vixen/symbols.json",
+    "symbols_sqlite3": "data/parsed/yellowstone-vixen/symbols.sqlite3",
+    "graph_json": "data/graph/yellowstone-vixen/graph.json",
+    "graph_sqlite3": "data/graph/yellowstone-vixen/graph.sqlite3",
+    "search_sqlite": "data/search/yellowstone-vixen/search.sqlite3",
+    "search_documents_jsonl": "data/search/yellowstone-vixen/documents.jsonl",
+    "search_tantivy": "data/search/yellowstone-vixen/tantivy"
+  },
+  "features": {
+    "graph_sqlite": true,
+    "iterative_retrieval": true,
+    "answer_bundle": true,
+    "bm25_default": true
+  },
+  "build": {
+    "parser": "rust-backend-fused-v2",
+    "primary_parser_backends": [
+      {
+        "kind": "rust_analyzer_lsp",
+        "count": 1
+      }
+    ],
+    "native_worker": {
+      "available": true,
+      "invoked": true,
+      "binary": "repo-analysis-native",
+      "version": "0.1.0"
+    },
+    "bm25": {
+      "available": true,
+      "built": true,
+      "documents": 42,
+      "output_dir": "..."
+    }
+  }
+}
+```
+
+## Search Artifacts
+
+`build-search` now writes both SQLite metadata and a native BM25 sidecar under `data/search/<repo>/`.
+
+### `documents.jsonl`
+
+One JSON document per line, matching the logical search document shape:
+
+```json
+{
+  "doc_id": "doc:abc123",
+  "kind": "symbol",
+  "repo": "carbon",
+  "path": "crates/core/src/filter.rs",
+  "name": "DeduplicationFilter",
+  "qualified_name": "carbon_core::filter::DeduplicationFilter",
+  "symbol_id": "sym:def456",
+  "title": "carbon_core::filter::DeduplicationFilter",
+  "preview": "pub struct DeduplicationFilter;",
+  "content": "tokenized lexical content ...",
+  "metadata": {
+    "kind": "struct",
+    "crate": "carbon-core",
+    "module_path": "carbon_core::filter",
+    "tags": ["filter"]
+  }
+}
+```
+
+### `search_manifest.json`
+
+High-level shape:
+
+```json
+{
+  "schema_version": "0.2.0",
+  "repo": "carbon",
+  "generated_at": "2026-04-11T12:00:00Z",
+  "artifacts": {
+    "sqlite": "search.sqlite3",
+    "documents_jsonl": "documents.jsonl",
+    "tantivy": "tantivy"
+  },
+  "bm25": {
+    "available": true,
+    "built": true,
+    "documents": 128,
+    "output_dir": "/abs/path/to/data/search/carbon/tantivy"
+  },
+  "summary": {
+    "documents": 128,
+    "document_kind_counts": [
+      {
+        "kind": "symbol",
+        "count": 90
+      }
+    ]
+  }
+}
+```
+
+### `graph.sqlite3`
+
+`build-index` also persists the graph in SQLite with three tables:
+
+- `metadata`
+- `nodes`
+- `edges`
+
+`nodes` stores:
+
+- `node_id`
+- `kind`
+- `repo`
+- `path`
+- `name`
+- `qualified_name`
+- `metadata_json`
+
+`edges` stores:
+
+- `edge_id`
+- `type`
+- `source_node_id`
+- `target_node_id`
+- `path`
+- `metadata_json`
+
 ## Parsed Persistence Files
 
 Each parsed repo now also writes:
