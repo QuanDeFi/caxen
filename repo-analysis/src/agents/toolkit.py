@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from graph.query import adjacent_symbols as graph_adjacent_symbols
+from graph.query import where_defined as graph_where_defined
+from graph.query import who_imports as graph_who_imports
 from retrieval.engine import graph_indexes, retrieve_context
 from search.indexer import list_documents, search_documents
 from summaries.builder import load_summary_artifacts
@@ -87,7 +90,16 @@ def compare_repos(
     comparisons = []
     for repo_name in repos:
         overview = repo_overview(summary_root, repo_name)
-        context = retrieve_context(search_root, graph_root, parsed_root, repo_name, query, limit=limit)
+        context = retrieve_context(
+            search_root,
+            graph_root,
+            parsed_root,
+            repo_name,
+            query,
+            summary_root=summary_root,
+            limit=limit,
+            use_summaries=True,
+        )
         comparisons.append(
             {
                 "repo": repo_name,
@@ -167,7 +179,16 @@ def prepare_context(
     repos = (repo_name,) if repo_name else DEFAULT_REPOS
     contexts = []
     for current_repo in repos:
-        context = retrieve_context(search_root, graph_root, parsed_root, current_repo, task, limit=limit)
+        context = retrieve_context(
+            search_root,
+            graph_root,
+            parsed_root,
+            current_repo,
+            task,
+            summary_root=summary_root,
+            limit=limit,
+            use_summaries=True,
+        )
         overview = repo_overview(summary_root, current_repo)
         contexts.append(
             {
@@ -181,6 +202,52 @@ def prepare_context(
         "task": task,
         "contexts": contexts,
     }
+
+
+def where_defined(
+    search_root: Path,
+    parsed_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 10,
+) -> Dict[str, object]:
+    return graph_where_defined(search_root, parsed_root, repo_name, symbol_query, limit=limit)
+
+
+def who_imports(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 20,
+) -> Dict[str, object]:
+    return graph_who_imports(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+
+
+def adjacent_symbols(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    edge_types: Sequence[str] = (),
+    direction: str = "both",
+    limit: int = 20,
+) -> Dict[str, object]:
+    return graph_adjacent_symbols(
+        search_root,
+        parsed_root,
+        graph_root,
+        repo_name,
+        symbol_query,
+        edge_types=edge_types,
+        direction=direction,
+        limit=limit,
+    )
 
 
 def themed_results(

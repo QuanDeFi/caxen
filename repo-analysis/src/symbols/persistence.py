@@ -59,10 +59,12 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
                 is_test INTEGER NOT NULL,
                 impl_target TEXT,
                 impl_trait TEXT,
+                super_traits_json TEXT NOT NULL,
                 resolved_impl_target_symbol_id TEXT,
                 resolved_impl_target_qualified_name TEXT,
                 resolved_impl_trait_symbol_id TEXT,
-                resolved_impl_trait_qualified_name TEXT
+                resolved_impl_trait_qualified_name TEXT,
+                resolved_super_traits_json TEXT NOT NULL
             );
 
             CREATE TABLE imports (
@@ -173,16 +175,20 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
                 start_line, start_column, end_line, end_column, signature, docstring, visibility,
                 container_symbol_id, container_qualified_name, statement_id, scope_symbol_id,
                 reference_target_symbol_id, attributes_json, is_test, impl_target, impl_trait,
+                super_traits_json,
                 resolved_impl_target_symbol_id, resolved_impl_target_qualified_name,
-                resolved_impl_trait_symbol_id, resolved_impl_trait_qualified_name
+                resolved_impl_trait_symbol_id, resolved_impl_trait_qualified_name,
+                resolved_super_traits_json
             )
             VALUES (
                 :symbol_id, :repo, :path, :crate, :module_path, :language, :kind, :name, :qualified_name,
                 :start_line, :start_column, :end_line, :end_column, :signature, :docstring, :visibility,
                 :container_symbol_id, :container_qualified_name, :statement_id, :scope_symbol_id,
                 :reference_target_symbol_id, :attributes_json, :is_test, :impl_target, :impl_trait,
+                :super_traits_json,
                 :resolved_impl_target_symbol_id, :resolved_impl_target_qualified_name,
-                :resolved_impl_trait_symbol_id, :resolved_impl_trait_qualified_name
+                :resolved_impl_trait_symbol_id, :resolved_impl_trait_qualified_name,
+                :resolved_super_traits_json
             )
             """,
             [flatten_symbol_row(row) for row in payload["symbols"]],
@@ -398,10 +404,12 @@ def flatten_symbol_row(row: Dict[str, object]) -> Dict[str, object]:
         "is_test": int(bool(row["is_test"])),
         "impl_target": row["impl_target"],
         "impl_trait": row["impl_trait"],
+        "super_traits_json": json.dumps(row.get("super_traits", [])),
         "resolved_impl_target_symbol_id": row["resolved_impl_target_symbol_id"],
         "resolved_impl_target_qualified_name": row["resolved_impl_target_qualified_name"],
         "resolved_impl_trait_symbol_id": row["resolved_impl_trait_symbol_id"],
         "resolved_impl_trait_qualified_name": row["resolved_impl_trait_qualified_name"],
+        "resolved_super_traits_json": json.dumps(row.get("resolved_super_traits", [])),
     }
 
 

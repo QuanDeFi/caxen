@@ -17,6 +17,7 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             graph_root = temp_root / "graph"
             search_root = temp_root / "search"
             summary_root = temp_root / "summaries"
+            eval_root = temp_root / "eval"
 
             subprocess.run(
                 [
@@ -50,7 +51,7 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
                     "--repo",
                     "yellowstone-vixen",
                     "--path-prefix",
-                    "crates/proc-macro/src/lib.rs",
+                    "crates/proc-macro/src",
                 ],
                 check=True,
                 capture_output=True,
@@ -193,6 +194,104 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             context = json.loads(prepare_context.stdout)
             self.assertEqual(context["contexts"][0]["repo"], "yellowstone-vixen")
             self.assertGreater(len(context["contexts"][0]["selected_context"]), 0)
+
+            where_defined = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "where-defined",
+                    "--search-root",
+                    str(search_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "vixen_parser",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            definitions = json.loads(where_defined.stdout)
+            self.assertTrue(any(item["name"] == "vixen_parser" for item in definitions["matches"]))
+
+            adjacent = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "adjacent-symbols",
+                    "--search-root",
+                    str(search_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "include_vixen_parser",
+                    "--edge-type",
+                    "CALLS",
+                    "--edge-type",
+                    "USES",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            adjacent_payload = json.loads(adjacent.stdout)
+            self.assertGreaterEqual(len(adjacent_payload["matches"]), 1)
+
+            imports = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "who-imports",
+                    "--search-root",
+                    str(search_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "vixen_parser",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            imports_payload = json.loads(imports.stdout)
+            self.assertGreaterEqual(len(imports_payload["matches"]), 1)
+
+            benchmarks = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "run-benchmarks",
+                    "--search-root",
+                    str(search_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--summary-root",
+                    str(summary_root),
+                    "--eval-root",
+                    str(eval_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "--mode",
+                    "lexical_graph_vector_rerank_summaries",
+                    "--mode",
+                    "selective_on",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            benchmark_payload = json.loads(benchmarks.stdout)
+            self.assertGreaterEqual(len(benchmark_payload["summary"]["modes"]), 2)
+            self.assertTrue((eval_root / "benchmarks.json").exists())
 
 
 if __name__ == "__main__":

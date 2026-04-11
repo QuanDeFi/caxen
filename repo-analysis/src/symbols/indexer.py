@@ -17,7 +17,9 @@ from parsers.rust import (
     clean_rust_source_lines,
     parse_rust_file,
 )
+from parsers.rust_analyzer_backend import aggregate_rust_analyzer_probes, probe_rust_analyzer
 from parsers.rustc_backend import aggregate_rustc_probes, probe_rust_ast
+from parsers.tree_sitter_backend import aggregate_tree_sitter_probes, probe_tree_sitter
 
 
 CALL_EXPR_RE = re.compile(
@@ -44,6 +46,12 @@ QUALIFIED_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_])"
     r"(?P<expr>(?:crate|super|Self|[A-Za-z_][A-Za-z0-9_]*)(?:::[A-Za-z_][A-Za-z0-9_]*)+)"
     r"(?![A-Za-z0-9_])"
+)
+METHOD_CALL_RE = re.compile(
+    r"(?P<receiver>(?:self|Self|[A-Za-z_][A-Za-z0-9_]*))\s*\.\s*(?P<method>[A-Za-z_][A-Za-z0-9_]*)\s*(?:::<[^()\n]*>)?\s*\("
+)
+FIELD_ACCESS_RE = re.compile(
+    r"(?P<receiver>(?:self|Self|[A-Za-z_][A-Za-z0-9_]*))\s*\.\s*(?P<field>[a-z_][A-Za-z0-9_]*)"
 )
 VARIANT_RE = re.compile(
     r"^\s*(?P<name>[A-Z][A-Za-z0-9_]*)\b(?:\s*(?:\(|\{|=|,|$).*)?$"
@@ -114,6 +122,7 @@ PRIMITIVE_TYPES = {
 
 @dataclass
 class ParsedFileContext:
+    source_path: Path
     parsed: ParsedRustFile
     source: str
     source_lines: List[str]
@@ -122,6 +131,7 @@ class ParsedFileContext:
     symbol_id_by_local: Dict[int, str]
     import_aliases: Dict[str, List[str]]
     compiler_probe: Dict[str, object]
+    backend_probes: Dict[str, Dict[str, object]]
 
 
 def build_symbol_index(
@@ -172,10 +182,17 @@ def build_symbol_index(
     resolution_index = build_resolution_index(symbol_records)
     import_records = build_import_records(repo_name, contexts, resolution_index)
     resolve_impl_symbols(symbol_records, context_by_path, resolution_index)
+    resolve_trait_inheritance(symbol_records, context_by_path, resolution_index)
     reference_records = build_reference_records(repo_name, contexts, resolution_index)
     statement_records = build_statement_records(repo_name, contexts, symbol_records, resolution_index)
     compiler_backends = {
         "rustc_ast_probe": aggregate_rustc_probes([context.compiler_probe for context in contexts]),
+        "tree_sitter_rust": aggregate_tree_sitter_probes(
+            [context.backend_probes["tree_sitter_rust"] for context in contexts]
+        ),
+        "rust_analyzer_lsp": aggregate_rust_analyzer_probes(
+            [context.backend_probes["rust_analyzer_lsp"] for context in contexts]
+        ),
     }
 
     kind_counts = rollup_counts(item["kind"] for item in symbol_records)
@@ -183,7 +200,7 @@ def build_symbol_index(
     statement_kind_counts = rollup_counts(item["kind"] for item in statement_records)
 
     return {
-        "schema_version": "0.4.0",
+        "schema_version": "0.5.0",
         "repo": repo_name,
         "generated_at": timestamp_now(),
         "parser": "rust-simple-v3",
@@ -357,9 +374,70 @@ def build_reference_records(
                     resolved=resolved,
                 )
 
+            for candidate, line_number, column in extract_body_member_call_candidates(
+                context.cleaned_lines,
+                symbol["span"],
+                symbol,
+                resolution_index,
+                context.import_aliases,
+                context.crate_root,
+                self_target,
+            ):
+                call_positions.add((candidate, line_number, column))
+                resolved = resolve_expression(
+                    candidate,
+                    symbol,
+                    resolution_index,
+                    context.import_aliases,
+                    context.crate_root,
+                    symbol["symbol_id"],
+                    self_target,
+                )
+                add_reference_record(
+                    reference_records,
+                    repo_name,
+                    symbol,
+                    kind="call",
+                    candidate=candidate,
+                    line_number=line_number,
+                    column=column,
+                    resolved=resolved,
+                )
+
             for candidate, line_number, column in extract_body_use_candidates(
                 context.cleaned_lines,
                 symbol["span"],
+            ):
+                if (candidate, line_number, column) in call_positions:
+                    continue
+                resolved = resolve_expression(
+                    candidate,
+                    symbol,
+                    resolution_index,
+                    context.import_aliases,
+                    context.crate_root,
+                    symbol["symbol_id"],
+                    self_target,
+                )
+                add_reference_record(
+                    reference_records,
+                    repo_name,
+                    symbol,
+                    kind="use",
+                    candidate=candidate,
+                    line_number=line_number,
+                    column=column,
+                    resolved=resolved,
+                )
+
+            for candidate, line_number, column in extract_body_field_use_candidates(
+                context.cleaned_lines,
+                symbol["span"],
+                symbol,
+                resolution_index,
+                context.import_aliases,
+                context.crate_root,
+                self_target,
             ):
                 if (candidate, line_number, column) in call_positions:
                     continue
@@ -440,6 +518,39 @@ def resolve_impl_symbols(
         symbol["resolved_impl_target_qualified_name"] = impl_target["target_qualified_name"]
         symbol["resolved_impl_trait_symbol_id"] = impl_trait["target_symbol_id"]
         symbol["resolved_impl_trait_qualified_name"] = impl_trait["target_qualified_name"]
+
+
+def resolve_trait_inheritance(
+    symbol_records: Sequence[Dict[str, object]],
+    context_by_path: Dict[str, ParsedFileContext],
+    resolution_index: Dict[str, object],
+) -> None:
+    for symbol in symbol_records:
+        if symbol["kind"] != "trait":
+            continue
+
+        context = context_by_path[symbol["path"]]
+        resolved_traits = []
+        for parent in symbol.get("super_traits", []):
+            resolved = resolve_expression(
+                parent,
+                symbol,
+                resolution_index,
+                context.import_aliases,
+                context.crate_root,
+                symbol["symbol_id"],
+                None,
+            )
+            resolved_traits.append(
+                {
+                    "name": parent.split("::")[-1],
+                    "qualified_name_hint": resolved["qualified_name_hint"] or parent,
+                    "target_symbol_id": resolved["target_symbol_id"],
+                    "target_qualified_name": resolved["target_qualified_name"] or parent,
+                    "target_kind": resolved["target_kind"],
+                }
+            )
+        symbol["resolved_super_traits"] = resolved_traits
 
 
 def resolve_expression(
@@ -930,19 +1041,38 @@ def collect_statement_writes(
     self_target: Optional[str],
 ) -> List[Dict[str, object]]:
     match = ASSIGN_RE.match(statement_text)
-    if not match:
-        return []
-    lhs = match.group("lhs")
-    resolved = resolve_expression(
-        lhs,
-        symbol,
-        resolution_index,
-        import_aliases,
-        crate_root,
-        symbol["symbol_id"],
-        self_target,
+    writes: List[Dict[str, object]] = []
+    if match:
+        lhs = match.group("lhs")
+        resolved = resolve_expression(
+            lhs,
+            symbol,
+            resolution_index,
+            import_aliases,
+            crate_root,
+            symbol["symbol_id"],
+            self_target,
+        )
+        append_unique_target(writes, make_target_entry(lhs, resolved))
+
+    member_match = re.match(
+        r"^\s*(?P<receiver>(?:self|Self|[A-Za-z_][A-Za-z0-9_]*))\s*\.\s*(?P<field>[a-z_][A-Za-z0-9_]*)\s*(?:[+\-*/%&|^]|<<|>>)?=",
+        statement_text,
     )
-    return [make_target_entry(lhs, resolved)]
+    if member_match:
+        receiver = member_match.group("receiver")
+        field = member_match.group("field")
+        resolved = resolve_member_expression(
+            receiver,
+            field,
+            symbol,
+            resolution_index,
+            import_aliases,
+            crate_root,
+            self_target,
+        )
+        append_unique_target(writes, make_target_entry(f"{receiver}.{field}", resolved))
+    return writes
 
 
 def collect_statement_calls(
@@ -970,6 +1100,21 @@ def collect_statement_calls(
         )
         append_unique_target(calls, make_target_entry(expression, resolved))
         expressions.append(expression)
+    for match in METHOD_CALL_RE.finditer(statement_text):
+        receiver = match.group("receiver")
+        method = match.group("method")
+        expression = f"{receiver}.{method}"
+        resolved = resolve_member_expression(
+            receiver,
+            method,
+            symbol,
+            resolution_index,
+            import_aliases,
+            crate_root,
+            self_target,
+        )
+        append_unique_target(calls, make_target_entry(expression, resolved))
+        expressions.append(expression)
     return calls, expressions
 
 
@@ -990,6 +1135,26 @@ def collect_statement_reads(
         for match in QUALIFIED_PATH_RE.finditer(statement_text)
     }
     excluded = set(excluded_names) | set(excluded_expressions)
+
+    for match in FIELD_ACCESS_RE.finditer(statement_text):
+        receiver = match.group("receiver")
+        field = match.group("field")
+        expression = f"{receiver}.{field}"
+        if expression in excluded:
+            continue
+        window = statement_text[match.end("field") : match.end("field") + 8]
+        if "(" in window:
+            continue
+        resolved = resolve_member_expression(
+            receiver,
+            field,
+            symbol,
+            resolution_index,
+            import_aliases,
+            crate_root,
+            self_target,
+        )
+        append_unique_target(reads, make_target_entry(expression, resolved))
 
     for expression in sorted(qualified_matches):
         if not expression or expression in excluded:
@@ -1033,6 +1198,49 @@ def collect_statement_reads(
         if resolved["target_symbol_id"] or resolved["target_qualified_name"] != name:
             append_unique_target(reads, make_target_entry(name, resolved))
     return reads
+
+
+def resolve_member_expression(
+    receiver: str,
+    member: str,
+    current_symbol: Dict[str, object],
+    resolution_index: Dict[str, object],
+    import_aliases: Dict[str, List[str]],
+    crate_root: str,
+    self_target: Optional[str],
+) -> Dict[str, Optional[str]]:
+    receiver_target: Optional[str] = None
+    if receiver in {"self", "Self"} and self_target:
+        receiver_target = self_target
+    elif receiver[:1].isupper():
+        resolved_receiver = resolve_expression(
+            receiver,
+            current_symbol,
+            resolution_index,
+            import_aliases,
+            crate_root,
+            current_symbol.get("symbol_id") or current_symbol.get("scope_symbol_id"),
+            self_target,
+        )
+        receiver_target = resolved_receiver["target_qualified_name"] or resolved_receiver["qualified_name_hint"]
+
+    if receiver_target:
+        return resolve_expression(
+            f"{receiver_target}::{member}",
+            current_symbol,
+            resolution_index,
+            import_aliases,
+            crate_root,
+            current_symbol.get("symbol_id") or current_symbol.get("scope_symbol_id"),
+            self_target,
+        )
+
+    return {
+        "target_symbol_id": None,
+        "target_qualified_name": None,
+        "target_kind": None,
+        "qualified_name_hint": f"{receiver}.{member}",
+    }
 
 
 def make_target_entry(expression: str, resolved: Dict[str, Optional[str]]) -> Dict[str, object]:
@@ -1175,6 +1383,84 @@ def extract_body_call_candidates(
                 continue
             candidates.append((expression, line_number, match.start("expr") + 1))
     return unique_positioned_values(candidates)
+
+
+def extract_body_member_call_candidates(
+    cleaned_lines: Sequence[str],
+    span: Dict[str, int],
+    symbol: Dict[str, object],
+    resolution_index: Dict[str, object],
+    import_aliases: Dict[str, List[str]],
+    crate_root: str,
+    self_target: Optional[str],
+) -> List[Tuple[str, int, int]]:
+    candidates: List[Tuple[str, int, int]] = []
+    for line_number in range(span["start_line"], span["end_line"] + 1):
+        cleaned_line = cleaned_lines[line_number - 1]
+        for match in METHOD_CALL_RE.finditer(cleaned_line):
+            candidate = member_candidate_string(
+                match.group("receiver"),
+                match.group("method"),
+                symbol,
+                resolution_index,
+                import_aliases,
+                crate_root,
+                self_target,
+            )
+            if candidate:
+                candidates.append((candidate, line_number, match.start("method") + 1))
+    return unique_positioned_values(candidates)
+
+
+def extract_body_field_use_candidates(
+    cleaned_lines: Sequence[str],
+    span: Dict[str, int],
+    symbol: Dict[str, object],
+    resolution_index: Dict[str, object],
+    import_aliases: Dict[str, List[str]],
+    crate_root: str,
+    self_target: Optional[str],
+) -> List[Tuple[str, int, int]]:
+    candidates: List[Tuple[str, int, int]] = []
+    for line_number in range(span["start_line"], span["end_line"] + 1):
+        cleaned_line = cleaned_lines[line_number - 1]
+        for match in FIELD_ACCESS_RE.finditer(cleaned_line):
+            window = cleaned_line[match.end("field") : match.end("field") + 8]
+            if "(" in window:
+                continue
+            candidate = member_candidate_string(
+                match.group("receiver"),
+                match.group("field"),
+                symbol,
+                resolution_index,
+                import_aliases,
+                crate_root,
+                self_target,
+            )
+            if candidate:
+                candidates.append((candidate, line_number, match.start("field") + 1))
+    return unique_positioned_values(candidates)
+
+
+def member_candidate_string(
+    receiver: str,
+    member: str,
+    symbol: Dict[str, object],
+    resolution_index: Dict[str, object],
+    import_aliases: Dict[str, List[str]],
+    crate_root: str,
+    self_target: Optional[str],
+) -> str:
+    resolved = resolve_member_expression(
+        receiver,
+        member,
+        symbol,
+        resolution_index,
+        import_aliases,
+        crate_root,
+        self_target,
+    )
+    return resolved["target_qualified_name"] or resolved["qualified_name_hint"] or f"{receiver}.{member}"
 
 
 def extract_body_use_candidates(
@@ -1349,7 +1635,12 @@ def parse_rust_source_file(
     source_lines = source.splitlines()
     parsed = parse_rust_file(relative_path, source, crate_name, module_path)
     compiler_probe = probe_rust_ast(source_path)
+    backend_probes = {
+        "tree_sitter_rust": probe_tree_sitter(source_path, source),
+        "rust_analyzer_lsp": probe_rust_analyzer(source_path, source, repo_root),
+    }
     return ParsedFileContext(
+        source_path=source_path,
         parsed=parsed,
         source=source,
         source_lines=source_lines,
@@ -1358,6 +1649,7 @@ def parse_rust_source_file(
         symbol_id_by_local={},
         import_aliases={},
         compiler_probe=compiler_probe,
+        backend_probes=backend_probes,
     )
 
 
@@ -1390,7 +1682,7 @@ def pick_best_symbol_candidate(
             score += 25
         if self_target and candidate["qualified_name"].startswith(f"{self_target}::"):
             score += 25
-        if candidate["name"] == current_symbol["name"]:
+        if candidate["name"] == current_symbol.get("name"):
             score -= 5
 
         if best_score is None or score > best_score:
@@ -1540,10 +1832,12 @@ def symbol_to_record(repo_name: str, context: ParsedFileContext, symbol: RustSym
         "is_test": symbol.is_test,
         "impl_target": symbol.impl_target,
         "impl_trait": symbol.impl_trait,
+        "super_traits": list(symbol.super_traits),
         "resolved_impl_target_symbol_id": None,
         "resolved_impl_target_qualified_name": None,
         "resolved_impl_trait_symbol_id": None,
         "resolved_impl_trait_qualified_name": None,
+        "resolved_super_traits": [],
     }
 
 

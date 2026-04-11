@@ -121,7 +121,7 @@ High-level shape:
 
 ```json
 {
-  "schema_version": "0.4.0",
+  "schema_version": "0.5.0",
   "repo": "yellowstone-vixen",
   "generated_at": "2026-04-10T12:00:00Z",
   "parser": "rust-simple-v3",
@@ -132,6 +132,29 @@ High-level shape:
       "used": true,
       "files": 1,
       "parsed_files": 1,
+      "item_counts": [],
+      "statement_counts": [],
+      "control_counts": [],
+      "samples": []
+    },
+    "tree_sitter_rust": {
+      "backend": "tree-sitter-rust",
+      "available": false,
+      "used": true,
+      "files": 1,
+      "parsed_files": 0,
+      "item_counts": [],
+      "statement_counts": [],
+      "control_counts": [],
+      "error_nodes": 0,
+      "samples": []
+    },
+    "rust_analyzer_lsp": {
+      "backend": "rust-analyzer-lsp",
+      "available": false,
+      "used": true,
+      "files": 1,
+      "parsed_files": 0,
       "item_counts": [],
       "statement_counts": [],
       "control_counts": [],
@@ -179,10 +202,12 @@ High-level shape:
       "is_test": false,
       "impl_target": null,
       "impl_trait": null,
+      "super_traits": [],
       "resolved_impl_target_symbol_id": null,
       "resolved_impl_target_qualified_name": null,
       "resolved_impl_trait_symbol_id": null,
-      "resolved_impl_trait_qualified_name": null
+      "resolved_impl_trait_qualified_name": null,
+      "resolved_super_traits": []
     }
   ],
   "imports": [
@@ -347,11 +372,14 @@ High-level `embedding_manifest.json` shape:
 
 ```json
 {
-  "schema_version": "0.1.0",
+  "schema_version": "0.2.0",
   "repo": "carbon",
   "generated_at": "2026-04-10T12:00:00Z",
-  "model": "hashing-tfidf-v1",
+  "provider": "hashing",
+  "model": "hashing-tfidf-v2",
+  "model_backed": false,
   "dimensions": 256,
+  "vector_format": "sparse",
   "summary": {
     "documents": 1234,
     "nonzero_dimensions": 45678
@@ -367,7 +395,7 @@ High-level shape:
 
 ```json
 {
-  "schema_version": "0.3.0",
+  "schema_version": "0.4.0",
   "repo": "yellowstone-vixen",
   "generated_at": "2026-04-10T12:00:00Z",
   "nodes": [
@@ -416,8 +444,9 @@ High-level shape:
 ## Phase 3 Notes
 
 - The current parser is intentionally deterministic and Rust-only.
-- The current graph now includes first semantic edges for imports, calls, uses, impl relationships, and statement-level control/data/dependence-style edges.
+- The current graph now includes first semantic edges for imports, calls, uses, impl relationships, trait inheritance, test coverage edges, and statement-level control/data/dependence-style edges.
 - SQLite persistence is always available; parquet export is optional per-environment.
+- Optional parser backends are recorded in the artifact even when they are unavailable on the current machine.
 - Future phases can add higher-fidelity parsers and richer graph edges without replacing the JSON-first contract.
 
 ## Summary Schemas

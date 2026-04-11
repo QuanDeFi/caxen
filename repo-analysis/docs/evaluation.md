@@ -8,7 +8,10 @@ It currently compares:
 
 - lexical-only retrieval
 - lexical-plus-graph retrieval
-- embedding-only retrieval
+- graph-plus-rerank retrieval
+- summary-aware retrieval
+- vector-recall retrieval
+- selective retrieval on vs off
 
 The harness writes `data/eval/benchmarks.json`.
 
@@ -17,20 +20,25 @@ The harness writes `data/eval/benchmarks.json`.
 The built-in cases target stable queries over the pinned upstream repos, for example:
 
 - Yellowstone Vixen proc-macro symbol lookup
-- Carbon filter-symbol lookup
+- Yellowstone Vixen runtime handler/source traits
+- Carbon decoder/filter traits
 
 Each run records:
 
 - query
+- task type
 - mode
 - latency
 - exact-hit status
 - path-hit status
+- files opened
+- prepared-token estimate
+- retrieval summary metadata
 - selected results
 
 ## Current Limitations
 
 - the benchmark set is small and deterministic
 - there is no answer-quality grading yet
-- there are no summary-aware or selective-retrieval benchmark modes yet
-- the embedding mode uses the local hashed sidecar, not a model-backed embedding service
+- answer quality is still proxied through hit-rate and context-shape metrics
+- model-backed embedding benchmarks require an external embedding provider configuration

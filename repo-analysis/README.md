@@ -22,12 +22,13 @@ The implemented slice in this repository now covers the current Phase 0-6 founda
 - SQLite FTS-based lexical search artifacts over repo/file/symbol documents
 - `rustc` AST probe metadata and persisted statement artifacts
 - statement-level graph nodes with first `CONTROL_FLOW`, `DATA_FLOW`, `DEPENDENCE`, `READS`, `WRITES`, and `REFS` edges
-- a local embedding sidecar over indexed search documents
+- optional `tree-sitter` and `rust-analyzer` backend probes recorded in symbol artifacts
+- a provider-based embedding sidecar over indexed search documents with an OpenAI-backed path when configured
 - deterministic project/directory/file/symbol summaries
-- agent-facing CLI operations for repo overview, symbol lookup, call tracing, and context prep
-- a lightweight benchmark harness for lexical, lexical-plus-graph, and embedding retrieval
+- agent-facing CLI operations for repo overview, symbol lookup, graph queries, call tracing, and context prep
+- a broader benchmark harness for lexical, graph, rerank, summary-aware, vector, and selective retrieval modes
 
-The remaining future work is the more advanced version of these layers: stronger compiler-backed parsing, richer interprocedural semantics, model-backed embeddings, and broader evaluation coverage.
+The remaining future work is the stronger version of these layers: primary compiler-backed parsing, richer interprocedural semantics, and evaluation that grades answer quality rather than only retrieval quality.
 
 ## Quickstart
 
@@ -79,6 +80,8 @@ When `pyarrow` is available, `build_index.sh` also writes parquet tables for fil
 - `data/search/<repo>/embedding_index.json`
 - `data/search/<repo>/embedding_manifest.json`
 
+Set `OPENAI_API_KEY` and optionally `REPO_ANALYSIS_EMBEDDING_PROVIDER=openai` to build a model-backed dense embedding index instead of the default local hashing index.
+
 `export_summaries.sh` writes deterministic summary artifacts to:
 
 - `data/summaries/<repo>/project.json`
@@ -93,7 +96,10 @@ The CLI now exposes:
 
 - `repo-overview`
 - `find-symbol`
+- `where-defined`
 - `trace-calls`
+- `who-imports`
+- `adjacent-symbols`
 - `compare-repos`
 - `embedding-search`
 - `find-parsers`

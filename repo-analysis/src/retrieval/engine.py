@@ -9,16 +9,25 @@ from embeddings.indexer import query_embedding_index
 from rerank.fusion import rerank_candidates
 from search.indexer import search_documents, tokenize
 from symbols.indexer import stable_id
+from summaries.builder import load_summary_artifacts
 
 
 EDGE_BONUS = {
     "CALLS": 1.4,
     "USES": 1.2,
     "IMPLEMENTS": 1.1,
+    "INHERITS": 1.1,
     "IMPORTS": 0.9,
     "DEFINES": 0.8,
     "CONTAINS": 0.6,
     "REFERENCES": 0.7,
+    "TESTS": 0.8,
+    "READS": 0.75,
+    "WRITES": 0.75,
+    "REFS": 0.7,
+    "DATA_FLOW": 0.65,
+    "CONTROL_FLOW": 0.55,
+    "DEPENDENCE": 0.55,
 }
 
 
@@ -29,14 +38,25 @@ def retrieve_context(
     repo_name: str,
     query: str,
     *,
+    summary_root: Path | None = None,
     limit: int = 8,
     depth: int = 1,
     kinds: Sequence[str] = (),
+    use_graph: bool = True,
     use_embeddings: bool = True,
+    use_rerank: bool = True,
+    use_summaries: bool = False,
+    selective_retrieval: bool = True,
+    max_graph_fanout: int = 32,
 ) -> Dict[str, object]:
     tokens = tokenize(query)
     lexical_results = search_documents(search_root, repo_name, query, limit=max(limit * 2, 10), kinds=kinds)
-    embedding_results = query_embedding_index(search_root, repo_name, query, limit=max(limit, 5)) if use_embeddings else []
+    gate = retrieval_gate(tokens, lexical_results, selective_retrieval)
+    effective_use_graph = use_graph and gate["use_graph"]
+    effective_use_embeddings = use_embeddings and gate["use_embeddings"]
+    embedding_results = (
+        query_embedding_index(search_root, repo_name, query, limit=max(limit, 5)) if effective_use_embeddings else []
+    )
     graph = load_json(graph_root / repo_name / "graph.json")
     symbols = load_json(parsed_root / repo_name / "symbols.json")
     symbol_by_id = {item["symbol_id"]: item for item in symbols.get("symbols", [])}
@@ -74,14 +94,22 @@ def retrieve_context(
         if node_id:
             seed_nodes.append((node_id, float(result["score"])))
 
-    expanded = expand_graph_candidates(repo_name, node_by_id, outgoing, incoming, seed_nodes, depth)
+    expanded = (
+        expand_graph_candidates(repo_name, node_by_id, outgoing, incoming, seed_nodes, depth, max_fanout=max_graph_fanout)
+        if effective_use_graph
+        else []
+    )
     for candidate in expanded:
         symbol = symbol_by_id.get(candidate.get("symbol_id"))
         if symbol:
             candidate.setdefault("preview", symbol.get("signature") or symbol["qualified_name"])
         add_candidate(candidates, candidate)
 
-    ranked = rerank_candidates(candidates.values(), tokens)[:limit]
+    if use_summaries and summary_root is not None:
+        apply_summary_bonus(candidates, summary_root, repo_name, tokens)
+
+    ranked_candidates = list(candidates.values())
+    ranked = rerank_candidates(ranked_candidates, tokens)[:limit] if use_rerank else sort_candidates(ranked_candidates)[:limit]
     return {
         "repo": repo_name,
         "query": query,
@@ -93,6 +121,11 @@ def retrieve_context(
             "embedding_results": len(embedding_results),
             "expanded_candidates": len(expanded),
             "selected": len(ranked),
+            "graph_enabled": effective_use_graph,
+            "embeddings_enabled": effective_use_embeddings,
+            "rerank_enabled": use_rerank,
+            "summaries_enabled": bool(use_summaries and summary_root is not None),
+            "retrieval_gate": gate,
         },
     }
 
@@ -160,6 +193,8 @@ def expand_graph_candidates(
     incoming: Dict[str, List[Dict[str, object]]],
     seed_nodes: Sequence[Tuple[str, float]],
     depth: int,
+    *,
+    max_fanout: int,
 ) -> List[Dict[str, object]]:
     expanded = []
     seen = set()
@@ -169,7 +204,7 @@ def expand_graph_candidates(
         next_frontier = []
         for node_id, base_score in frontier:
             for direction, edges in (("outgoing", outgoing.get(node_id, [])), ("incoming", incoming.get(node_id, []))):
-                for edge in edges:
+                for edge in edges[:max(max_fanout, 1)]:
                     neighbor_id = edge["to"] if direction == "outgoing" else edge["from"]
                     if neighbor_id == node_id or (node_id, neighbor_id, edge["type"]) in seen:
                         continue
@@ -237,6 +272,89 @@ def add_candidate(candidates: Dict[Tuple[str, str], Dict[str, object]], candidat
     existing["metadata"] = existing_metadata
     if not existing.get("preview") and candidate.get("preview"):
         existing["preview"] = candidate["preview"]
+
+
+def retrieval_gate(
+    tokens: Sequence[str],
+    lexical_results: Sequence[Dict[str, object]],
+    selective_retrieval: bool,
+) -> Dict[str, object]:
+    if not selective_retrieval:
+        return {
+            "enabled": False,
+            "reason": "disabled",
+            "use_graph": True,
+            "use_embeddings": True,
+        }
+
+    if not tokens or not lexical_results:
+        return {
+            "enabled": True,
+            "reason": "no-exact-lexical-hit",
+            "use_graph": True,
+            "use_embeddings": True,
+        }
+
+    top = lexical_results[0]
+    normalized_tokens = set(token.lower() for token in tokens)
+    exact_name = str(top.get("name") or "").lower()
+    exact_qname = str(top.get("qualified_name") or "").lower()
+    if len(tokens) <= 2 and top.get("kind") == "symbol" and normalized_tokens.intersection(
+        {exact_name, exact_qname, exact_qname.split("::")[-1]}
+    ):
+        return {
+            "enabled": True,
+            "reason": "exact-symbol-lexical-hit",
+            "use_graph": False,
+            "use_embeddings": False,
+        }
+
+    return {
+        "enabled": True,
+        "reason": "broad-query",
+        "use_graph": True,
+        "use_embeddings": True,
+    }
+
+
+def apply_summary_bonus(
+    candidates: Dict[Tuple[str, str], Dict[str, object]],
+    summary_root: Path,
+    repo_name: str,
+    tokens: Sequence[str],
+) -> None:
+    summaries = load_summary_artifacts(summary_root, repo_name)
+    file_summaries = {item["path"]: item for item in summaries.get("files", [])}
+    symbol_summaries = {item["symbol_id"]: item for item in summaries.get("symbols", [])}
+
+    for candidate in candidates.values():
+        searchable = []
+        if candidate.get("path") and candidate["path"] in file_summaries:
+            searchable.append(file_summaries[candidate["path"]]["summary"])
+        if candidate.get("symbol_id") and candidate["symbol_id"] in symbol_summaries:
+            searchable.append(symbol_summaries[candidate["symbol_id"]]["summary"])
+        if not searchable:
+            continue
+        haystack = " ".join(searchable).lower()
+        overlap = sum(1 for token in tokens if token in haystack)
+        if overlap <= 0:
+            continue
+        candidate["score"] = round(float(candidate.get("score") or 0.0) + overlap * 0.2, 6)
+        reasons = list(candidate.get("reasons", []))
+        if "summary" not in reasons:
+            reasons.append("summary")
+        candidate["reasons"] = reasons
+
+
+def sort_candidates(candidates: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
+    return sorted(
+        candidates,
+        key=lambda item: (
+            -float(item.get("score") or 0.0),
+            str(item.get("path") or ""),
+            str(item.get("qualified_name") or item.get("title") or ""),
+        ),
+    )
 
 
 def load_json(path: Path) -> Dict[str, object]:

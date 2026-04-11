@@ -50,6 +50,7 @@ class RustSymbol:
     is_test: bool = False
     impl_target: Optional[str] = None
     impl_trait: Optional[str] = None
+    super_traits: Tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass
@@ -168,6 +169,24 @@ def parse_impl_identity(signature: str) -> Tuple[str, Optional[str], Optional[st
         impl_trait, impl_target = (part.strip() for part in remainder.split(" for ", 1))
         return f"impl {impl_trait} for {impl_target}", impl_trait, impl_target
     return f"impl {remainder}", None, remainder or None
+
+
+def parse_trait_supertraits(signature: str, name: str) -> Tuple[str, ...]:
+    normalized = collapse_whitespace(signature).rstrip("{").strip()
+    normalized = normalized.split(" where ", 1)[0].strip()
+    marker = f"trait {name}"
+    marker_index = normalized.find(marker)
+    if marker_index < 0:
+        return ()
+    remainder = normalized[marker_index + len(marker) :].strip()
+    if not remainder.startswith(":"):
+        return ()
+    parents = []
+    for entry in remainder[1:].split("+"):
+        candidate = collapse_whitespace(entry)
+        if candidate:
+            parents.append(candidate)
+    return tuple(parents)
 
 
 def strip_leading_impl_generics(value: str) -> str:
@@ -323,9 +342,12 @@ def parse_rust_file(path: str, source: str, crate_name: str, module_path: str) -
         name = pending_declaration.name or ""
         impl_target = None
         impl_trait = None
+        super_traits: Tuple[str, ...] = ()
 
         if kind == "impl":
             name, impl_trait, impl_target = parse_impl_identity(declaration_text)
+        elif kind == "trait":
+            super_traits = parse_trait_supertraits(declaration_text, name)
 
         qualifier = pending_declaration.container_qualified_name or pending_declaration.module_path
         qualified_name = f"{qualifier}::{name}"
@@ -357,6 +379,7 @@ def parse_rust_file(path: str, source: str, crate_name: str, module_path: str) -
             is_test=is_test,
             impl_target=impl_target,
             impl_trait=impl_trait,
+            super_traits=super_traits,
         )
         symbols.append(symbol)
         symbol_lookup[symbol.local_id] = symbol

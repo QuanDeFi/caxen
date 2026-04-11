@@ -15,6 +15,7 @@ def build_graph_artifact(symbol_index: Dict[str, object]) -> Dict[str, object]:
     edges: List[Dict[str, object]] = []
     node_ids = set()
     reference_nodes: Dict[str, str] = {}
+    symbol_by_id = {symbol["symbol_id"]: symbol for symbol in symbol_index["symbols"]}
 
     repo_node_id = stable_id("repo", repo_name)
     append_node(
@@ -134,6 +135,31 @@ def build_graph_artifact(symbol_index: Dict[str, object]) -> Dict[str, object]:
                     ),
                 )
 
+        if symbol["kind"] == "trait":
+            for parent in symbol.get("resolved_super_traits", []):
+                parent_node_id = resolve_target_node(
+                    nodes,
+                    node_ids,
+                    reference_nodes,
+                    repo_name,
+                    parent.get("target_symbol_id"),
+                    parent.get("target_qualified_name") or parent.get("qualified_name_hint"),
+                    "trait_ref",
+                )
+                if not parent_node_id:
+                    continue
+                append_edge(
+                    edges,
+                    edge_counts,
+                    make_edge(
+                        "INHERITS",
+                        symbol["symbol_id"],
+                        parent_node_id,
+                        repo_name,
+                        path=symbol["path"],
+                    ),
+                )
+
     for import_record in symbol_index["imports"]:
         target_node_id = resolve_target_node(
             nodes,
@@ -187,6 +213,21 @@ def build_graph_artifact(symbol_index: Dict[str, object]) -> Dict[str, object]:
                 kind=reference["kind"],
             ),
         )
+        source_symbol = symbol_by_id.get(reference["container_symbol_id"])
+        if source_symbol and source_symbol.get("is_test"):
+            append_edge(
+                edges,
+                edge_counts,
+                make_edge(
+                    "TESTS",
+                    source_node_id,
+                    target_node_id,
+                    repo_name,
+                    path=reference["path"],
+                    line=reference["span"]["start_line"],
+                    kind=reference["kind"],
+                ),
+            )
 
     append_statement_graph(
         nodes,
@@ -200,7 +241,7 @@ def build_graph_artifact(symbol_index: Dict[str, object]) -> Dict[str, object]:
     )
 
     return {
-        "schema_version": "0.3.0",
+        "schema_version": "0.4.0",
         "repo": repo_name,
         "generated_at": timestamp_now(),
         "nodes": nodes,

@@ -271,6 +271,8 @@ def build_documents(
                     symbol.get("container_qualified_name"),
                     symbol.get("impl_target"),
                     symbol.get("impl_trait"),
+                    " ".join(symbol.get("super_traits", [])),
+                    " ".join(item.get("target_qualified_name", "") for item in symbol.get("resolved_super_traits", [])),
                     " ".join(symbol.get("attributes", [])),
                     " ".join(path_tags(symbol["path"])),
                 ]

@@ -20,6 +20,7 @@ The current implemented architecture covers the first durable Phase 0-6 slice of
 5. lexical search indexing
 6. deterministic summaries and agent-facing query operations
 7. first compiler-probed statement/data/control analysis and an embedding sidecar
+8. graph query APIs plus optional parser-backend probes and a model-backed embedding path
 
 This gives later comparison, retrieval, and planning stages a stable inventory/search/summary substrate.
 
@@ -30,8 +31,8 @@ This gives later comparison, retrieval, and planning stages a stable inventory/s
 The current implemented subset is narrower than the full roadmap:
 
 - implemented: workspace bootstrap, repo sync/verification, normalized raw inventory, initial Rust parser ingestion, symbol artifacts, SQLite persistence, optional parquet export path, first semantic graph edges, SQLite FTS lexical search, graph-backed retrieval, deterministic summaries, agent toolkit commands, and a lightweight benchmark harness
-- implemented: first `rustc` AST probing, persisted statement artifacts, first statement-level control/data/dependence-style graph edges, and a local embedding sidecar
-- not implemented yet: tree-sitter or rust-analyzer-backed ingestion, stronger compiler-backed symbol resolution, richer interprocedural control/data semantics, model-backed embeddings, and deeper benchmark coverage
+- implemented: first `rustc` AST probing, optional `tree-sitter` and `rust-analyzer` backend probes, persisted statement artifacts, first statement-level control/data/dependence-style graph edges, a graph query API, and a provider-based embedding sidecar with an OpenAI-backed path when credentials are configured
+- not implemented yet: using `tree-sitter` or `rust-analyzer` as the primary symbol extractor, stronger compiler-backed cross-crate resolution, richer interprocedural semantics beyond the current heuristic layer, and answer-quality grading in evaluation
 
 Use this document and the code under `src/` as the source of truth for current behavior. Use `AGENTS.md` as the roadmap for the next layers.
 
@@ -64,7 +65,10 @@ Current subcommand:
 - `repo-overview`
 - `find-symbol`
 - `embedding-search`
+- `where-defined`
 - `trace-calls`
+- `who-imports`
+- `adjacent-symbols`
 - `compare-repos`
 - `find-parsers`
 - `find-datasources`
@@ -114,6 +118,12 @@ Each adapter contributes:
 - records per-file parse success and AST-derived item/statement/control counts
 - aggregates backend availability and probe counts into the parsed symbol artifact
 
+`src/parsers/tree_sitter_backend.py` and `src/parsers/rust_analyzer_backend.py` add optional backend probes:
+
+- `tree-sitter` probing when a Rust grammar is installed locally
+- `rust-analyzer` document-symbol probing when a working server binary is available
+- aggregated backend availability and sample counts under `parser_backends`
+
 ### Symbol Index
 
 `src/symbols/indexer.py` consumes raw inventory roots and writes:
@@ -127,8 +137,9 @@ It now includes:
 
 - expanded import records
 - struct fields, enum variants, and simple local variables
+- trait inheritance records and resolved supertraits
 - resolved import and impl links where the current symbol table can support them
-- symbol-level reference records for call and use sites
+- symbol-level reference records for call and use sites, including `self.method()` and `self.field`
 - persisted statement records with define/read/write/call rollups
 - compiler-probe metadata under `parser_backends`
 
@@ -147,8 +158,10 @@ The current graph includes repository, file, symbol, and reference nodes with:
 - `IMPORTS`
 - `REFERENCES`
 - `IMPLEMENTS`
+- `INHERITS`
 - `CALLS`
 - `USES`
+- `TESTS`
 - `CONTROL_FLOW`
 - `DATA_FLOW`
 - `DEPENDENCE`
@@ -173,13 +186,16 @@ The current graph includes repository, file, symbol, and reference nodes with:
 - optional embedding recall from the local sidecar
 - graph-neighbor expansion from indexed symbol/file seeds
 - symbol localization inside hot files
+- summary-aware score bonuses
+- a heuristic selective retrieval gate
 - lightweight score fusion for final context selection
 
 ### Embedding Sidecar
 
 `src/embeddings/indexer.py` builds an optional local vector sidecar under `data/search/<repo>/`:
 
-- hashed TF-IDF-style vectors over indexed documents
+- hashed TF-IDF-style vectors over indexed documents by default
+- an OpenAI-backed dense embedding path when `OPENAI_API_KEY` is configured
 - persisted `embedding_index.json` and `embedding_manifest.json`
 - bounded semantic recall used as a side path in retrieval rather than as the primary layer
 
@@ -201,7 +217,10 @@ These summaries are generated from raw inventory, symbol artifacts, and graph ed
 
 - `repo-overview`
 - `find-symbol`
+- `where-defined`
 - `trace-calls`
+- `who-imports`
+- `adjacent-symbols`
 - `compare-repos`
 - `find-parsers`
 - `find-datasources`
@@ -214,7 +233,7 @@ These summaries are generated from raw inventory, symbol artifacts, and graph ed
 
 `src/evaluation/harness.py` provides the current benchmark slice:
 
-- lexical-only vs lexical-plus-graph vs embedding comparison
+- lexical-only, graph, rerank, summary-aware, vector-recall, and selective-retrieval comparisons
 - deterministic query cases over the pinned upstream repos
 - JSON output under `data/eval/benchmarks.json`
 

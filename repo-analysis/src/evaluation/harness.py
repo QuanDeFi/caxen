@@ -5,17 +5,28 @@ import time
 from pathlib import Path
 from typing import Dict, List, Sequence
 
+from embeddings.indexer import query_embedding_index
 from retrieval.engine import retrieve_context
 from search.indexer import search_documents
-from embeddings.indexer import query_embedding_index
 from symbols.indexer import timestamp_now
 
 
-SCHEMA_VERSION = "0.1.0"
+SCHEMA_VERSION = "0.2.0"
+DEFAULT_MODES = (
+    "lexical_only",
+    "lexical_graph",
+    "lexical_graph_rerank",
+    "lexical_graph_rerank_summaries",
+    "lexical_graph_vector_rerank",
+    "lexical_graph_vector_rerank_summaries",
+    "selective_on",
+    "selective_off",
+)
 DEFAULT_BENCHMARKS = [
     {
         "name": "yellowstone_vixen_attr_macro",
         "repo": "yellowstone-vixen",
+        "task_type": "symbol_lookup",
         "query": "vixen proc macro attribute",
         "expected_path": "crates/proc-macro/src/lib.rs",
         "expected_name": "vixen",
@@ -23,13 +34,31 @@ DEFAULT_BENCHMARKS = [
     {
         "name": "yellowstone_include_parser_macro",
         "repo": "yellowstone-vixen",
+        "task_type": "extension_point",
         "query": "include vixen parser macro",
         "expected_path": "crates/proc-macro/src/lib.rs",
         "expected_name": "include_vixen_parser",
     },
     {
+        "name": "yellowstone_runtime_handler_trait",
+        "repo": "yellowstone-vixen",
+        "task_type": "architecture",
+        "query": "runtime handler trait",
+        "expected_path": "crates/runtime/src/handler.rs",
+        "expected_name": "Handler",
+    },
+    {
+        "name": "yellowstone_runtime_source_trait",
+        "repo": "yellowstone-vixen",
+        "task_type": "extension_point",
+        "query": "runtime source trait",
+        "expected_path": "crates/runtime/src/sources.rs",
+        "expected_name": "SourceTrait",
+    },
+    {
         "name": "carbon_deduplication_filter",
         "repo": "carbon",
+        "task_type": "symbol_lookup",
         "query": "deduplication filter",
         "expected_path": "crates/core/src/filter.rs",
         "expected_name": "DeduplicationFilter",
@@ -37,9 +66,26 @@ DEFAULT_BENCHMARKS = [
     {
         "name": "carbon_datasource_filter",
         "repo": "carbon",
+        "task_type": "extension_point",
         "query": "datasource filter",
         "expected_path": "crates/core/src/filter.rs",
         "expected_name": "DatasourceFilter",
+    },
+    {
+        "name": "carbon_instruction_decoder_trait",
+        "repo": "carbon",
+        "task_type": "architecture",
+        "query": "instruction decoder trait",
+        "expected_path": "crates/core/src/instruction.rs",
+        "expected_name": "InstructionDecoder",
+    },
+    {
+        "name": "carbon_account_decoder_trait",
+        "repo": "carbon",
+        "task_type": "architecture",
+        "query": "account decoder trait",
+        "expected_path": "crates/core/src/account.rs",
+        "expected_name": "AccountDecoder",
     },
 ]
 
@@ -50,17 +96,19 @@ def run_benchmarks(
     parsed_root: Path,
     eval_root: Path,
     *,
+    summary_root: Path | None = None,
     repos: Sequence[str] = (),
     limit: int = 5,
+    modes: Sequence[str] = DEFAULT_MODES,
 ) -> Dict[str, object]:
     selected_repos = set(repos or [item["repo"] for item in DEFAULT_BENCHMARKS])
     cases = [item for item in DEFAULT_BENCHMARKS if item["repo"] in selected_repos]
+    selected_modes = tuple(modes or DEFAULT_MODES)
 
     runs = []
     for case in cases:
-        runs.append(run_case(case, "lexical", search_root, graph_root, parsed_root, limit))
-        runs.append(run_case(case, "lexical_graph", search_root, graph_root, parsed_root, limit))
-        runs.append(run_case(case, "embedding", search_root, graph_root, parsed_root, limit))
+        for mode in selected_modes:
+            runs.append(run_case(case, mode, search_root, graph_root, parsed_root, summary_root, limit))
 
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -83,14 +131,16 @@ def run_case(
     search_root: Path,
     graph_root: Path,
     parsed_root: Path,
+    summary_root: Path | None,
     limit: int,
 ) -> Dict[str, object]:
     started = time.perf_counter()
-    if mode == "lexical":
-        results = search_documents(search_root, case["repo"], case["query"], limit=limit, kinds=("symbol", "file"))
-        selected = results
-    elif mode == "embedding":
+    if mode == "lexical_only":
+        selected = search_documents(search_root, case["repo"], case["query"], limit=limit, kinds=("symbol", "file"))
+        context_summary = {"mode": "lexical_only"}
+    elif mode == "embedding_only":
         selected = query_embedding_index(search_root, case["repo"], case["query"], limit=limit)
+        context_summary = {"mode": "embedding_only"}
     else:
         context = retrieve_context(
             search_root,
@@ -98,10 +148,16 @@ def run_case(
             parsed_root,
             case["repo"],
             case["query"],
+            summary_root=summary_root,
             limit=limit,
-            use_embeddings=False,
+            use_graph=mode != "lexical_only",
+            use_embeddings=mode in {"lexical_graph_vector_rerank", "lexical_graph_vector_rerank_summaries", "selective_on", "selective_off"},
+            use_rerank=mode not in {"lexical_graph", "lexical_only"},
+            use_summaries=mode in {"lexical_graph_rerank_summaries", "lexical_graph_vector_rerank_summaries", "selective_on", "selective_off"},
+            selective_retrieval=mode == "selective_on",
         )
         selected = context["selected_context"]
+        context_summary = context["summary"]
     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
 
     exact_hit = False
@@ -115,6 +171,7 @@ def run_case(
     return {
         "name": case["name"],
         "repo": case["repo"],
+        "task_type": case["task_type"],
         "query": case["query"],
         "mode": mode,
         "expected_path": case["expected_path"],
@@ -122,6 +179,10 @@ def run_case(
         "latency_ms": elapsed_ms,
         "exact_hit": exact_hit,
         "path_hit": path_hit,
+        "files_opened": count_unique_paths(selected),
+        "prepared_tokens": estimate_prepared_tokens(selected),
+        "selected_count": len(selected),
+        "context_summary": context_summary,
         "selected": selected,
     }
 
@@ -139,7 +200,9 @@ def summarize_runs(runs: Sequence[Dict[str, object]]) -> Dict[str, object]:
                 "runs": len(mode_runs),
                 "exact_hits": sum(1 for run in mode_runs if run["exact_hit"]),
                 "path_hits": sum(1 for run in mode_runs if run["path_hit"]),
-                "avg_latency_ms": round(sum(run["latency_ms"] for run in mode_runs) / max(len(mode_runs), 1), 3),
+                "avg_latency_ms": average(run["latency_ms"] for run in mode_runs),
+                "avg_files_opened": average(run["files_opened"] for run in mode_runs),
+                "avg_prepared_tokens": average(run["prepared_tokens"] for run in mode_runs),
             }
         )
 
@@ -147,3 +210,25 @@ def summarize_runs(runs: Sequence[Dict[str, object]]) -> Dict[str, object]:
         "runs": len(runs),
         "modes": mode_summaries,
     }
+
+
+def count_unique_paths(selected: Sequence[Dict[str, object]]) -> int:
+    return len({str(item.get("path")) for item in selected if item.get("path")})
+
+
+def estimate_prepared_tokens(selected: Sequence[Dict[str, object]]) -> int:
+    total = 0
+    for item in selected:
+        text = " ".join(
+            str(part or "")
+            for part in (item.get("title"), item.get("preview"), item.get("qualified_name"), item.get("path"))
+        )
+        total += len(text.split())
+    return total
+
+
+def average(values: Sequence[float] | Sequence[int]) -> float:
+    values = list(values)
+    if not values:
+        return 0.0
+    return round(sum(float(value) for value in values) / len(values), 3)

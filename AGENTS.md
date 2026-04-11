@@ -102,9 +102,9 @@ Current implementation status:
 
 - Phase 0 and Phase 1 workspace setup are in place.
 - Phase 2 raw inventory is implemented and produces normalized `manifest.json` and `repo_map.json`.
-- Phase 3 now includes an initial Rust parser/symbol/graph slice plus a `rustc` AST probe, statement-level nodes, and first control-flow/data-flow/dependence-style edges.
-- Phase 4-6 now include lexical search, an embedding sidecar, deterministic summaries, and agent-facing query commands.
-- The remaining roadmap is now the more advanced version of those layers: deeper compiler-backed parsing, stronger statement/control/data semantics, and better model-backed embeddings.
+- Phase 3 now includes an initial Rust parser/symbol/graph slice plus a `rustc` AST probe, optional `tree-sitter`/`rust-analyzer` backend probes, statement-level nodes, and first control-flow/data-flow/dependence-style edges.
+- Phase 4-6 now include lexical search, a provider-based embedding sidecar, deterministic summaries, graph query commands, and agent-facing query operations.
+- The remaining roadmap is now the stronger version of those layers: primary compiler-backed parsing, deeper cross-crate semantics, and evaluation that grades answer quality instead of only retrieval quality.
 
 When there is any ambiguity, treat `repo-analysis/docs/architecture.md` and the code under `repo-analysis/src/` as the source of truth for what actually works today.
 

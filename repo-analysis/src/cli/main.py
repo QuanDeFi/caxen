@@ -12,6 +12,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from agents.toolkit import (
+    adjacent_symbols,
     compare_repos,
     find_datasources,
     find_decoders,
@@ -22,6 +23,8 @@ from agents.toolkit import (
     repo_overview,
     summarize_path,
     trace_calls,
+    where_defined,
+    who_imports,
 )
 from adapters.carbon.adapter import inventory as inventory_carbon
 from adapters.yellowstone_vixen.adapter import inventory as inventory_yellowstone_vixen
@@ -128,6 +131,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build_embeddings.add_argument("--search-root", required=True)
     build_embeddings.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
+    build_embeddings.add_argument("--provider", choices=("auto", "hashing", "openai"), default="auto")
+    build_embeddings.add_argument("--model")
 
     run_eval = subparsers.add_parser(
         "run-benchmarks",
@@ -137,7 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_eval.add_argument("--graph-root", required=True)
     run_eval.add_argument("--parsed-root", required=True)
     run_eval.add_argument("--eval-root", required=True)
+    run_eval.add_argument("--summary-root")
     run_eval.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
+    run_eval.add_argument("--mode", action="append")
     run_eval.add_argument("--limit", type=int, default=5)
 
     repo_overview_cmd = subparsers.add_parser("repo-overview", help="Show the repo-level summary.")
@@ -163,6 +170,31 @@ def build_parser() -> argparse.ArgumentParser:
     trace_calls_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     trace_calls_cmd.add_argument("symbol")
     trace_calls_cmd.add_argument("--limit", type=int, default=10)
+
+    where_defined_cmd = subparsers.add_parser("where-defined", help="Resolve where a symbol is defined.")
+    where_defined_cmd.add_argument("--search-root", required=True)
+    where_defined_cmd.add_argument("--parsed-root", required=True)
+    where_defined_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    where_defined_cmd.add_argument("symbol")
+    where_defined_cmd.add_argument("--limit", type=int, default=10)
+
+    who_imports_cmd = subparsers.add_parser("who-imports", help="Find importers of a symbol or module.")
+    who_imports_cmd.add_argument("--search-root", required=True)
+    who_imports_cmd.add_argument("--parsed-root", required=True)
+    who_imports_cmd.add_argument("--graph-root", required=True)
+    who_imports_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    who_imports_cmd.add_argument("symbol")
+    who_imports_cmd.add_argument("--limit", type=int, default=20)
+
+    adjacent_symbols_cmd = subparsers.add_parser("adjacent-symbols", help="List graph-adjacent symbols for a symbol query.")
+    adjacent_symbols_cmd.add_argument("--search-root", required=True)
+    adjacent_symbols_cmd.add_argument("--parsed-root", required=True)
+    adjacent_symbols_cmd.add_argument("--graph-root", required=True)
+    adjacent_symbols_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    adjacent_symbols_cmd.add_argument("symbol")
+    adjacent_symbols_cmd.add_argument("--edge-type", action="append")
+    adjacent_symbols_cmd.add_argument("--direction", choices=("incoming", "outgoing", "both"), default="both")
+    adjacent_symbols_cmd.add_argument("--limit", type=int, default=20)
 
     compare_repos_cmd = subparsers.add_parser("compare-repos", help="Compare retrieval context across repos.")
     compare_repos_cmd.add_argument("--search-root", required=True)
@@ -296,7 +328,7 @@ def handle_build_embeddings(args: argparse.Namespace) -> int:
     search_root = Path(args.search_root).resolve()
     repo_names = args.repo or sorted(ADAPTERS)
     for repo_name in repo_names:
-        payload = build_embedding_index(search_root, repo_name)
+        payload = build_embedding_index(search_root, repo_name, provider=args.provider, model=args.model)
         print(f"Wrote embeddings for {repo_name} to {search_root / repo_name} ({payload['summary']['documents']} documents)")
     return 0
 
@@ -307,8 +339,10 @@ def handle_run_benchmarks(args: argparse.Namespace) -> int:
         Path(args.graph_root).resolve(),
         Path(args.parsed_root).resolve(),
         Path(args.eval_root).resolve(),
+        summary_root=Path(args.summary_root).resolve() if args.summary_root else None,
         repos=tuple(args.repo or ()),
         limit=args.limit,
+        modes=tuple(args.mode or ()),
     )
     print_json(payload)
     return 0
@@ -355,6 +389,40 @@ def main(argv: Optional[List[str]] = None) -> int:
                 Path(args.parsed_root).resolve(),
                 args.repo,
                 args.symbol,
+                limit=args.limit,
+            )
+        )
+    if args.command == "where-defined":
+        return print_json(
+            where_defined(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                args.repo,
+                args.symbol,
+                limit=args.limit,
+            )
+        )
+    if args.command == "who-imports":
+        return print_json(
+            who_imports(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.graph_root).resolve(),
+                args.repo,
+                args.symbol,
+                limit=args.limit,
+            )
+        )
+    if args.command == "adjacent-symbols":
+        return print_json(
+            adjacent_symbols(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.graph_root).resolve(),
+                args.repo,
+                args.symbol,
+                edge_types=tuple(args.edge_type or ()),
+                direction=args.direction,
                 limit=args.limit,
             )
         )
