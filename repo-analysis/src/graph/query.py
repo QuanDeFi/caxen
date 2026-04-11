@@ -159,9 +159,13 @@ def resolve_symbol_matches(
     limit: int = 10,
 ) -> List[Dict[str, object]]:
     payload = load_json(parsed_root / repo_name / "symbols.json")
-    symbol_by_id = {symbol["symbol_id"]: symbol for symbol in payload.get("symbols", [])}
-    search_results = search_documents(search_root, repo_name, symbol_query, limit=max(limit * 2, 10), kinds=("symbol",))
     normalized = symbol_query.lower()
+    direct_matches = direct_symbol_matches(payload.get("symbols", []), normalized)
+    if direct_matches:
+        return direct_matches[:limit]
+
+    symbol_by_id = {symbol["symbol_id"]: symbol for symbol in payload.get("symbols", [])}
+    search_results = search_documents(search_root, repo_name, symbol_query, limit=max(limit * 4, 40), kinds=("symbol",))
 
     matches = []
     seen = set()
@@ -244,3 +248,23 @@ def collect_neighbors(
 def load_json(path: Path) -> Dict[str, object]:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def direct_symbol_matches(symbols: Sequence[Dict[str, object]], normalized_query: str) -> List[Dict[str, object]]:
+    matches = []
+    for symbol in symbols:
+        candidates = {
+            str(symbol.get("name") or "").lower(),
+            str(symbol.get("qualified_name") or "").lower(),
+            str(symbol.get("qualified_name") or "").lower().split("::")[-1],
+        }
+        if normalized_query not in candidates:
+            continue
+        matches.append(symbol)
+    return sorted(
+        matches,
+        key=lambda item: (
+            str(item["path"]),
+            str(item["qualified_name"]),
+        ),
+    )

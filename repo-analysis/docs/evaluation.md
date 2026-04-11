@@ -33,12 +33,13 @@ Each run records:
 - path-hit status
 - files opened
 - prepared-token estimate
+- answer-quality score and synthesized answer preview
 - retrieval summary metadata
 - selected results
 
 ## Current Limitations
 
 - the benchmark set is small and deterministic
-- there is no answer-quality grading yet
-- answer quality is still proxied through hit-rate and context-shape metrics
+- answer quality is graded with deterministic heuristics rather than model judging
+- the synthesized answer score is still a proxy for final agent response quality
 - model-backed embedding benchmarks require an external embedding provider configuration

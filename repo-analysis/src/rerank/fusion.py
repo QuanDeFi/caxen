@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 from typing import Dict, Iterable, List
 
 
@@ -21,7 +22,18 @@ KIND_PRIORITY = {
 }
 
 
-def rerank_candidates(candidates: Iterable[Dict[str, object]], query_tokens: List[str]) -> List[Dict[str, object]]:
+def rerank_candidates(
+    candidates: Iterable[Dict[str, object]],
+    query_tokens: List[str],
+    *,
+    query_profile: Dict[str, object] | None = None,
+) -> List[Dict[str, object]]:
+    query_profile = query_profile or {}
+    prefer_tags = set(query_profile.get("prefer_tags", []))
+    prefer_symbol_kinds = set(query_profile.get("prefer_symbol_kinds", []))
+    prefer_symbols = bool(query_profile.get("prefer_symbols"))
+    prefer_docs = bool(query_profile.get("prefer_docs"))
+    intent = str(query_profile.get("intent") or "")
     ranked = []
     for candidate in candidates:
         searchable = " ".join(
@@ -38,6 +50,8 @@ def rerank_candidates(candidates: Iterable[Dict[str, object]], query_tokens: Lis
         exact_bonus = 0.0
         name = str(candidate.get("name") or "").lower()
         qualified_name = str(candidate.get("qualified_name") or "").lower()
+        metadata = candidate.get("metadata", {}) or {}
+        tags = {str(tag).lower() for tag in metadata.get("tags", [])}
         if any(token == name for token in query_tokens):
             exact_bonus += 0.75
         final_name = qualified_name.split("::")[-1] if qualified_name else ""
@@ -52,6 +66,18 @@ def rerank_candidates(candidates: Iterable[Dict[str, object]], query_tokens: Lis
         lexical_reason_bonus = 0.5 if "lexical" in reasons else 0.0
         localization_bonus = 0.25 if "symbol-localization" in reasons else 0.0
         embedding_bonus = 0.15 if "embedding" in reasons else 0.0
+        tag_bonus = 0.3 * sum(1 for tag in prefer_tags if tag in tags)
+        symbol_kind_bonus = 0.25 * sum(1 for tag in prefer_symbol_kinds if tag == kind or tag in tags)
+        kind_intent_bonus = 0.0
+        if prefer_symbols and kind in {"symbol", "statement"}:
+            kind_intent_bonus += 0.35
+        if intent == "architecture" and kind in {"symbol", "file"}:
+            kind_intent_bonus += 0.2
+        if prefer_docs and kind in {"repo", "directory", "file"}:
+            kind_intent_bonus += 0.35
+        path = str(candidate.get("path") or "")
+        suffix = PurePosixPath(path).suffix.lower() if path else ""
+        markdown_penalty = -0.6 if suffix == ".md" and not prefer_docs else 0.0
         score = (
             float(candidate.get("score") or 0.0)
             + lexical_bonus
@@ -62,6 +88,10 @@ def rerank_candidates(candidates: Iterable[Dict[str, object]], query_tokens: Lis
             + lexical_reason_bonus
             + localization_bonus
             + embedding_bonus
+            + tag_bonus
+            + symbol_kind_bonus
+            + kind_intent_bonus
+            + markdown_penalty
         )
 
         updated = dict(candidate)

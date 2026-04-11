@@ -29,6 +29,9 @@ EDGE_BONUS = {
     "CONTROL_FLOW": 0.55,
     "DEPENDENCE": 0.55,
 }
+ARCHITECTURE_HINTS = {"architecture", "datasource", "decoder", "extension", "handler", "macro", "parser", "runtime", "source", "trait"}
+DOC_HINTS = {"doc", "docs", "documentation", "overview", "readme", "summary"}
+SYMBOL_KIND_HINTS = {"enum", "function", "handler", "macro", "method", "module", "parser", "source", "struct", "trait", "type"}
 
 
 def retrieve_context(
@@ -50,7 +53,9 @@ def retrieve_context(
     max_graph_fanout: int = 32,
 ) -> Dict[str, object]:
     tokens = tokenize(query)
-    lexical_results = search_documents(search_root, repo_name, query, limit=max(limit * 2, 10), kinds=kinds)
+    query_profile = classify_query(tokens, query)
+    effective_kinds = tuple(kinds) if kinds else default_query_kinds(query_profile)
+    lexical_results = search_documents(search_root, repo_name, query, limit=max(limit * 2, 10), kinds=effective_kinds)
     gate = retrieval_gate(tokens, lexical_results, selective_retrieval)
     effective_use_graph = use_graph and gate["use_graph"]
     effective_use_embeddings = use_embeddings and gate["use_embeddings"]
@@ -109,7 +114,11 @@ def retrieve_context(
         apply_summary_bonus(candidates, summary_root, repo_name, tokens)
 
     ranked_candidates = list(candidates.values())
-    ranked = rerank_candidates(ranked_candidates, tokens)[:limit] if use_rerank else sort_candidates(ranked_candidates)[:limit]
+    ranked = (
+        rerank_candidates(ranked_candidates, tokens, query_profile=query_profile)[:limit]
+        if use_rerank
+        else sort_candidates(ranked_candidates)[:limit]
+    )
     return {
         "repo": repo_name,
         "query": query,
@@ -126,6 +135,7 @@ def retrieve_context(
             "rerank_enabled": use_rerank,
             "summaries_enabled": bool(use_summaries and summary_root is not None),
             "retrieval_gate": gate,
+            "query_profile": query_profile,
         },
     }
 
@@ -315,6 +325,39 @@ def retrieval_gate(
         "use_graph": True,
         "use_embeddings": True,
     }
+
+
+def classify_query(tokens: Sequence[str], query: str) -> Dict[str, object]:
+    token_set = {token.lower() for token in tokens}
+    doc_intent = bool(token_set.intersection(DOC_HINTS))
+    architecture_intent = bool(token_set.intersection(ARCHITECTURE_HINTS))
+    symbolish = "::" in query or (len(token_set) <= 2 and not doc_intent and not architecture_intent)
+
+    if doc_intent:
+        intent = "docs"
+    elif symbolish:
+        intent = "symbol"
+    elif architecture_intent:
+        intent = "architecture"
+    else:
+        intent = "exploration"
+
+    return {
+        "intent": intent,
+        "prefer_tags": sorted(token for token in token_set if token in ARCHITECTURE_HINTS),
+        "prefer_symbol_kinds": sorted(token for token in token_set if token in SYMBOL_KIND_HINTS),
+        "prefer_docs": doc_intent,
+        "prefer_symbols": intent == "symbol",
+    }
+
+
+def default_query_kinds(query_profile: Dict[str, object]) -> Tuple[str, ...]:
+    intent = query_profile.get("intent")
+    if intent == "docs":
+        return ("repo", "directory", "file", "symbol")
+    if intent == "symbol":
+        return ("symbol", "statement", "file")
+    return ("symbol", "file", "statement", "directory")
 
 
 def apply_summary_bonus(

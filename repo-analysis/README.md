@@ -22,13 +22,15 @@ The implemented slice in this repository now covers the current Phase 0-6 founda
 - SQLite FTS-based lexical search artifacts over repo/file/symbol documents
 - `rustc` AST probe metadata and persisted statement artifacts
 - statement-level graph nodes with first `CONTROL_FLOW`, `DATA_FLOW`, `DEPENDENCE`, `READS`, `WRITES`, and `REFS` edges
-- optional `tree-sitter` and `rust-analyzer` backend probes recorded in symbol artifacts
+- backend-preferred parser fusion that uses `rust-analyzer` document symbols or `tree-sitter` symbols when available and records the chosen primary backend per file
+- workspace-aware cross-crate resolution using Cargo metadata with dependency-alias support
+- interprocedural semantic summaries propagated across direct call chains
 - a provider-based embedding sidecar over indexed search documents with an OpenAI-backed path when configured
 - deterministic project/directory/file/symbol summaries
 - agent-facing CLI operations for repo overview, symbol lookup, graph queries, call tracing, and context prep
-- a broader benchmark harness for lexical, graph, rerank, summary-aware, vector, and selective retrieval modes
+- a broader benchmark harness for lexical, graph, rerank, summary-aware, vector, and selective retrieval modes with answer-quality scoring
 
-The remaining future work is the stronger version of these layers: primary compiler-backed parsing, richer interprocedural semantics, and evaluation that grades answer quality rather than only retrieval quality.
+The remaining work is now about fidelity and coverage rather than missing subsystems: deeper compiler/LSP-backed resolution, stronger interprocedural precision, broader benchmark coverage, and wider optional-backend availability across environments.
 
 ## Quickstart
 

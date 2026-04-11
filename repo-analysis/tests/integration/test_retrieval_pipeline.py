@@ -291,6 +291,8 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             )
             benchmark_payload = json.loads(benchmarks.stdout)
             self.assertGreaterEqual(len(benchmark_payload["summary"]["modes"]), 2)
+            self.assertIn("avg_answer_score", benchmark_payload["summary"]["modes"][0])
+            self.assertIn("answer_quality", benchmark_payload["runs"][0])
             self.assertTrue((eval_root / "benchmarks.json").exists())
 
 

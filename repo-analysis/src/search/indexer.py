@@ -234,6 +234,7 @@ def build_documents(
                     file_record.get("language"),
                     parsed_file.get("crate"),
                     parsed_file.get("module_path"),
+                    parsed_file.get("primary_parser_backend"),
                     " ".join(path_tags(path)),
                     source_text,
                 ]
@@ -245,11 +246,13 @@ def build_documents(
                 "symbols": symbol_counts_by_path.get(path, 0),
                 "crate": parsed_file.get("crate"),
                 "module_path": parsed_file.get("module_path"),
+                "primary_parser_backend": parsed_file.get("primary_parser_backend"),
                 "tags": path_tags(path),
             },
         }
 
     for symbol in symbols.get("symbols", []):
+        symbol_tags = build_symbol_tags(symbol)
         yield {
             "doc_id": stable_id("doc", repo_name, "symbol", symbol["symbol_id"]),
             "kind": "symbol",
@@ -273,8 +276,15 @@ def build_documents(
                     symbol.get("impl_trait"),
                     " ".join(symbol.get("super_traits", [])),
                     " ".join(item.get("target_qualified_name", "") for item in symbol.get("resolved_super_traits", [])),
+                    " ".join(item.get("target_qualified_name", "") for item in symbol.get("semantic_summary", {}).get("direct_calls", [])),
+                    " ".join(item.get("target_qualified_name", "") for item in symbol.get("semantic_summary", {}).get("transitive_calls", [])),
+                    " ".join(item.get("target_qualified_name", "") for item in symbol.get("semantic_summary", {}).get("reads", [])),
+                    " ".join(item.get("target_qualified_name", "") for item in symbol.get("semantic_summary", {}).get("writes", [])),
+                    " ".join(item.get("target_qualified_name", "") for item in symbol.get("semantic_summary", {}).get("interprocedural_reads", [])),
+                    " ".join(item.get("target_qualified_name", "") for item in symbol.get("semantic_summary", {}).get("interprocedural_writes", [])),
+                    " ".join(item.get("target_qualified_name", "") for item in symbol.get("semantic_summary", {}).get("interprocedural_references", [])),
                     " ".join(symbol.get("attributes", [])),
-                    " ".join(path_tags(symbol["path"])),
+                    " ".join(symbol_tags),
                 ]
                 if item
             ),
@@ -287,6 +297,8 @@ def build_documents(
                 "container_symbol_id": symbol["container_symbol_id"],
                 "container_qualified_name": symbol["container_qualified_name"],
                 "is_test": symbol["is_test"],
+                "semantic_summary": symbol.get("semantic_summary", {}),
+                "tags": symbol_tags,
             },
         }
 
@@ -349,6 +361,25 @@ def path_prefixes(path: str) -> List[str]:
         current.append(part)
         prefixes.append("/".join(current))
     return prefixes
+
+
+def build_symbol_tags(symbol: Dict[str, object]) -> List[str]:
+    tags = path_tags(symbol["path"])
+    tags.append(symbol["kind"])
+    if symbol.get("is_test"):
+        tags.append("test")
+    semantic_summary = symbol.get("semantic_summary", {})
+    if semantic_summary.get("direct_calls"):
+        tags.append("calls")
+    if semantic_summary.get("reads"):
+        tags.append("reads")
+    if semantic_summary.get("writes"):
+        tags.append("writes")
+    if symbol.get("impl_trait"):
+        tags.append("impl")
+    if symbol.get("super_traits"):
+        tags.append("trait")
+    return list(dict.fromkeys(tag for tag in tags if tag))
 
 
 def path_tags(path: str) -> List[str]:

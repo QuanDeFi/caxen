@@ -31,8 +31,8 @@ This gives later comparison, retrieval, and planning stages a stable inventory/s
 The current implemented subset is narrower than the full roadmap:
 
 - implemented: workspace bootstrap, repo sync/verification, normalized raw inventory, initial Rust parser ingestion, symbol artifacts, SQLite persistence, optional parquet export path, first semantic graph edges, SQLite FTS lexical search, graph-backed retrieval, deterministic summaries, agent toolkit commands, and a lightweight benchmark harness
-- implemented: first `rustc` AST probing, optional `tree-sitter` and `rust-analyzer` backend probes, persisted statement artifacts, first statement-level control/data/dependence-style graph edges, a graph query API, and a provider-based embedding sidecar with an OpenAI-backed path when credentials are configured
-- not implemented yet: using `tree-sitter` or `rust-analyzer` as the primary symbol extractor, stronger compiler-backed cross-crate resolution, richer interprocedural semantics beyond the current heuristic layer, and answer-quality grading in evaluation
+- implemented: `rustc` AST probing, backend-preferred symbol fusion that uses `rust-analyzer` document symbols or `tree-sitter` symbols when available, Cargo-metadata-backed workspace dependency resolution, persisted statement artifacts, interprocedural semantic summaries, a graph query API, answer-quality grading in evaluation, and a provider-based embedding sidecar with an OpenAI-backed path when credentials are configured
+- still heuristic: optional backend availability depends on the local environment, symbol resolution is workspace-aware rather than fully compiler-semantic, and interprocedural data/control semantics are still conservative rollups rather than full program analysis
 
 Use this document and the code under `src/` as the source of truth for current behavior. Use `AGENTS.md` as the roadmap for the next layers.
 
@@ -118,10 +118,11 @@ Each adapter contributes:
 - records per-file parse success and AST-derived item/statement/control counts
 - aggregates backend availability and probe counts into the parsed symbol artifact
 
-`src/parsers/tree_sitter_backend.py` and `src/parsers/rust_analyzer_backend.py` add optional backend probes:
+`src/parsers/tree_sitter_backend.py` and `src/parsers/rust_analyzer_backend.py` add higher-fidelity backend inputs:
 
-- `tree-sitter` probing when a Rust grammar is installed locally
-- `rust-analyzer` document-symbol probing when a working server binary is available
+- `tree-sitter` symbol extraction when a Rust grammar is installed locally
+- `rust-analyzer` document-symbol extraction when a working server binary is available
+- primary parser fusion that prefers `rust-analyzer`, then `tree-sitter`, then the deterministic parser
 - aggregated backend availability and sample counts under `parser_backends`
 
 ### Symbol Index
@@ -137,10 +138,13 @@ It now includes:
 
 - expanded import records
 - struct fields, enum variants, and simple local variables
+- Cargo-metadata-backed workspace package discovery and dependency-alias resolution
 - trait inheritance records and resolved supertraits
 - resolved import and impl links where the current symbol table can support them
 - symbol-level reference records for call and use sites, including `self.method()` and `self.field`
 - persisted statement records with define/read/write/call rollups
+- interprocedural semantic summaries propagated across direct call chains
+- per-file `primary_parser_backend` rollups
 - compiler-probe metadata under `parser_backends`
 
 SQLite persistence is always written. Parquet export is implemented as an optional path that activates when `pyarrow` is installed.
@@ -235,6 +239,7 @@ These summaries are generated from raw inventory, symbol artifacts, and graph ed
 
 - lexical-only, graph, rerank, summary-aware, vector-recall, and selective-retrieval comparisons
 - deterministic query cases over the pinned upstream repos
+- deterministic answer-quality grading derived from prepared context
 - JSON output under `data/eval/benchmarks.json`
 
 ## Output Model
@@ -292,8 +297,8 @@ The next architectural layers build on top of raw inventory:
 
 1. higher-fidelity Rust parsing beyond the current deterministic-plus-probe slice
 2. wider parquet availability across environments without relying on machine-local setup drift
-3. stronger compiler-backed resolution and query APIs
-4. richer interprocedural graph construction and retrieval
+3. stronger compiler/LSP-backed resolution and query APIs
+4. richer interprocedural graph construction and retrieval precision
 5. model-backed embeddings and better fusion/reranking
 6. stronger directory/file/symbol summaries with incremental refresh
 7. broader benchmark coverage and comparison tasks
@@ -305,9 +310,9 @@ The current implemented slice now includes deterministic JSON artifacts, SQLite 
 The next unresolved layers are still important:
 
 - parquet export depends on `pyarrow` being present in the active Python environment
-- cross-file symbol resolution is still heuristic rather than compiler-backed
-- the current statement/control/data/dependence graph is intra-function and heuristic
-- the current embedding/vector sidecar is local hashed TF-IDF rather than a model-backed embedding stack
+- workspace-aware symbol resolution still stops short of full compiler-semantic name resolution
+- the current interprocedural graph is based on propagated summaries rather than whole-program data/control analysis
+- the current embedding/vector sidecar defaults to local hashed TF-IDF unless a model-backed provider is configured
 - the benchmark harness is intentionally small and should not be treated as a complete evaluation program
 
 Those should be treated as the next expansion layers on top of the current inventory/search/summary/statement foundation rather than as missing bug fixes in the current slice.

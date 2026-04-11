@@ -11,6 +11,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from agents.toolkit import find_symbol, prepare_context, repo_overview, summarize_path, trace_calls
 from embeddings.indexer import build_embedding_index, query_embedding_index
+from evaluation.harness import run_benchmarks
 from graph.builder import build_graph_artifact, write_graph_artifact
 from retrieval.engine import retrieve_context
 from search.indexer import build_search_index, search_documents
@@ -187,6 +188,39 @@ class SearchAndSummaryTest(unittest.TestCase):
             directory_summary = summarize_path(paths["summary_root"], "demo", "src")
             self.assertEqual(directory_summary["kind"], "directory")
             self.assertEqual(directory_summary["summary"]["path"], "src")
+
+    def test_benchmark_harness_reports_answer_quality(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            paths = seed_demo_workspace(root)
+            eval_root = root / "eval"
+
+            payload = run_benchmarks(
+                paths["search_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                eval_root,
+                summary_root=paths["summary_root"],
+                repos=("demo",),
+                modes=("lexical_graph_rerank_summaries",),
+                benchmarks=[
+                    {
+                        "name": "demo_answer",
+                        "repo": "demo",
+                        "task_type": "symbol_lookup",
+                        "query": "answer helper",
+                        "expected_path": "src/lib.rs",
+                        "expected_name": "answer",
+                        "expected_terms": ["answer", "helper"],
+                    }
+                ],
+            )
+
+            run = payload["runs"][0]
+            self.assertIn("answer_quality", run)
+            self.assertGreater(run["answer_quality"]["score"], 0.5)
+            self.assertIn("avg_answer_score", payload["summary"]["modes"][0])
+            self.assertTrue((eval_root / "benchmarks.json").exists())
 
 
 if __name__ == "__main__":

@@ -30,7 +30,8 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
                 module_path TEXT NOT NULL,
                 language TEXT NOT NULL,
                 symbols INTEGER NOT NULL,
-                imports INTEGER NOT NULL
+                imports INTEGER NOT NULL,
+                primary_parser_backend TEXT NOT NULL
             );
 
             CREATE TABLE symbols (
@@ -64,7 +65,8 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
                 resolved_impl_target_qualified_name TEXT,
                 resolved_impl_trait_symbol_id TEXT,
                 resolved_impl_trait_qualified_name TEXT,
-                resolved_super_traits_json TEXT NOT NULL
+                resolved_super_traits_json TEXT NOT NULL,
+                semantic_summary_json TEXT NOT NULL
             );
 
             CREATE TABLE imports (
@@ -153,6 +155,7 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
             ("repo", str(payload["repo"])),
             ("generated_at", str(payload["generated_at"])),
             ("parser", str(payload["parser"])),
+            ("primary_parser_backends_json", json.dumps(payload.get("primary_parser_backends", []))),
             ("parser_backends_json", json.dumps(payload.get("parser_backends", {}))),
             ("source_roots_json", json.dumps(payload["source_roots"])),
             ("path_prefixes_json", json.dumps(payload["path_prefixes"])),
@@ -162,8 +165,8 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
 
         cursor.executemany(
             """
-            INSERT INTO files(path, crate, module_path, language, symbols, imports)
-            VALUES (:path, :crate, :module_path, :language, :symbols, :imports)
+            INSERT INTO files(path, crate, module_path, language, symbols, imports, primary_parser_backend)
+            VALUES (:path, :crate, :module_path, :language, :symbols, :imports, :primary_parser_backend)
             """,
             payload["files"],
         )
@@ -178,7 +181,7 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
                 super_traits_json,
                 resolved_impl_target_symbol_id, resolved_impl_target_qualified_name,
                 resolved_impl_trait_symbol_id, resolved_impl_trait_qualified_name,
-                resolved_super_traits_json
+                resolved_super_traits_json, semantic_summary_json
             )
             VALUES (
                 :symbol_id, :repo, :path, :crate, :module_path, :language, :kind, :name, :qualified_name,
@@ -188,7 +191,7 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
                 :super_traits_json,
                 :resolved_impl_target_symbol_id, :resolved_impl_target_qualified_name,
                 :resolved_impl_trait_symbol_id, :resolved_impl_trait_qualified_name,
-                :resolved_super_traits_json
+                :resolved_super_traits_json, :semantic_summary_json
             )
             """,
             [flatten_symbol_row(row) for row in payload["symbols"]],
@@ -410,6 +413,7 @@ def flatten_symbol_row(row: Dict[str, object]) -> Dict[str, object]:
         "resolved_impl_trait_symbol_id": row["resolved_impl_trait_symbol_id"],
         "resolved_impl_trait_qualified_name": row["resolved_impl_trait_qualified_name"],
         "resolved_super_traits_json": json.dumps(row.get("resolved_super_traits", [])),
+        "semantic_summary_json": json.dumps(row.get("semantic_summary", {})),
     }
 
 

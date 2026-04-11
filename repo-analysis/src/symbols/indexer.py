@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
+import tomllib
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import DefaultDict, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -123,15 +125,36 @@ PRIMITIVE_TYPES = {
 @dataclass
 class ParsedFileContext:
     source_path: Path
+    package_info: CargoPackageInfo
+    workspace_index: WorkspaceIndex
     parsed: ParsedRustFile
     source: str
     source_lines: List[str]
     cleaned_lines: List[str]
     crate_root: str
+    dependency_aliases: Dict[str, str]
     symbol_id_by_local: Dict[int, str]
     import_aliases: Dict[str, List[str]]
     compiler_probe: Dict[str, object]
     backend_probes: Dict[str, Dict[str, object]]
+    primary_parser_backend: str
+
+
+@dataclass(frozen=True)
+class CargoPackageInfo:
+    root: Path
+    manifest_path: Path
+    package_name: str
+    crate_name: str
+    crate_module: str
+    dependency_aliases: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WorkspaceIndex:
+    packages_by_root: Dict[Path, CargoPackageInfo]
+    packages_by_name: Dict[str, CargoPackageInfo]
+    packages_by_module: Dict[str, CargoPackageInfo]
 
 
 def build_symbol_index(
@@ -142,9 +165,9 @@ def build_symbol_index(
 ) -> Dict[str, object]:
     manifest = load_raw_manifest(raw_root, repo_name)
     parser_roots = manifest.get("parser_relevant_source_roots", [])
+    workspace_index = build_workspace_index(repo_root)
     rust_files = discover_rust_files(repo_root, parser_roots, normalize_prefixes(path_prefixes))
-    package_cache: Dict[Path, Tuple[Path, str]] = {}
-    contexts = [parse_rust_source_file(repo_root, path, package_cache) for path in rust_files]
+    contexts = [parse_rust_source_file(repo_root, path, workspace_index) for path in rust_files]
 
     for context in contexts:
         enrich_context_symbols(context)
@@ -174,6 +197,7 @@ def build_symbol_index(
                 "language": "Rust",
                 "symbols": len(context.parsed.symbols),
                 "imports": len(context.parsed.imports),
+                "primary_parser_backend": context.primary_parser_backend,
             }
         )
         for symbol in context.parsed.symbols:
@@ -185,6 +209,7 @@ def build_symbol_index(
     resolve_trait_inheritance(symbol_records, context_by_path, resolution_index)
     reference_records = build_reference_records(repo_name, contexts, resolution_index)
     statement_records = build_statement_records(repo_name, contexts, symbol_records, resolution_index)
+    enrich_symbol_semantics(symbol_records, reference_records, statement_records, resolution_index)
     compiler_backends = {
         "rustc_ast_probe": aggregate_rustc_probes([context.compiler_probe for context in contexts]),
         "tree_sitter_rust": aggregate_tree_sitter_probes(
@@ -203,7 +228,8 @@ def build_symbol_index(
         "schema_version": "0.5.0",
         "repo": repo_name,
         "generated_at": timestamp_now(),
-        "parser": "rust-simple-v3",
+        "parser": "rust-backend-fused-v2",
+        "primary_parser_backends": rollup_counts(context.primary_parser_backend for context in contexts),
         "parser_backends": compiler_backends,
         "source_roots": parser_roots,
         "path_prefixes": list(normalize_prefixes(path_prefixes)),
@@ -244,7 +270,7 @@ def build_import_records(
                     expanded_target,
                     context.parsed.module_path,
                     context.crate_root,
-                    {},
+                    context.dependency_aliases,
                     None,
                 )
                 alias_name = alias or normalized_target.split("::")[-1]
@@ -263,6 +289,7 @@ def build_import_records(
                     },
                     resolution_index,
                     context.import_aliases,
+                    context.dependency_aliases,
                     context.crate_root,
                     None,
                     None,
@@ -330,6 +357,7 @@ def build_reference_records(
                     symbol,
                     resolution_index,
                     context.import_aliases,
+                    context.dependency_aliases,
                     context.crate_root,
                     symbol["symbol_id"],
                     self_target,
@@ -359,6 +387,7 @@ def build_reference_records(
                     symbol,
                     resolution_index,
                     context.import_aliases,
+                    context.dependency_aliases,
                     context.crate_root,
                     symbol["symbol_id"],
                     self_target,
@@ -380,6 +409,7 @@ def build_reference_records(
                 symbol,
                 resolution_index,
                 context.import_aliases,
+                context.dependency_aliases,
                 context.crate_root,
                 self_target,
             ):
@@ -389,6 +419,7 @@ def build_reference_records(
                     symbol,
                     resolution_index,
                     context.import_aliases,
+                    context.dependency_aliases,
                     context.crate_root,
                     symbol["symbol_id"],
                     self_target,
@@ -415,6 +446,7 @@ def build_reference_records(
                     symbol,
                     resolution_index,
                     context.import_aliases,
+                    context.dependency_aliases,
                     context.crate_root,
                     symbol["symbol_id"],
                     self_target,
@@ -436,6 +468,7 @@ def build_reference_records(
                 symbol,
                 resolution_index,
                 context.import_aliases,
+                context.dependency_aliases,
                 context.crate_root,
                 self_target,
             ):
@@ -446,6 +479,7 @@ def build_reference_records(
                     symbol,
                     resolution_index,
                     context.import_aliases,
+                    context.dependency_aliases,
                     context.crate_root,
                     symbol["symbol_id"],
                     self_target,
@@ -500,6 +534,7 @@ def resolve_impl_symbols(
             symbol,
             resolution_index,
             context.import_aliases,
+            context.dependency_aliases,
             context.crate_root,
             symbol["symbol_id"],
             None,
@@ -509,6 +544,7 @@ def resolve_impl_symbols(
             symbol,
             resolution_index,
             context.import_aliases,
+            context.dependency_aliases,
             context.crate_root,
             symbol["symbol_id"],
             None,
@@ -518,6 +554,157 @@ def resolve_impl_symbols(
         symbol["resolved_impl_target_qualified_name"] = impl_target["target_qualified_name"]
         symbol["resolved_impl_trait_symbol_id"] = impl_trait["target_symbol_id"]
         symbol["resolved_impl_trait_qualified_name"] = impl_trait["target_qualified_name"]
+
+
+def enrich_symbol_semantics(
+    symbol_records: Sequence[Dict[str, object]],
+    reference_records: Sequence[Dict[str, object]],
+    statement_records: Sequence[Dict[str, object]],
+    resolution_index: Dict[str, object],
+) -> None:
+    calls_by_symbol: DefaultDict[str, List[Dict[str, object]]] = defaultdict(list)
+    reads_by_symbol: DefaultDict[str, List[Dict[str, object]]] = defaultdict(list)
+    writes_by_symbol: DefaultDict[str, List[Dict[str, object]]] = defaultdict(list)
+    refs_by_symbol: DefaultDict[str, List[Dict[str, object]]] = defaultdict(list)
+
+    for reference in reference_records:
+        container_symbol_id = reference["container_symbol_id"]
+        target = make_target_entry(
+            reference["qualified_name_hint"],
+            {
+                "target_symbol_id": reference["target_symbol_id"],
+                "target_qualified_name": reference["target_qualified_name"],
+                "target_kind": reference["target_kind"],
+                "qualified_name_hint": reference["qualified_name_hint"],
+            },
+        )
+        append_unique_target(refs_by_symbol[container_symbol_id], target)
+        if reference["kind"] == "call":
+            append_unique_target(calls_by_symbol[container_symbol_id], target)
+
+    for statement in statement_records:
+        container_symbol_id = statement["container_symbol_id"]
+        for target in statement.get("reads", []):
+            append_unique_target(reads_by_symbol[container_symbol_id], dict(target))
+            append_unique_target(refs_by_symbol[container_symbol_id], dict(target))
+        for target in statement.get("writes", []):
+            append_unique_target(writes_by_symbol[container_symbol_id], dict(target))
+            append_unique_target(refs_by_symbol[container_symbol_id], dict(target))
+
+    for symbol in symbol_records:
+        if symbol["kind"] not in FUNCTION_LIKE_KINDS:
+            symbol["semantic_summary"] = {
+                "direct_calls": [],
+                "transitive_calls": [],
+                "reads": [],
+                "writes": [],
+                "references": [],
+                "interprocedural_reads": [],
+                "interprocedural_writes": [],
+                "interprocedural_references": [],
+            }
+            continue
+
+        direct_calls = list(calls_by_symbol.get(symbol["symbol_id"], []))
+        symbol["semantic_summary"] = {
+            "direct_calls": direct_calls,
+            "transitive_calls": [],
+            "reads": list(reads_by_symbol.get(symbol["symbol_id"], [])),
+            "writes": list(writes_by_symbol.get(symbol["symbol_id"], [])),
+            "references": list(refs_by_symbol.get(symbol["symbol_id"], [])),
+            "interprocedural_reads": [],
+            "interprocedural_writes": [],
+            "interprocedural_references": [],
+        }
+
+    for symbol in symbol_records:
+        if symbol["kind"] not in FUNCTION_LIKE_KINDS:
+            continue
+        symbol["semantic_summary"]["transitive_calls"] = compute_transitive_calls(
+            symbol["semantic_summary"]["direct_calls"],
+            resolution_index,
+        )
+        symbol["semantic_summary"]["interprocedural_reads"] = compute_interprocedural_targets(
+            symbol["semantic_summary"]["direct_calls"],
+            resolution_index,
+            field_name="reads",
+        )
+        symbol["semantic_summary"]["interprocedural_writes"] = compute_interprocedural_targets(
+            symbol["semantic_summary"]["direct_calls"],
+            resolution_index,
+            field_name="writes",
+        )
+        symbol["semantic_summary"]["interprocedural_references"] = compute_interprocedural_targets(
+            symbol["semantic_summary"]["direct_calls"],
+            resolution_index,
+            field_name="references",
+        )
+
+
+def compute_transitive_calls(
+    direct_calls: Sequence[Dict[str, object]],
+    resolution_index: Dict[str, object],
+    *,
+    max_depth: int = 2,
+) -> List[Dict[str, object]]:
+    transitive: List[Dict[str, object]] = []
+    seen = set()
+    frontier = [dict(item) for item in direct_calls]
+    depth = 0
+
+    while frontier and depth < max_depth:
+        next_frontier: List[Dict[str, object]] = []
+        for item in frontier:
+            target_symbol_id = item.get("target_symbol_id")
+            if not target_symbol_id or target_symbol_id in seen:
+                continue
+            seen.add(target_symbol_id)
+            target_symbol = resolution_index["by_id"].get(target_symbol_id)
+            if not target_symbol:
+                continue
+            semantic_summary = target_symbol.get("semantic_summary") or {}
+            for nested in semantic_summary.get("direct_calls", []):
+                nested_copy = dict(nested)
+                append_unique_target(transitive, nested_copy)
+                next_frontier.append(nested_copy)
+        frontier = next_frontier
+        depth += 1
+
+    return transitive
+
+
+def compute_interprocedural_targets(
+    direct_calls: Sequence[Dict[str, object]],
+    resolution_index: Dict[str, object],
+    *,
+    field_name: str,
+    max_depth: int = 3,
+) -> List[Dict[str, object]]:
+    aggregated: List[Dict[str, object]] = []
+    seen_symbols = set()
+    frontier = [item.get("target_symbol_id") for item in direct_calls if item.get("target_symbol_id")]
+    depth = 0
+
+    while frontier and depth < max_depth:
+        next_frontier: List[str] = []
+        for target_symbol_id in frontier:
+            if not target_symbol_id or target_symbol_id in seen_symbols:
+                continue
+            seen_symbols.add(target_symbol_id)
+            target_symbol = resolution_index["by_id"].get(target_symbol_id)
+            if not target_symbol:
+                continue
+            semantic_summary = target_symbol.get("semantic_summary") or {}
+            for target in semantic_summary.get(field_name, []):
+                append_unique_target(aggregated, dict(target))
+            for nested in semantic_summary.get("direct_calls", []):
+                nested_symbol_id = nested.get("target_symbol_id")
+                if nested_symbol_id and nested_symbol_id not in seen_symbols:
+                    next_frontier.append(nested_symbol_id)
+        frontier = next_frontier
+        depth += 1
+
+    return aggregated
 
 
 def resolve_trait_inheritance(
@@ -537,6 +724,7 @@ def resolve_trait_inheritance(
                 symbol,
                 resolution_index,
                 context.import_aliases,
+                context.dependency_aliases,
                 context.crate_root,
                 symbol["symbol_id"],
                 None,
@@ -558,6 +746,7 @@ def resolve_expression(
     current_symbol: Dict[str, object],
     resolution_index: Dict[str, object],
     import_aliases: Dict[str, List[str]],
+    dependency_aliases: Dict[str, str],
     crate_root: str,
     scope_symbol_id: Optional[str],
     self_target: Optional[str],
@@ -585,6 +774,7 @@ def resolve_expression(
         current_symbol["module_path"],
         crate_root,
         import_aliases,
+        dependency_aliases,
         self_target,
     )
 
@@ -605,6 +795,7 @@ def resolve_expression(
         preferred_paths,
         current_symbol,
         self_target,
+        preferred_roots=preferred_resolution_roots(current_symbol, dependency_aliases, crate_root),
     )
     if best_match:
         return {
@@ -644,7 +835,7 @@ def normalize_method_qualified_names(context: ParsedFileContext) -> None:
                 container.impl_target,
                 symbol.module_path,
                 context.crate_root,
-                {},
+                context.dependency_aliases,
                 None,
             )
             if owner:
@@ -914,6 +1105,7 @@ def build_function_statement_records(
             symbol,
             resolution_index,
             context.import_aliases,
+            context.dependency_aliases,
             context.crate_root,
             self_target,
         )
@@ -922,6 +1114,7 @@ def build_function_statement_records(
             symbol,
             resolution_index,
             context.import_aliases,
+            context.dependency_aliases,
             context.crate_root,
             self_target,
         )
@@ -930,6 +1123,7 @@ def build_function_statement_records(
             symbol,
             resolution_index,
             context.import_aliases,
+            context.dependency_aliases,
             context.crate_root,
             self_target,
             excluded_names={item["name"] for item in definitions + writes},
@@ -1037,6 +1231,7 @@ def collect_statement_writes(
     symbol: Dict[str, object],
     resolution_index: Dict[str, object],
     import_aliases: Dict[str, List[str]],
+    dependency_aliases: Dict[str, str],
     crate_root: str,
     self_target: Optional[str],
 ) -> List[Dict[str, object]]:
@@ -1049,6 +1244,7 @@ def collect_statement_writes(
             symbol,
             resolution_index,
             import_aliases,
+            dependency_aliases,
             crate_root,
             symbol["symbol_id"],
             self_target,
@@ -1068,6 +1264,7 @@ def collect_statement_writes(
             symbol,
             resolution_index,
             import_aliases,
+            dependency_aliases,
             crate_root,
             self_target,
         )
@@ -1080,6 +1277,7 @@ def collect_statement_calls(
     symbol: Dict[str, object],
     resolution_index: Dict[str, object],
     import_aliases: Dict[str, List[str]],
+    dependency_aliases: Dict[str, str],
     crate_root: str,
     self_target: Optional[str],
 ) -> Tuple[List[Dict[str, object]], List[str]]:
@@ -1094,6 +1292,7 @@ def collect_statement_calls(
             symbol,
             resolution_index,
             import_aliases,
+            dependency_aliases,
             crate_root,
             symbol["symbol_id"],
             self_target,
@@ -1110,6 +1309,7 @@ def collect_statement_calls(
             symbol,
             resolution_index,
             import_aliases,
+            dependency_aliases,
             crate_root,
             self_target,
         )
@@ -1123,6 +1323,7 @@ def collect_statement_reads(
     symbol: Dict[str, object],
     resolution_index: Dict[str, object],
     import_aliases: Dict[str, List[str]],
+    dependency_aliases: Dict[str, str],
     crate_root: str,
     self_target: Optional[str],
     *,
@@ -1151,6 +1352,7 @@ def collect_statement_reads(
             symbol,
             resolution_index,
             import_aliases,
+            dependency_aliases,
             crate_root,
             self_target,
         )
@@ -1164,6 +1366,7 @@ def collect_statement_reads(
             symbol,
             resolution_index,
             import_aliases,
+            dependency_aliases,
             crate_root,
             symbol["symbol_id"],
             self_target,
@@ -1180,6 +1383,7 @@ def collect_statement_reads(
                 symbol,
                 resolution_index,
                 import_aliases,
+                dependency_aliases,
                 crate_root,
                 symbol["symbol_id"],
                 self_target,
@@ -1191,6 +1395,7 @@ def collect_statement_reads(
             symbol,
             resolution_index,
             import_aliases,
+            dependency_aliases,
             crate_root,
             symbol["symbol_id"],
             self_target,
@@ -1206,6 +1411,7 @@ def resolve_member_expression(
     current_symbol: Dict[str, object],
     resolution_index: Dict[str, object],
     import_aliases: Dict[str, List[str]],
+    dependency_aliases: Dict[str, str],
     crate_root: str,
     self_target: Optional[str],
 ) -> Dict[str, Optional[str]]:
@@ -1218,6 +1424,7 @@ def resolve_member_expression(
             current_symbol,
             resolution_index,
             import_aliases,
+            dependency_aliases,
             crate_root,
             current_symbol.get("symbol_id") or current_symbol.get("scope_symbol_id"),
             self_target,
@@ -1230,6 +1437,7 @@ def resolve_member_expression(
             current_symbol,
             resolution_index,
             import_aliases,
+            dependency_aliases,
             crate_root,
             current_symbol.get("symbol_id") or current_symbol.get("scope_symbol_id"),
             self_target,
@@ -1295,6 +1503,7 @@ def expand_reference_candidates(
     module_path: str,
     crate_root: str,
     import_aliases: Dict[str, List[str]],
+    dependency_aliases: Dict[str, str],
     self_target: Optional[str],
 ) -> List[str]:
     candidates: List[str] = []
@@ -1308,6 +1517,8 @@ def expand_reference_candidates(
     if "::" not in expr:
         for alias_target in import_aliases.get(expr, []):
             candidates.append(alias_target)
+        if expr in dependency_aliases:
+            candidates.append(dependency_aliases[expr])
         if self_target and expr[:1].islower():
             candidates.append(f"{self_target}::{expr}")
         candidates.append(f"{module_path}::{expr}")
@@ -1337,7 +1548,11 @@ def expand_reference_candidates(
             candidates.append(candidate)
 
     candidates.append(expr)
-    return unique_values(normalize_path_expression(candidate, module_path, crate_root, {}, self_target) for candidate in candidates if candidate)
+    return unique_values(
+        normalize_path_expression(candidate, module_path, crate_root, dependency_aliases, self_target)
+        for candidate in candidates
+        if candidate
+    )
 
 
 def expand_use_targets(target: str) -> List[Tuple[str, Optional[str]]]:
@@ -1391,6 +1606,7 @@ def extract_body_member_call_candidates(
     symbol: Dict[str, object],
     resolution_index: Dict[str, object],
     import_aliases: Dict[str, List[str]],
+    dependency_aliases: Dict[str, str],
     crate_root: str,
     self_target: Optional[str],
 ) -> List[Tuple[str, int, int]]:
@@ -1404,6 +1620,7 @@ def extract_body_member_call_candidates(
                 symbol,
                 resolution_index,
                 import_aliases,
+                dependency_aliases,
                 crate_root,
                 self_target,
             )
@@ -1418,6 +1635,7 @@ def extract_body_field_use_candidates(
     symbol: Dict[str, object],
     resolution_index: Dict[str, object],
     import_aliases: Dict[str, List[str]],
+    dependency_aliases: Dict[str, str],
     crate_root: str,
     self_target: Optional[str],
 ) -> List[Tuple[str, int, int]]:
@@ -1434,6 +1652,7 @@ def extract_body_field_use_candidates(
                 symbol,
                 resolution_index,
                 import_aliases,
+                dependency_aliases,
                 crate_root,
                 self_target,
             )
@@ -1448,6 +1667,7 @@ def member_candidate_string(
     symbol: Dict[str, object],
     resolution_index: Dict[str, object],
     import_aliases: Dict[str, List[str]],
+    dependency_aliases: Dict[str, str],
     crate_root: str,
     self_target: Optional[str],
 ) -> str:
@@ -1457,6 +1677,7 @@ def member_candidate_string(
         symbol,
         resolution_index,
         import_aliases,
+        dependency_aliases,
         crate_root,
         self_target,
     )
@@ -1547,6 +1768,213 @@ def load_raw_manifest(raw_root: Path, repo_name: str) -> Dict[str, object]:
         return json.load(handle)
 
 
+def build_workspace_index(repo_root: Path) -> WorkspaceIndex:
+    metadata = load_cargo_metadata(repo_root)
+    if metadata is not None:
+        index = workspace_index_from_metadata(repo_root, metadata)
+        if index.packages_by_root:
+            return index
+
+    return workspace_index_from_manifests(repo_root)
+
+
+def workspace_index_from_manifests(repo_root: Path) -> WorkspaceIndex:
+    package_toml_by_root: Dict[Path, Dict[str, object]] = {}
+    packages_by_root: Dict[Path, CargoPackageInfo] = {}
+
+    for manifest_path in sorted(repo_root.rglob("Cargo.toml")):
+        relative_manifest = manifest_path.relative_to(repo_root).as_posix()
+        if any(part in {"target", ".git", "node_modules"} for part in manifest_path.relative_to(repo_root).parts):
+            continue
+        with manifest_path.open("rb") as handle:
+            cargo_data = tomllib.load(handle)
+        package = cargo_data.get("package")
+        if not isinstance(package, dict) or "name" not in package:
+            continue
+
+        package_name = str(package["name"])
+        lib_table = cargo_data.get("lib", {}) if isinstance(cargo_data.get("lib"), dict) else {}
+        crate_name = str(lib_table.get("name") or package_name)
+        crate_module = crate_name.replace("-", "_")
+        package_root = manifest_path.parent
+        package_toml_by_root[package_root] = cargo_data
+        packages_by_root[package_root] = CargoPackageInfo(
+            root=package_root,
+            manifest_path=manifest_path,
+            package_name=package_name,
+            crate_name=crate_name,
+            crate_module=crate_module,
+            dependency_aliases={},
+        )
+
+    packages_by_name = {package.package_name: package for package in packages_by_root.values()}
+    packages_by_module = {package.crate_module: package for package in packages_by_root.values()}
+
+    resolved_packages_by_root: Dict[Path, CargoPackageInfo] = {}
+    for package_root, package_info in packages_by_root.items():
+        cargo_data = package_toml_by_root[package_root]
+        dependency_aliases = resolve_dependency_aliases(cargo_data, packages_by_name)
+        resolved_packages_by_root[package_root] = CargoPackageInfo(
+            root=package_info.root,
+            manifest_path=package_info.manifest_path,
+            package_name=package_info.package_name,
+            crate_name=package_info.crate_name,
+            crate_module=package_info.crate_module,
+            dependency_aliases=dependency_aliases,
+        )
+
+    return WorkspaceIndex(
+        packages_by_root=resolved_packages_by_root,
+        packages_by_name={package.package_name: package for package in resolved_packages_by_root.values()},
+        packages_by_module={package.crate_module: package for package in resolved_packages_by_root.values()},
+    )
+
+
+def load_cargo_metadata(repo_root: Path) -> Optional[Dict[str, object]]:
+    manifest_path = repo_root / "Cargo.toml"
+    if not manifest_path.exists():
+        return None
+
+    try:
+        result = subprocess.run(
+            [
+                "cargo",
+                "metadata",
+                "--format-version",
+                "1",
+                "--no-deps",
+                "--manifest-path",
+                str(manifest_path),
+            ],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def workspace_index_from_metadata(repo_root: Path, metadata: Dict[str, object]) -> WorkspaceIndex:
+    packages_by_root: Dict[Path, CargoPackageInfo] = {}
+    raw_packages: Dict[Path, Dict[str, object]] = {}
+
+    for package in metadata.get("packages", []):
+        if not isinstance(package, dict):
+            continue
+        manifest_value = package.get("manifest_path")
+        if not isinstance(manifest_value, str):
+            continue
+        manifest_path = Path(manifest_value).resolve()
+        if not manifest_path.is_relative_to(repo_root):
+            continue
+
+        package_root = manifest_path.parent
+        package_name = str(package.get("name") or package_root.name)
+        crate_name = package_name
+        for target in package.get("targets", []):
+            if not isinstance(target, dict):
+                continue
+            kinds = {str(kind) for kind in target.get("kind", [])}
+            if kinds.intersection({"lib", "proc-macro"}):
+                crate_name = str(target.get("name") or package_name)
+                break
+
+        packages_by_root[package_root] = CargoPackageInfo(
+            root=package_root,
+            manifest_path=manifest_path,
+            package_name=package_name,
+            crate_name=crate_name,
+            crate_module=crate_name.replace("-", "_"),
+            dependency_aliases={},
+        )
+        raw_packages[package_root] = package
+
+    packages_by_name = {package.package_name: package for package in packages_by_root.values()}
+    resolved_packages_by_root: Dict[Path, CargoPackageInfo] = {}
+    for package_root, package_info in packages_by_root.items():
+        dependency_aliases = resolve_dependency_aliases_from_metadata(raw_packages[package_root], packages_by_name)
+        dependency_aliases.setdefault(package_info.crate_module, package_info.crate_module)
+        resolved_packages_by_root[package_root] = CargoPackageInfo(
+            root=package_info.root,
+            manifest_path=package_info.manifest_path,
+            package_name=package_info.package_name,
+            crate_name=package_info.crate_name,
+            crate_module=package_info.crate_module,
+            dependency_aliases=dependency_aliases,
+        )
+
+    return WorkspaceIndex(
+        packages_by_root=resolved_packages_by_root,
+        packages_by_name={package.package_name: package for package in resolved_packages_by_root.values()},
+        packages_by_module={package.crate_module: package for package in resolved_packages_by_root.values()},
+    )
+
+
+def resolve_dependency_aliases_from_metadata(
+    package: Dict[str, object],
+    packages_by_name: Dict[str, CargoPackageInfo],
+) -> Dict[str, str]:
+    aliases: Dict[str, str] = {}
+    for dependency in package.get("dependencies", []):
+        if not isinstance(dependency, dict):
+            continue
+        package_name = str(dependency.get("name") or "")
+        package_info = packages_by_name.get(package_name)
+        if package_info is None:
+            continue
+        alias = str(dependency.get("rename") or package_name)
+        alias_module = alias.replace("-", "_")
+        aliases[alias_module] = package_info.crate_module
+        aliases.setdefault(package_info.crate_module, package_info.crate_module)
+    return aliases
+
+
+def resolve_dependency_aliases(
+    cargo_data: Dict[str, object],
+    packages_by_name: Dict[str, CargoPackageInfo],
+) -> Dict[str, str]:
+    aliases: Dict[str, str] = {}
+    for dependency_table in iter_dependency_tables(cargo_data):
+        for alias, spec in dependency_table.items():
+            alias_module = str(alias).replace("-", "_")
+            target_package_name = dependency_target_package_name(alias, spec)
+            package_info = packages_by_name.get(target_package_name)
+            if package_info is None:
+                continue
+            aliases[alias_module] = package_info.crate_module
+            aliases.setdefault(package_info.crate_module, package_info.crate_module)
+    return aliases
+
+
+def iter_dependency_tables(cargo_data: Dict[str, object]) -> Iterable[Dict[str, object]]:
+    for key, value in cargo_data.items():
+        if key.endswith("dependencies") and isinstance(value, dict):
+            yield value
+        if key == "target" and isinstance(value, dict):
+            for target_table in value.values():
+                if not isinstance(target_table, dict):
+                    continue
+                for target_key, target_value in target_table.items():
+                    if target_key.endswith("dependencies") and isinstance(target_value, dict):
+                        yield target_value
+
+
+def dependency_target_package_name(alias: object, spec: object) -> str:
+    if isinstance(spec, dict):
+        package_name = spec.get("package")
+        if isinstance(package_name, str) and package_name.strip():
+            return package_name
+    return str(alias)
+
+
 def matches_path_prefix(relative_path: str, path_prefixes: Sequence[str]) -> bool:
     return any(
         relative_path == prefix or relative_path.startswith(f"{prefix}/")
@@ -1554,18 +1982,24 @@ def matches_path_prefix(relative_path: str, path_prefixes: Sequence[str]) -> boo
     )
 
 
-def nearest_cargo_package(file_path: Path, repo_root: Path, cache: Dict[Path, Tuple[Path, str]]) -> Tuple[Path, str]:
+def nearest_cargo_package(file_path: Path, repo_root: Path, workspace_index: WorkspaceIndex) -> CargoPackageInfo:
     current = file_path.parent
     while True:
-        manifest_path = current / "Cargo.toml"
-        if manifest_path.exists():
-            if manifest_path not in cache:
-                cache[manifest_path] = (current, load_cargo_package_name(manifest_path))
-            return cache[manifest_path]
+        package_info = workspace_index.packages_by_root.get(current)
+        if package_info is not None:
+            return package_info
         if current == repo_root:
             break
         current = current.parent
-    return repo_root, repo_root.name
+    fallback_name = repo_root.name
+    return CargoPackageInfo(
+        root=repo_root,
+        manifest_path=repo_root / "Cargo.toml",
+        package_name=fallback_name,
+        crate_name=fallback_name,
+        crate_module=fallback_name.replace("-", "_"),
+        dependency_aliases={},
+    )
 
 
 def next_symbol_local_id(symbols: Sequence[RustSymbol]) -> int:
@@ -1588,7 +2022,7 @@ def normalize_path_expression(
     expression: str,
     module_path: str,
     crate_root: str,
-    import_aliases: Dict[str, List[str]],
+    dependency_aliases: Dict[str, str],
     self_target: Optional[str],
 ) -> str:
     expr = strip_expression_noise(expression)
@@ -1601,6 +2035,8 @@ def normalize_path_expression(
         return f"{self_target}{expr[4:]}"
     if expr.startswith("crate::"):
         return f"{crate_root}{expr[5:]}"
+    if "::" not in expr and expr in dependency_aliases:
+        return dependency_aliases[expr]
     if expr.startswith("super::"):
         current = module_path
         remainder = expr
@@ -1610,8 +2046,8 @@ def normalize_path_expression(
         return f"{current}::{remainder}"
 
     first_segment, _, remainder = expr.partition("::")
-    if first_segment in import_aliases and import_aliases[first_segment]:
-        target = import_aliases[first_segment][0]
+    if first_segment in dependency_aliases:
+        target = dependency_aliases[first_segment]
         return f"{target}::{remainder}" if remainder else target
 
     if "::" not in expr and expr[:1].isupper():
@@ -1623,13 +2059,201 @@ def normalize_visibility(value: Optional[str]) -> str:
     return value.strip() if value else "private"
 
 
+BACKEND_MERGEABLE_KINDS = {"module", "function", "method", "struct", "enum", "trait", "const", "static", "type"}
+
+
+def merge_primary_backend_symbols(
+    parsed: ParsedRustFile,
+    source_lines: Sequence[str],
+    tree_sitter_probe: Dict[str, object],
+    rust_analyzer_probe: Dict[str, object],
+) -> str:
+    primary_backend = "rust-simple-v3"
+    if merge_backend_symbols(
+        parsed,
+        source_lines,
+        rust_analyzer_probe.get("document_symbols") or [],
+        backend_name="rust_analyzer_lsp",
+    ):
+        primary_backend = "rust_analyzer_lsp"
+    if merge_backend_symbols(
+        parsed,
+        source_lines,
+        tree_sitter_probe.get("symbols") or [],
+        backend_name="tree_sitter_rust",
+    ) and primary_backend == "rust-simple-v3":
+        primary_backend = "tree_sitter_rust"
+    return primary_backend
+
+
+def merge_backend_symbols(
+    parsed: ParsedRustFile,
+    source_lines: Sequence[str],
+    backend_symbols: Sequence[Dict[str, object]],
+    *,
+    backend_name: str,
+) -> bool:
+    if not backend_symbols:
+        return False
+
+    symbols_by_qname = {symbol.qualified_name: symbol for symbol in parsed.symbols}
+    next_local_id = next_symbol_local_id(parsed.symbols)
+    used_backend = False
+
+    for backend_symbol in sorted(
+        backend_symbols,
+        key=lambda item: (
+            str(item.get("qualified_name") or "").count("::"),
+            item.get("selection_range", {}).get("start_line", 0),
+            item.get("selection_range", {}).get("start_column", 0),
+            str(item.get("qualified_name") or ""),
+        ),
+    ):
+        kind = str(backend_symbol.get("kind") or "")
+        if kind not in BACKEND_MERGEABLE_KINDS:
+            continue
+
+        qualified_name = qualify_backend_symbol_name(parsed.module_path, str(backend_symbol.get("qualified_name") or ""))
+        container_qualified_name = backend_symbol.get("container_qualified_name")
+        if container_qualified_name:
+            container_qualified_name = qualify_backend_symbol_name(parsed.module_path, str(container_qualified_name))
+
+        existing = symbols_by_qname.get(qualified_name)
+        if existing is None:
+            existing = find_backend_symbol_match(parsed.symbols, kind, str(backend_symbol["name"]), container_qualified_name)
+
+        if existing is not None:
+            update_symbol_from_backend(existing, backend_symbol, qualified_name)
+            symbols_by_qname[existing.qualified_name] = existing
+            used_backend = True
+            continue
+
+        container_local_id = None
+        if container_qualified_name:
+            container_symbol = symbols_by_qname.get(container_qualified_name)
+            if container_symbol is not None:
+                container_local_id = container_symbol.local_id
+
+        parsed.symbols.append(
+            RustSymbol(
+                local_id=next_local_id,
+                kind=kind,
+                name=str(backend_symbol["name"]),
+                qualified_name=qualified_name,
+                module_path=backend_symbol_module_path(parsed.module_path, qualified_name, container_qualified_name),
+                span=backend_range_to_span(backend_symbol),
+                signature=str(backend_symbol.get("signature") or backend_signature(source_lines, backend_symbol)),
+                visibility=infer_backend_visibility(source_lines, backend_symbol),
+                docstring=None,
+                container_local_id=container_local_id,
+                container_qualified_name=container_qualified_name,
+                attributes=(f"backend:{backend_name}",),
+                is_test=is_backend_test_symbol(qualified_name),
+            )
+        )
+        symbols_by_qname[qualified_name] = parsed.symbols[-1]
+        next_local_id += 1
+        used_backend = True
+
+    return used_backend
+
+
+def qualify_backend_symbol_name(module_path: str, backend_qualified_name: str) -> str:
+    if not backend_qualified_name:
+        return module_path
+    crate_root = module_path.split("::")[0]
+    if backend_qualified_name == "crate":
+        return crate_root
+    if backend_qualified_name.startswith("crate::"):
+        return f"{crate_root}::{backend_qualified_name[7:]}"
+    if backend_qualified_name == "self":
+        return module_path
+    if backend_qualified_name.startswith("self::"):
+        return f"{module_path}::{backend_qualified_name[6:]}"
+    if backend_qualified_name.startswith("super::"):
+        current = module_path
+        remainder = backend_qualified_name
+        while remainder.startswith("super::"):
+            current = current.rsplit("::", 1)[0] if "::" in current else crate_root
+            remainder = remainder[len("super::") :]
+        return f"{current}::{remainder}" if remainder else current
+    if backend_qualified_name.startswith(f"{module_path}::") or backend_qualified_name == module_path:
+        return backend_qualified_name
+    return f"{module_path}::{backend_qualified_name}"
+
+
+def backend_symbol_module_path(module_path: str, qualified_name: str, container_qualified_name: Optional[str]) -> str:
+    if container_qualified_name:
+        return container_qualified_name
+    if "::" in qualified_name:
+        return qualified_name.rsplit("::", 1)[0]
+    return module_path
+
+
+def find_backend_symbol_match(
+    symbols: Sequence[RustSymbol],
+    kind: str,
+    name: str,
+    container_qualified_name: Optional[str],
+) -> Optional[RustSymbol]:
+    for symbol in symbols:
+        if symbol.kind != kind or symbol.name != name:
+            continue
+        if container_qualified_name and symbol.container_qualified_name != container_qualified_name:
+            continue
+        return symbol
+    return None
+
+
+def update_symbol_from_backend(symbol: RustSymbol, backend_symbol: Dict[str, object], qualified_name: str) -> None:
+    backend_span = backend_range_to_span(backend_symbol)
+    symbol.qualified_name = qualified_name
+    symbol.module_path = backend_symbol_module_path(symbol.module_path, qualified_name, symbol.container_qualified_name)
+    if backend_span.start_line <= symbol.span.start_line:
+        symbol.span.start_line = backend_span.start_line
+        symbol.span.start_column = backend_span.start_column
+    if backend_span.end_line >= symbol.span.end_line:
+        symbol.span.end_line = backend_span.end_line
+        symbol.span.end_column = backend_span.end_column
+
+
+def backend_range_to_span(backend_symbol: Dict[str, object]) -> TextSpan:
+    selection_range = backend_symbol.get("selection_range", {})
+    full_range = backend_symbol.get("range", selection_range)
+    return TextSpan(
+        start_line=int(selection_range.get("start_line", full_range.get("start_line", 1))),
+        start_column=int(selection_range.get("start_column", full_range.get("start_column", 1))),
+        end_line=int(full_range.get("end_line", selection_range.get("end_line", 1))),
+        end_column=int(full_range.get("end_column", selection_range.get("end_column", 1))),
+    )
+
+
+def backend_signature(source_lines: Sequence[str], backend_symbol: Dict[str, object]) -> str:
+    start_line = max(int(backend_symbol.get("selection_range", {}).get("start_line", 1)), 1)
+    if not source_lines or start_line > len(source_lines):
+        return str(backend_symbol.get("name") or "")
+    return source_lines[start_line - 1].strip()
+
+
+def infer_backend_visibility(source_lines: Sequence[str], backend_symbol: Dict[str, object]) -> str:
+    signature = backend_signature(source_lines, backend_symbol)
+    return "pub" if signature.lstrip().startswith("pub ") else "private"
+
+
+def is_backend_test_symbol(qualified_name: str) -> bool:
+    lowered = qualified_name.lower()
+    return "::tests::" in lowered or lowered.endswith("::tests") or lowered.endswith("::smoke")
+
+
 def parse_rust_source_file(
     repo_root: Path,
     source_path: Path,
-    package_cache: Dict[Path, Tuple[Path, str]],
+    workspace_index: WorkspaceIndex,
 ) -> ParsedFileContext:
-    crate_root, crate_name = nearest_cargo_package(source_path, repo_root, package_cache)
-    module_path = derive_module_path(crate_name, source_path, crate_root)
+    package_info = nearest_cargo_package(source_path, repo_root, workspace_index)
+    crate_root = package_info.root
+    crate_name = package_info.package_name
+    module_path = derive_module_path(package_info.crate_module, source_path, crate_root)
     relative_path = source_path.relative_to(repo_root).as_posix()
     source = source_path.read_text(encoding="utf-8")
     source_lines = source.splitlines()
@@ -1639,17 +2263,27 @@ def parse_rust_source_file(
         "tree_sitter_rust": probe_tree_sitter(source_path, source),
         "rust_analyzer_lsp": probe_rust_analyzer(source_path, source, repo_root),
     }
+    primary_parser_backend = merge_primary_backend_symbols(
+        parsed,
+        source_lines,
+        backend_probes["tree_sitter_rust"],
+        backend_probes["rust_analyzer_lsp"],
+    )
     return ParsedFileContext(
         source_path=source_path,
+        package_info=package_info,
+        workspace_index=workspace_index,
         parsed=parsed,
         source=source,
         source_lines=source_lines,
         cleaned_lines=clean_rust_source_lines(source),
         crate_root=module_path.split("::")[0],
+        dependency_aliases=package_info.dependency_aliases,
         symbol_id_by_local={},
         import_aliases={},
         compiler_probe=compiler_probe,
         backend_probes=backend_probes,
+        primary_parser_backend=primary_parser_backend,
     )
 
 
@@ -1658,6 +2292,7 @@ def pick_best_symbol_candidate(
     preferred_paths: Sequence[str],
     current_symbol: Dict[str, object],
     self_target: Optional[str],
+    preferred_roots: Sequence[str] = (),
 ) -> Optional[Dict[str, object]]:
     best_candidate = None
     best_score = None
@@ -1666,8 +2301,11 @@ def pick_best_symbol_candidate(
 
     for candidate in candidates:
         score = 0
+        candidate_root = candidate["qualified_name"].split("::")[0]
         if candidate["qualified_name"] in preferred:
             score += 100
+        if candidate_root in preferred_roots:
+            score += 40
         if candidate["crate"] == current_symbol["crate"]:
             score += 20
         if candidate["path"] == current_symbol["path"]:
@@ -1695,6 +2333,20 @@ def pick_best_symbol_candidate(
     if tie or best_score is None or best_score <= 0:
         return None
     return best_candidate
+
+
+def preferred_resolution_roots(
+    current_symbol: Dict[str, object],
+    dependency_aliases: Dict[str, str],
+    crate_root: str,
+) -> List[str]:
+    values = [
+        str(current_symbol.get("module_path") or "").split("::")[0],
+        str(current_symbol.get("crate") or "").replace("-", "_"),
+        crate_root,
+    ]
+    values.extend(dependency_aliases.values())
+    return [value for value in unique_values(values) if value]
 
 
 def rollup_counts(values: Iterable[str]) -> List[Dict[str, object]]:
@@ -1838,6 +2490,16 @@ def symbol_to_record(repo_name: str, context: ParsedFileContext, symbol: RustSym
         "resolved_impl_trait_symbol_id": None,
         "resolved_impl_trait_qualified_name": None,
         "resolved_super_traits": [],
+        "semantic_summary": {
+            "direct_calls": [],
+            "transitive_calls": [],
+            "reads": [],
+            "writes": [],
+            "references": [],
+            "interprocedural_reads": [],
+            "interprocedural_writes": [],
+            "interprocedural_references": [],
+        },
     }
 
 

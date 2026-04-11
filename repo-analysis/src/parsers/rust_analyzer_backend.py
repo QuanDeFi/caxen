@@ -11,12 +11,15 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 
 SYMBOL_KIND_MAP = {
+    2: "module",
     5: "class",
     6: "method",
+    10: "enum",
     11: "interface",
     12: "function",
     13: "variable",
     14: "constant",
+    19: "constant",
     22: "struct",
     23: "event",
     24: "operator",
@@ -82,6 +85,7 @@ def aggregate_rust_analyzer_probes(file_probes: Sequence[Dict[str, object]]) -> 
         "item_counts": aggregate_counts(file_probes, "item_counts"),
         "statement_counts": [],
         "control_counts": [],
+        "document_symbols": sum(len(probe.get("document_symbols", [])) for probe in file_probes),
         "samples": [
             {
                 "path": probe["path"],
@@ -109,6 +113,7 @@ def unavailable_payload(path: Path, started: float, diagnostics: List[str]) -> D
         "item_counts": [],
         "statement_counts": [],
         "control_counts": [],
+        "document_symbols": [],
         "diagnostics": diagnostics,
     }
 
@@ -188,7 +193,7 @@ def document_symbol_probe(command: str, path: Path, source: str, workspace_root:
                 process.kill()
 
     diagnostics = drain_queue(stderr_queue)
-    symbols = flatten_document_symbols(response.get("result") or [])
+    symbols = normalize_document_symbols(response.get("result") or [])
     return {
         "backend": "rust-analyzer-lsp",
         "available": True,
@@ -199,6 +204,7 @@ def document_symbol_probe(command: str, path: Path, source: str, workspace_root:
         "item_counts": summarize_symbol_counts(symbols),
         "statement_counts": [],
         "control_counts": [],
+        "document_symbols": symbols,
         "diagnostics": diagnostics[:20],
     }
 
@@ -256,18 +262,90 @@ def drain_queue(queue: Queue[str]) -> List[str]:
     return values
 
 
-def flatten_document_symbols(items: Iterable[Dict[str, object]]) -> List[Dict[str, object]]:
-    flattened: List[Dict[str, object]] = []
+def normalize_document_symbols(
+    items: Iterable[Dict[str, object]],
+    *,
+    parent_qualified_name: Optional[str] = None,
+) -> List[Dict[str, object]]:
+    normalized: List[Dict[str, object]] = []
     for item in items:
-        flattened.append(item)
-        flattened.extend(flatten_document_symbols(item.get("children", [])))
-    return flattened
+        name = str(item.get("name") or "")
+        kind = normalize_symbol_kind(item.get("kind"))
+        if not name or not kind:
+            normalized.extend(
+                normalize_document_symbols(
+                    item.get("children", []),
+                    parent_qualified_name=parent_qualified_name,
+                )
+            )
+            continue
+
+        qualified_name = f"{parent_qualified_name}::{name}" if parent_qualified_name else name
+        selection_range = item.get("selectionRange") or item.get("range") or {}
+        full_range = item.get("range") or selection_range
+
+        normalized.append(
+            {
+                "name": name,
+                "kind": kind,
+                "qualified_name": qualified_name,
+                "range": normalize_range(full_range),
+                "selection_range": normalize_range(selection_range),
+                "container_qualified_name": parent_qualified_name,
+            }
+        )
+        normalized.extend(
+            normalize_document_symbols(
+                item.get("children", []),
+                parent_qualified_name=qualified_name,
+            )
+        )
+    return normalized
+
+
+def normalize_symbol_kind(kind_value: object) -> Optional[str]:
+    try:
+        kind = int(kind_value or 0)
+    except (TypeError, ValueError):
+        return None
+
+    mapped = SYMBOL_KIND_MAP.get(kind)
+    if mapped == "class":
+        return "struct"
+    if mapped == "interface":
+        return "trait"
+    if mapped == "event":
+        return "struct"
+    if mapped == "constant":
+        return "const"
+    if mapped == "variable":
+        return "local"
+    return mapped
+
+
+def normalize_range(value: object) -> Dict[str, int]:
+    if not isinstance(value, dict):
+        return {
+            "start_line": 1,
+            "start_column": 1,
+            "end_line": 1,
+            "end_column": 1,
+        }
+
+    start = value.get("start", {})
+    end = value.get("end", {})
+    return {
+        "start_line": int(start.get("line", 0)) + 1,
+        "start_column": int(start.get("character", 0)) + 1,
+        "end_line": int(end.get("line", 0)) + 1,
+        "end_column": int(end.get("character", 0)) + 1,
+    }
 
 
 def summarize_symbol_counts(items: Iterable[Dict[str, object]]) -> List[Dict[str, object]]:
     counts: Dict[str, int] = {}
     for item in items:
-        kind = SYMBOL_KIND_MAP.get(int(item.get("kind") or 0), f"kind_{item.get('kind')}")
+        kind = str(item.get("kind") or "unknown")
         counts[kind] = counts.get(kind, 0) + 1
     return [{"kind": kind, "count": count} for kind, count in sorted(counts.items())]
 

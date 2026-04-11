@@ -124,7 +124,13 @@ High-level shape:
   "schema_version": "0.5.0",
   "repo": "yellowstone-vixen",
   "generated_at": "2026-04-10T12:00:00Z",
-  "parser": "rust-simple-v3",
+  "parser": "rust-backend-fused-v2",
+  "primary_parser_backends": [
+    {
+      "kind": "rust_analyzer_lsp",
+      "count": 1
+    }
+  ],
   "parser_backends": {
     "rustc_ast_probe": {
       "backend": "rustc-ast-tree",
@@ -146,6 +152,7 @@ High-level shape:
       "item_counts": [],
       "statement_counts": [],
       "control_counts": [],
+      "symbols": 7,
       "error_nodes": 0,
       "samples": []
     },
@@ -158,6 +165,7 @@ High-level shape:
       "item_counts": [],
       "statement_counts": [],
       "control_counts": [],
+      "document_symbols": 0,
       "samples": []
     }
   },
@@ -170,7 +178,8 @@ High-level shape:
       "module_path": "yellowstone_vixen_proc_macro",
       "language": "Rust",
       "symbols": 7,
-      "imports": 2
+      "imports": 2,
+      "primary_parser_backend": "rust_analyzer_lsp"
     }
   ],
   "symbols": [
@@ -207,7 +216,17 @@ High-level shape:
       "resolved_impl_target_qualified_name": null,
       "resolved_impl_trait_symbol_id": null,
       "resolved_impl_trait_qualified_name": null,
-      "resolved_super_traits": []
+      "resolved_super_traits": [],
+      "semantic_summary": {
+        "direct_calls": [],
+        "transitive_calls": [],
+        "reads": [],
+        "writes": [],
+        "references": [],
+        "interprocedural_reads": [],
+        "interprocedural_writes": [],
+        "interprocedural_references": []
+      }
     }
   ],
   "imports": [
@@ -443,8 +462,8 @@ High-level shape:
 
 ## Phase 3 Notes
 
-- The current parser is intentionally deterministic and Rust-only.
-- The current graph now includes first semantic edges for imports, calls, uses, impl relationships, trait inheritance, test coverage edges, and statement-level control/data/dependence-style edges.
+- The current parser is Rust-only but now uses backend-preferred fusion when optional backends are available.
+- The current graph now includes first semantic edges for imports, calls, uses, impl relationships, trait inheritance, test coverage edges, statement-level control/data/dependence-style edges, and interprocedural rollups from symbol summaries.
 - SQLite persistence is always available; parquet export is optional per-environment.
 - Optional parser backends are recorded in the artifact even when they are unavailable on the current machine.
 - Future phases can add higher-fidelity parsers and richer graph edges without replacing the JSON-first contract.
@@ -501,7 +520,7 @@ High-level shape:
 
 ```json
 {
-  "schema_version": "0.1.0",
+  "schema_version": "0.3.0",
   "generated_at": "2026-04-10T12:00:00Z",
   "summary": {
     "runs": 8,
@@ -511,7 +530,17 @@ High-level shape:
         "runs": 4,
         "exact_hits": 3,
         "path_hits": 4,
-        "avg_latency_ms": 4.2
+        "avg_latency_ms": 4.2,
+        "avg_answer_score": 0.82
+      }
+    ],
+    "task_types": [
+      {
+        "task_type": "symbol_lookup",
+        "runs": 4,
+        "exact_hits": 3,
+        "path_hits": 4,
+        "avg_answer_score": 0.88
       }
     ]
   },
@@ -526,6 +555,15 @@ High-level shape:
       "latency_ms": 3.1,
       "exact_hit": true,
       "path_hit": true,
+      "answer_quality": {
+        "score": 0.9,
+        "path_credit": 1.0,
+        "name_credit": 1.0,
+        "term_coverage": 0.5,
+        "top_hit": true,
+        "expected_terms": ["vixen", "proc-macro"],
+        "synthesized_answer": "yellowstone_vixen_proc_macro::vixen in crates/proc-macro/src/lib.rs ..."
+      },
       "selected": []
     }
   ]

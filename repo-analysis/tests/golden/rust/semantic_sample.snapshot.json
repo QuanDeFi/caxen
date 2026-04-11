@@ -277,7 +277,7 @@
     },
     {
       "type": "READS",
-      "count": 4
+      "count": 7
     },
     {
       "type": "REFERENCES",
@@ -285,7 +285,7 @@
     },
     {
       "type": "REFS",
-      "count": 4
+      "count": 11
     },
     {
       "type": "USES",

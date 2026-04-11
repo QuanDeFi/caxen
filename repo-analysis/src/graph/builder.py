@@ -229,6 +229,16 @@ def build_graph_artifact(symbol_index: Dict[str, object]) -> Dict[str, object]:
                 ),
             )
 
+    append_symbol_semantic_edges(
+        nodes,
+        node_ids,
+        edges,
+        edge_counts,
+        reference_nodes,
+        repo_name,
+        symbol_index.get("symbols", []),
+    )
+
     append_statement_graph(
         nodes,
         node_ids,
@@ -435,6 +445,57 @@ def append_statement_graph(
                 target_key = statement_target_key(write)
                 if target_key:
                     last_write_by_target[target_key] = statement["statement_id"]
+
+
+def append_symbol_semantic_edges(
+    nodes: List[Dict[str, object]],
+    node_ids: set[str],
+    edges: List[Dict[str, object]],
+    edge_counts: Dict[str, int],
+    reference_nodes: Dict[str, str],
+    repo_name: str,
+    symbols: List[Dict[str, object]],
+) -> None:
+    emitted = set()
+    for symbol in symbols:
+        semantic_summary = symbol.get("semantic_summary") or {}
+        for edge_type, field_name, semantic_level in (
+            ("READS", "reads", "symbol"),
+            ("WRITES", "writes", "symbol"),
+            ("REFS", "references", "symbol"),
+            ("READS", "interprocedural_reads", "interprocedural"),
+            ("WRITES", "interprocedural_writes", "interprocedural"),
+            ("REFS", "interprocedural_references", "interprocedural"),
+            ("CALLS", "transitive_calls", "transitive"),
+        ):
+            for target in semantic_summary.get(field_name, []):
+                target_node_id = resolve_target_node(
+                    nodes,
+                    node_ids,
+                    reference_nodes,
+                    repo_name,
+                    target.get("target_symbol_id"),
+                    target.get("target_qualified_name") or target.get("qualified_name_hint"),
+                    "symbol_ref",
+                )
+                if not target_node_id:
+                    continue
+                edge_key = (symbol["symbol_id"], edge_type, semantic_level, target_node_id)
+                if edge_key in emitted:
+                    continue
+                emitted.add(edge_key)
+                append_edge(
+                    edges,
+                    edge_counts,
+                    make_edge(
+                        edge_type,
+                        symbol["symbol_id"],
+                        target_node_id,
+                        repo_name,
+                        path=symbol["path"],
+                        semantic_level=semantic_level,
+                    ),
+                )
 
 
 def statement_target_key(target: Dict[str, object]) -> str | None:
