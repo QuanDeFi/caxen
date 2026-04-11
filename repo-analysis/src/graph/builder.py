@@ -188,8 +188,19 @@ def build_graph_artifact(symbol_index: Dict[str, object]) -> Dict[str, object]:
             ),
         )
 
+    append_statement_graph(
+        nodes,
+        node_ids,
+        edges,
+        edge_counts,
+        reference_nodes,
+        file_node_ids,
+        repo_name,
+        symbol_index.get("statements", []),
+    )
+
     return {
-        "schema_version": "0.2.0",
+        "schema_version": "0.3.0",
         "repo": repo_name,
         "generated_at": timestamp_now(),
         "nodes": nodes,
@@ -256,6 +267,137 @@ def make_edge(edge_type: str, source: str, target: str, repo_name: str, **metada
         "to": target,
         "metadata": metadata,
     }
+
+
+def append_statement_graph(
+    nodes: List[Dict[str, object]],
+    node_ids: set[str],
+    edges: List[Dict[str, object]],
+    edge_counts: Dict[str, int],
+    reference_nodes: Dict[str, str],
+    file_node_ids: Dict[str, str],
+    repo_name: str,
+    statements: List[Dict[str, object]],
+) -> None:
+    statements_by_container: Dict[str, List[Dict[str, object]]] = {}
+    for statement in statements:
+        statements_by_container.setdefault(statement["container_symbol_id"], []).append(statement)
+        append_node(
+            nodes,
+            node_ids,
+            {
+                "node_id": statement["statement_id"],
+                "kind": "statement",
+                "repo": repo_name,
+                "path": statement["path"],
+                "name": f"{statement['kind']}@L{statement['span']['start_line']}",
+                "text": statement["text"],
+                "container_symbol_id": statement["container_symbol_id"],
+                "container_qualified_name": statement["container_qualified_name"],
+            },
+        )
+        append_edge(
+            edges,
+            edge_counts,
+            make_edge(
+                "CONTAINS",
+                statement["container_symbol_id"],
+                statement["statement_id"],
+                repo_name,
+                path=statement["path"],
+                line=statement["span"]["start_line"],
+            ),
+        )
+
+        if statement.get("previous_statement_id"):
+            append_edge(
+                edges,
+                edge_counts,
+                make_edge(
+                    "CONTROL_FLOW",
+                    statement["previous_statement_id"],
+                    statement["statement_id"],
+                    repo_name,
+                    path=statement["path"],
+                    line=statement["span"]["start_line"],
+                    relation="sequential",
+                ),
+            )
+
+        if statement.get("parent_statement_id"):
+            append_edge(
+                edges,
+                edge_counts,
+                make_edge(
+                    "DEPENDENCE",
+                    statement["parent_statement_id"],
+                    statement["statement_id"],
+                    repo_name,
+                    path=statement["path"],
+                    line=statement["span"]["start_line"],
+                    relation="control",
+                ),
+            )
+
+        for edge_type, field_name in (("DEFINES", "defines"), ("READS", "reads"), ("WRITES", "writes"), ("REFS", "reads"), ("CALLS", "calls")):
+            for target in statement.get(field_name, []):
+                target_node_id = resolve_target_node(
+                    nodes,
+                    node_ids,
+                    reference_nodes,
+                    repo_name,
+                    target.get("target_symbol_id"),
+                    target.get("target_qualified_name") or target.get("qualified_name_hint"),
+                    "symbol_ref",
+                )
+                if not target_node_id:
+                    continue
+                append_edge(
+                    edges,
+                    edge_counts,
+                    make_edge(
+                        edge_type,
+                        statement["statement_id"],
+                        target_node_id,
+                        repo_name,
+                        path=statement["path"],
+                        line=statement["span"]["start_line"],
+                        kind=statement["kind"],
+                    ),
+                )
+
+    for container_symbol_id, container_statements in statements_by_container.items():
+        last_write_by_target: Dict[str, str] = {}
+        sorted_statements = sorted(
+            container_statements,
+            key=lambda item: (item["span"]["start_line"], item["span"]["start_column"], item["statement_id"]),
+        )
+        for statement in sorted_statements:
+            for read in statement.get("reads", []):
+                target_key = statement_target_key(read)
+                if not target_key or target_key not in last_write_by_target:
+                    continue
+                append_edge(
+                    edges,
+                    edge_counts,
+                    make_edge(
+                        "DATA_FLOW",
+                        last_write_by_target[target_key],
+                        statement["statement_id"],
+                        repo_name,
+                        path=statement["path"],
+                        line=statement["span"]["start_line"],
+                        via=target_key,
+                    ),
+                )
+            for write in list(statement.get("defines", [])) + list(statement.get("writes", [])):
+                target_key = statement_target_key(write)
+                if target_key:
+                    last_write_by_target[target_key] = statement["statement_id"]
+
+
+def statement_target_key(target: Dict[str, object]) -> str | None:
+    return target.get("target_symbol_id") or target.get("target_qualified_name") or target.get("qualified_name_hint")
 
 
 def resolve_target_node(

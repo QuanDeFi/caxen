@@ -121,10 +121,23 @@ High-level shape:
 
 ```json
 {
-  "schema_version": "0.3.0",
+  "schema_version": "0.4.0",
   "repo": "yellowstone-vixen",
   "generated_at": "2026-04-10T12:00:00Z",
-  "parser": "rust-simple-v2",
+  "parser": "rust-simple-v3",
+  "parser_backends": {
+    "rustc_ast_probe": {
+      "backend": "rustc-ast-tree",
+      "available": true,
+      "used": true,
+      "files": 1,
+      "parsed_files": 1,
+      "item_counts": [],
+      "statement_counts": [],
+      "control_counts": [],
+      "samples": []
+    }
+  },
   "source_roots": ["crates/proc-macro/src"],
   "path_prefixes": ["crates/proc-macro/src/lib.rs"],
   "files": [
@@ -224,11 +237,47 @@ High-level shape:
       "target_kind": null
     }
   ],
+  "statements": [
+    {
+      "statement_id": "stmt:mno012",
+      "repo": "yellowstone-vixen",
+      "path": "crates/proc-macro/src/lib.rs",
+      "crate": "yellowstone-vixen-proc-macro",
+      "module_path": "yellowstone_vixen_proc_macro",
+      "language": "Rust",
+      "kind": "expr",
+      "text": "vixen::expand(attr.into(), item.into())",
+      "span": {
+        "start_line": 24,
+        "start_column": 5,
+        "end_line": 24,
+        "end_column": 44
+      },
+      "container_symbol_id": "sym:abc123",
+      "container_qualified_name": "yellowstone_vixen_proc_macro::vixen",
+      "parent_statement_id": null,
+      "previous_statement_id": null,
+      "nesting_depth": 0,
+      "defines": [],
+      "reads": [],
+      "writes": [],
+      "calls": [
+        {
+          "name": "expand",
+          "qualified_name_hint": "vixen::expand",
+          "target_symbol_id": null,
+          "target_qualified_name": "vixen::expand",
+          "target_kind": null
+        }
+      ]
+    }
+  ],
   "summary": {
     "rust_files": 1,
     "symbols": 7,
     "imports": 2,
     "references": 1,
+    "statements": 1,
     "kind_counts": [
       {
         "kind": "function",
@@ -238,6 +287,12 @@ High-level shape:
     "reference_kind_counts": [
       {
         "kind": "use",
+        "count": 1
+      }
+    ],
+    "statement_kind_counts": [
+      {
+        "kind": "expr",
         "count": 1
       }
     ]
@@ -250,10 +305,10 @@ High-level shape:
 Each parsed repo now also writes:
 
 - `symbols.sqlite3`
-  - tables: `metadata`, `files`, `symbols`, `imports`, `symbol_references`
+  - tables: `metadata`, `files`, `symbols`, `imports`, `symbol_references`, `statements`
 - `parquet_status.json`
   - reports whether parquet export ran on the current machine
-  - when parquet export is available, the parsed directory also includes `files.parquet`, `symbols.parquet`, `imports.parquet`, and `references.parquet`
+  - when parquet export is available, the parsed directory also includes `files.parquet`, `symbols.parquet`, `imports.parquet`, `references.parquet`, and `statements.parquet`
 
 ## Search Schema
 
@@ -261,8 +316,10 @@ Each parsed repo now also writes:
 
 - `data/search/<repo>/search.sqlite3`
   - tables: `metadata`, `documents`, `lexical_documents`
-  - `lexical_documents` is an SQLite FTS5 virtual table over repo, directory, file, and symbol documents
+  - `lexical_documents` is an SQLite FTS5 virtual table over repo, directory, file, symbol, and statement documents
 - `data/search/<repo>/search_manifest.json`
+- `data/search/<repo>/embedding_index.json`
+- `data/search/<repo>/embedding_manifest.json`
 
 High-level manifest shape:
 
@@ -286,6 +343,22 @@ High-level manifest shape:
 }
 ```
 
+High-level `embedding_manifest.json` shape:
+
+```json
+{
+  "schema_version": "0.1.0",
+  "repo": "carbon",
+  "generated_at": "2026-04-10T12:00:00Z",
+  "model": "hashing-tfidf-v1",
+  "dimensions": 256,
+  "summary": {
+    "documents": 1234,
+    "nonzero_dimensions": 45678
+  }
+}
+```
+
 ## Graph Schema
 
 The first Phase 3 slice writes `data/graph/<repo>/graph.json`.
@@ -294,7 +367,7 @@ High-level shape:
 
 ```json
 {
-  "schema_version": "0.2.0",
+  "schema_version": "0.3.0",
   "repo": "yellowstone-vixen",
   "generated_at": "2026-04-10T12:00:00Z",
   "nodes": [
@@ -343,7 +416,7 @@ High-level shape:
 ## Phase 3 Notes
 
 - The current parser is intentionally deterministic and Rust-only.
-- The current graph now includes first semantic edges for imports, calls, uses, and impl relationships.
+- The current graph now includes first semantic edges for imports, calls, uses, impl relationships, and statement-level control/data/dependence-style edges.
 - SQLite persistence is always available; parquet export is optional per-environment.
 - Future phases can add higher-fidelity parsers and richer graph edges without replacing the JSON-first contract.
 
@@ -383,6 +456,7 @@ High-level `files.json` entry shape:
   "language": "Rust",
   "symbols": 7,
   "imports": 2,
+  "statements": 3,
   "public_symbols": ["yellowstone_vixen_proc_macro::vixen"],
   "top_symbols": ["yellowstone_vixen_proc_macro::vixen"],
   "tags": ["parser"],
@@ -417,7 +491,7 @@ High-level shape:
       "name": "yellowstone_vixen_attr_macro",
       "repo": "yellowstone-vixen",
       "query": "vixen proc macro attribute",
-      "mode": "lexical_graph",
+      "mode": "embedding",
       "expected_path": "crates/proc-macro/src/lib.rs",
       "expected_name": "vixen",
       "latency_ms": 3.1,

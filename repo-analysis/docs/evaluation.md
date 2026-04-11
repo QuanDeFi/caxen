@@ -8,6 +8,7 @@ It currently compares:
 
 - lexical-only retrieval
 - lexical-plus-graph retrieval
+- embedding-only retrieval
 
 The harness writes `data/eval/benchmarks.json`.
 
@@ -31,4 +32,5 @@ Each run records:
 
 - the benchmark set is small and deterministic
 - there is no answer-quality grading yet
-- there are no embeddings, summary-aware, or selective-retrieval benchmark modes yet
+- there are no summary-aware or selective-retrieval benchmark modes yet
+- the embedding mode uses the local hashed sidecar, not a model-backed embedding service

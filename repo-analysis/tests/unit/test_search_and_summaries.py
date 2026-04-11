@@ -10,6 +10,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from agents.toolkit import find_symbol, prepare_context, repo_overview, summarize_path, trace_calls
+from embeddings.indexer import build_embedding_index, query_embedding_index
 from graph.builder import build_graph_artifact, write_graph_artifact
 from retrieval.engine import retrieve_context
 from search.indexer import build_search_index, search_documents
@@ -94,6 +95,7 @@ def seed_demo_workspace(root: Path) -> dict[str, Path]:
     graph = build_graph_artifact(symbol_index)
     write_graph_artifact(graph_root, "demo", graph)
     build_search_index("demo", repo_root, raw_root, parsed_root, search_root)
+    build_embedding_index(search_root, "demo")
     summary_artifacts = build_summary_artifacts("demo", raw_root, parsed_root, graph_root)
     write_summary_artifacts(summary_root, "demo", summary_artifacts)
 
@@ -116,6 +118,19 @@ class SearchAndSummaryTest(unittest.TestCase):
 
             self.assertGreater(len(results), 0)
             self.assertTrue(any(item["name"] == "helper" for item in symbol_hits))
+
+    def test_parser_probe_and_embedding_sidecar_are_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = seed_demo_workspace(Path(tmpdir))
+            symbols = json.loads((paths["parsed_root"] / "demo" / "symbols.json").read_text(encoding="utf-8"))
+
+            self.assertIn("parser_backends", symbols)
+            self.assertTrue(symbols["parser_backends"]["rustc_ast_probe"]["available"])
+            self.assertGreater(symbols["summary"]["statements"], 0)
+
+            embedding_results = query_embedding_index(paths["search_root"], "demo", "helper answer", limit=5)
+            self.assertGreater(len(embedding_results), 0)
+            self.assertTrue(any(item.get("name") in {"helper", "answer"} for item in embedding_results))
 
     def test_retrieval_and_toolkit_use_search_and_graph_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

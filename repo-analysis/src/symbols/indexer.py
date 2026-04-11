@@ -17,6 +17,7 @@ from parsers.rust import (
     clean_rust_source_lines,
     parse_rust_file,
 )
+from parsers.rustc_backend import aggregate_rustc_probes, probe_rust_ast
 
 
 CALL_EXPR_RE = re.compile(
@@ -31,11 +32,14 @@ GENERIC_ANGLE_RE = re.compile(r"<[^<>]*>")
 LET_RE = re.compile(r"\blet\s+(?:mut\s+)?(?P<name>[a-z_][A-Za-z0-9_]*)\b")
 PACKAGE_NAME_RE = re.compile(r'^\s*name\s*=\s*"([^"]+)"\s*$', re.M)
 PACKAGE_BLOCK_RE = re.compile(r"\[package\](.*?)(?:\n\[|$)", re.S)
+ASSIGN_RE = re.compile(r"^\s*(?P<lhs>[A-Za-z_][A-Za-z0-9_]*)\s*(?P<op>(?:[+\-*/%&|^]|<<|>>)?=)")
+LEADING_CLOSE_RE = re.compile(r"^\s*(?P<braces>\}+)")
 PATH_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_])"
     r"(?P<expr>(?:crate|super|Self|[A-Za-z_][A-Za-z0-9_]*)(?:::[A-Za-z_][A-Za-z0-9_]*)*)"
     r"(?![A-Za-z0-9_])"
 )
+IDENT_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?![A-Za-z0-9_])")
 QUALIFIED_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_])"
     r"(?P<expr>(?:crate|super|Self|[A-Za-z_][A-Za-z0-9_]*)(?:::[A-Za-z_][A-Za-z0-9_]*)+)"
@@ -117,6 +121,7 @@ class ParsedFileContext:
     crate_root: str
     symbol_id_by_local: Dict[int, str]
     import_aliases: Dict[str, List[str]]
+    compiler_probe: Dict[str, object]
 
 
 def build_symbol_index(
@@ -168,28 +173,37 @@ def build_symbol_index(
     import_records = build_import_records(repo_name, contexts, resolution_index)
     resolve_impl_symbols(symbol_records, context_by_path, resolution_index)
     reference_records = build_reference_records(repo_name, contexts, resolution_index)
+    statement_records = build_statement_records(repo_name, contexts, symbol_records, resolution_index)
+    compiler_backends = {
+        "rustc_ast_probe": aggregate_rustc_probes([context.compiler_probe for context in contexts]),
+    }
 
     kind_counts = rollup_counts(item["kind"] for item in symbol_records)
     reference_kind_counts = rollup_counts(item["kind"] for item in reference_records)
+    statement_kind_counts = rollup_counts(item["kind"] for item in statement_records)
 
     return {
-        "schema_version": "0.3.0",
+        "schema_version": "0.4.0",
         "repo": repo_name,
         "generated_at": timestamp_now(),
-        "parser": "rust-simple-v2",
+        "parser": "rust-simple-v3",
+        "parser_backends": compiler_backends,
         "source_roots": parser_roots,
         "path_prefixes": list(normalize_prefixes(path_prefixes)),
         "files": file_records,
         "symbols": symbol_records,
         "imports": import_records,
         "references": reference_records,
+        "statements": statement_records,
         "summary": {
             "rust_files": len(file_records),
             "symbols": len(symbol_records),
             "imports": len(import_records),
             "references": len(reference_records),
+            "statements": len(statement_records),
             "kind_counts": kind_counts,
             "reference_kind_counts": reference_kind_counts,
+            "statement_kind_counts": statement_kind_counts,
         },
     }
 
@@ -693,6 +707,359 @@ def add_reference_record(
     }
 
 
+def build_statement_records(
+    repo_name: str,
+    contexts: Sequence[ParsedFileContext],
+    symbol_records: Sequence[Dict[str, object]],
+    resolution_index: Dict[str, object],
+) -> List[Dict[str, object]]:
+    context_by_path = {context.parsed.path: context for context in contexts}
+    symbol_records_by_id = {symbol["symbol_id"]: symbol for symbol in symbol_records}
+    locals_by_scope_line_name: DefaultDict[str, Dict[Tuple[int, str], Dict[str, object]]] = defaultdict(dict)
+
+    for symbol in symbol_records:
+        if symbol["kind"] == "local" and symbol["scope_symbol_id"]:
+            locals_by_scope_line_name[symbol["scope_symbol_id"]][(symbol["span"]["start_line"], symbol["name"])] = symbol
+
+    statements: List[Dict[str, object]] = []
+    for symbol in symbol_records:
+        if symbol["kind"] not in FUNCTION_LIKE_KINDS:
+            continue
+
+        context = context_by_path[symbol["path"]]
+        statements.extend(
+            build_function_statement_records(
+                repo_name,
+                context,
+                symbol,
+                resolution_index,
+                locals_by_scope_line_name.get(symbol["symbol_id"], {}),
+                symbol_records_by_id,
+            )
+        )
+
+    return sorted(
+        statements,
+        key=lambda item: (
+            item["path"],
+            item["span"]["start_line"],
+            item["span"]["start_column"],
+            item["statement_id"],
+        ),
+    )
+
+
+def build_function_statement_records(
+    repo_name: str,
+    context: ParsedFileContext,
+    symbol: Dict[str, object],
+    resolution_index: Dict[str, object],
+    locals_by_line_name: Dict[Tuple[int, str], Dict[str, object]],
+    symbol_records_by_id: Dict[str, Dict[str, object]],
+) -> List[Dict[str, object]]:
+    statements: List[Dict[str, object]] = []
+    body_depth = 1
+    control_stack: List[Tuple[str, int]] = []
+    previous_statement_id: Optional[str] = None
+    self_target = infer_self_target(symbol, resolution_index)
+
+    for line_number in range(symbol["span"]["start_line"], symbol["span"]["end_line"] + 1):
+        fragment = statement_fragment_for_line(context.cleaned_lines[line_number - 1], symbol["span"], line_number)
+        if fragment is None:
+            continue
+
+        leading_close_match = LEADING_CLOSE_RE.match(fragment)
+        leading_closes = len(leading_close_match.group("braces")) if leading_close_match else 0
+        effective_depth = max(body_depth - leading_closes, 1)
+        while control_stack and effective_depth < control_stack[-1][1]:
+            control_stack.pop()
+
+        statement_text = collapse_whitespace(fragment).strip().rstrip(";")
+        if not statement_text or statement_text in {"{", "}", "else", "else {"}:
+            body_depth += fragment.count("{") - fragment.count("}")
+            continue
+
+        stripped_text = statement_text.lstrip("}")
+        if not stripped_text:
+            body_depth += fragment.count("{") - fragment.count("}")
+            continue
+
+        kind = classify_statement_kind(stripped_text)
+        start_column = max(len(fragment) - len(fragment.lstrip()) + 1, 1)
+        statement_id = stable_id(
+            "stmt",
+            repo_name,
+            symbol["path"],
+            symbol["symbol_id"],
+            str(line_number),
+            kind,
+            stripped_text,
+        )
+        parent_statement_id = control_stack[-1][0] if control_stack else None
+
+        definitions = collect_statement_definitions(locals_by_line_name, line_number, stripped_text, statement_id)
+        writes = collect_statement_writes(
+            stripped_text,
+            symbol,
+            resolution_index,
+            context.import_aliases,
+            context.crate_root,
+            self_target,
+        )
+        calls, call_expressions = collect_statement_calls(
+            stripped_text,
+            symbol,
+            resolution_index,
+            context.import_aliases,
+            context.crate_root,
+            self_target,
+        )
+        reads = collect_statement_reads(
+            stripped_text,
+            symbol,
+            resolution_index,
+            context.import_aliases,
+            context.crate_root,
+            self_target,
+            excluded_names={item["name"] for item in definitions + writes},
+            excluded_expressions=call_expressions,
+        )
+
+        for definition in definitions:
+            symbol_record = symbol_records_by_id.get(definition["target_symbol_id"] or "")
+            if symbol_record is not None:
+                symbol_record["statement_id"] = statement_id
+
+        statement_record = {
+            "statement_id": statement_id,
+            "repo": repo_name,
+            "path": symbol["path"],
+            "crate": symbol["crate"],
+            "module_path": symbol["module_path"],
+            "language": symbol["language"],
+            "kind": kind,
+            "text": stripped_text,
+            "span": {
+                "start_line": line_number,
+                "start_column": start_column,
+                "end_line": line_number,
+                "end_column": start_column + len(stripped_text),
+            },
+            "container_symbol_id": symbol["symbol_id"],
+            "container_qualified_name": symbol["qualified_name"],
+            "parent_statement_id": parent_statement_id,
+            "previous_statement_id": previous_statement_id,
+            "nesting_depth": max(len(control_stack), 0),
+            "defines": definitions,
+            "reads": reads,
+            "writes": writes,
+            "calls": calls,
+        }
+        statements.append(statement_record)
+        previous_statement_id = statement_id
+
+        if kind in {"if", "match", "for", "while", "loop"} and "{" in fragment:
+            control_stack.append((statement_id, effective_depth + fragment.count("{")))
+
+        body_depth += fragment.count("{") - fragment.count("}")
+
+    return statements
+
+
+def statement_fragment_for_line(cleaned_line: str, span: Dict[str, int], line_number: int) -> Optional[str]:
+    fragment = cleaned_line
+    if line_number == span["start_line"]:
+        if "{" not in fragment:
+            return None
+        fragment = fragment.split("{", 1)[1]
+    if line_number == span["end_line"] and "}" in fragment:
+        fragment = fragment.rsplit("}", 1)[0]
+    return fragment
+
+
+def classify_statement_kind(statement_text: str) -> str:
+    if statement_text.startswith("let "):
+        return "let"
+    if statement_text.startswith("if "):
+        return "if"
+    if statement_text.startswith("match "):
+        return "match"
+    if statement_text.startswith("for "):
+        return "for"
+    if statement_text.startswith("while "):
+        return "while"
+    if statement_text.startswith("loop"):
+        return "loop"
+    if statement_text.startswith("return"):
+        return "return"
+    if ASSIGN_RE.match(statement_text):
+        return "assign"
+    return "expr"
+
+
+def collect_statement_definitions(
+    locals_by_line_name: Dict[Tuple[int, str], Dict[str, object]],
+    line_number: int,
+    statement_text: str,
+    statement_id: str,
+) -> List[Dict[str, object]]:
+    definitions: List[Dict[str, object]] = []
+    for match in LET_RE.finditer(statement_text):
+        name = match.group("name")
+        local_symbol = locals_by_line_name.get((line_number, name))
+        target = make_target_entry(
+            name,
+            {
+                "target_symbol_id": local_symbol["symbol_id"] if local_symbol else None,
+                "target_qualified_name": local_symbol["qualified_name"] if local_symbol else name,
+                "target_kind": local_symbol["kind"] if local_symbol else "local",
+                "qualified_name_hint": local_symbol["qualified_name"] if local_symbol else name,
+            },
+        )
+        target["statement_id"] = statement_id
+        append_unique_target(definitions, target)
+    return definitions
+
+
+def collect_statement_writes(
+    statement_text: str,
+    symbol: Dict[str, object],
+    resolution_index: Dict[str, object],
+    import_aliases: Dict[str, List[str]],
+    crate_root: str,
+    self_target: Optional[str],
+) -> List[Dict[str, object]]:
+    match = ASSIGN_RE.match(statement_text)
+    if not match:
+        return []
+    lhs = match.group("lhs")
+    resolved = resolve_expression(
+        lhs,
+        symbol,
+        resolution_index,
+        import_aliases,
+        crate_root,
+        symbol["symbol_id"],
+        self_target,
+    )
+    return [make_target_entry(lhs, resolved)]
+
+
+def collect_statement_calls(
+    statement_text: str,
+    symbol: Dict[str, object],
+    resolution_index: Dict[str, object],
+    import_aliases: Dict[str, List[str]],
+    crate_root: str,
+    self_target: Optional[str],
+) -> Tuple[List[Dict[str, object]], List[str]]:
+    calls: List[Dict[str, object]] = []
+    expressions: List[str] = []
+    for match in CALL_EXPR_RE.finditer(statement_text):
+        expression = strip_expression_noise(match.group("expr"))
+        if expression in KEYWORDS or expression in PRIMITIVE_TYPES:
+            continue
+        resolved = resolve_expression(
+            expression,
+            symbol,
+            resolution_index,
+            import_aliases,
+            crate_root,
+            symbol["symbol_id"],
+            self_target,
+        )
+        append_unique_target(calls, make_target_entry(expression, resolved))
+        expressions.append(expression)
+    return calls, expressions
+
+
+def collect_statement_reads(
+    statement_text: str,
+    symbol: Dict[str, object],
+    resolution_index: Dict[str, object],
+    import_aliases: Dict[str, List[str]],
+    crate_root: str,
+    self_target: Optional[str],
+    *,
+    excluded_names: set[str],
+    excluded_expressions: Sequence[str],
+) -> List[Dict[str, object]]:
+    reads: List[Dict[str, object]] = []
+    qualified_matches = {
+        strip_expression_noise(match.group("expr"))
+        for match in QUALIFIED_PATH_RE.finditer(statement_text)
+    }
+    excluded = set(excluded_names) | set(excluded_expressions)
+
+    for expression in sorted(qualified_matches):
+        if not expression or expression in excluded:
+            continue
+        resolved = resolve_expression(
+            expression,
+            symbol,
+            resolution_index,
+            import_aliases,
+            crate_root,
+            symbol["symbol_id"],
+            self_target,
+        )
+        append_unique_target(reads, make_target_entry(expression, resolved))
+
+    for match in IDENT_TOKEN_RE.finditer(statement_text):
+        name = match.group("name")
+        if name in excluded or name in KEYWORDS or name in PRIMITIVE_TYPES:
+            continue
+        if name[:1].isupper():
+            resolved = resolve_expression(
+                name,
+                symbol,
+                resolution_index,
+                import_aliases,
+                crate_root,
+                symbol["symbol_id"],
+                self_target,
+            )
+            append_unique_target(reads, make_target_entry(name, resolved))
+            continue
+        resolved = resolve_expression(
+            name,
+            symbol,
+            resolution_index,
+            import_aliases,
+            crate_root,
+            symbol["symbol_id"],
+            self_target,
+        )
+        if resolved["target_symbol_id"] or resolved["target_qualified_name"] != name:
+            append_unique_target(reads, make_target_entry(name, resolved))
+    return reads
+
+
+def make_target_entry(expression: str, resolved: Dict[str, Optional[str]]) -> Dict[str, object]:
+    qualified_name_hint = resolved["qualified_name_hint"] or expression
+    return {
+        "name": expression.split("::")[-1],
+        "qualified_name_hint": qualified_name_hint,
+        "target_symbol_id": resolved["target_symbol_id"],
+        "target_qualified_name": resolved["target_qualified_name"] or qualified_name_hint,
+        "target_kind": resolved["target_kind"],
+    }
+
+
+def append_unique_target(targets: List[Dict[str, object]], entry: Dict[str, object]) -> None:
+    key = (
+        entry.get("target_symbol_id"),
+        entry.get("target_qualified_name"),
+        entry.get("name"),
+    )
+    if any(
+        (item.get("target_symbol_id"), item.get("target_qualified_name"), item.get("name")) == key
+        for item in targets
+    ):
+        return
+    targets.append(entry)
+
+
 def discover_rust_files(repo_root: Path, parser_roots: Iterable[str], path_prefixes: Sequence[str]) -> List[Path]:
     candidates = []
     seen = set()
@@ -981,6 +1348,7 @@ def parse_rust_source_file(
     source = source_path.read_text(encoding="utf-8")
     source_lines = source.splitlines()
     parsed = parse_rust_file(relative_path, source, crate_name, module_path)
+    compiler_probe = probe_rust_ast(source_path)
     return ParsedFileContext(
         parsed=parsed,
         source=source,
@@ -989,6 +1357,7 @@ def parse_rust_source_file(
         crate_root=module_path.split("::")[0],
         symbol_id_by_local={},
         import_aliases={},
+        compiler_probe=compiler_probe,
     )
 
 

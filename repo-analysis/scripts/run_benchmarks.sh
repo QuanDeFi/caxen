@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$SCRIPT_DIR/parse_repos.sh"
 "$SCRIPT_DIR/build_index.sh"
 "$SCRIPT_DIR/build_search.sh"
+"$SCRIPT_DIR/build_embeddings.sh"
 "$SCRIPT_DIR/export_summaries.sh"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"

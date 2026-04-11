@@ -7,6 +7,7 @@ from typing import Dict, List, Sequence
 
 from retrieval.engine import retrieve_context
 from search.indexer import search_documents
+from embeddings.indexer import query_embedding_index
 from symbols.indexer import timestamp_now
 
 
@@ -59,6 +60,7 @@ def run_benchmarks(
     for case in cases:
         runs.append(run_case(case, "lexical", search_root, graph_root, parsed_root, limit))
         runs.append(run_case(case, "lexical_graph", search_root, graph_root, parsed_root, limit))
+        runs.append(run_case(case, "embedding", search_root, graph_root, parsed_root, limit))
 
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -87,8 +89,18 @@ def run_case(
     if mode == "lexical":
         results = search_documents(search_root, case["repo"], case["query"], limit=limit, kinds=("symbol", "file"))
         selected = results
+    elif mode == "embedding":
+        selected = query_embedding_index(search_root, case["repo"], case["query"], limit=limit)
     else:
-        context = retrieve_context(search_root, graph_root, parsed_root, case["repo"], case["query"], limit=limit)
+        context = retrieve_context(
+            search_root,
+            graph_root,
+            parsed_root,
+            case["repo"],
+            case["query"],
+            limit=limit,
+            use_embeddings=False,
+        )
         selected = context["selected_context"]
     elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
 

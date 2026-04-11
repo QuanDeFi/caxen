@@ -42,6 +42,7 @@ Create and preserve this top-level layout:
     │   ├── parse_repos.sh
     │   ├── build_index.sh
     │   ├── build_search.sh
+    │   ├── build_embeddings.sh
     │   ├── run_benchmarks.sh
     │   └── export_summaries.sh
     ├── data/
@@ -101,9 +102,9 @@ Current implementation status:
 
 - Phase 0 and Phase 1 workspace setup are in place.
 - Phase 2 raw inventory is implemented and produces normalized `manifest.json` and `repo_map.json`.
-- Phase 3 currently exists as an initial Rust-only parser/symbol/graph slice.
-- Later Phase 3 goals such as statement-level nodes, control-flow/data-flow/dependence edges, and compiler-backed resolution are not implemented yet.
-- Phase 4 and beyond remain planned work unless `repo-analysis/docs/architecture.md` says otherwise.
+- Phase 3 now includes an initial Rust parser/symbol/graph slice plus a `rustc` AST probe, statement-level nodes, and first control-flow/data-flow/dependence-style edges.
+- Phase 4-6 now include lexical search, an embedding sidecar, deterministic summaries, and agent-facing query commands.
+- The remaining roadmap is now the more advanced version of those layers: deeper compiler-backed parsing, stronger statement/control/data semantics, and better model-backed embeddings.
 
 When there is any ambiguity, treat `repo-analysis/docs/architecture.md` and the code under `repo-analysis/src/` as the source of truth for what actually works today.
 

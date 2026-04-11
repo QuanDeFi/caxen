@@ -96,8 +96,23 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+            subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "build-embeddings",
+                    "--search-root",
+                    str(search_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
             self.assertTrue((search_root / "yellowstone-vixen" / "search.sqlite3").exists())
+            self.assertTrue((search_root / "yellowstone-vixen" / "embedding_index.json").exists())
             self.assertTrue((summary_root / "yellowstone-vixen" / "project.json").exists())
 
             find_symbol = subprocess.run(
@@ -117,6 +132,24 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             )
             symbol_lookup = json.loads(find_symbol.stdout)
             self.assertTrue(any(item["name"] == "vixen" for item in symbol_lookup["results"]))
+
+            embedding_search = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "embedding-search",
+                    "--search-root",
+                    str(search_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "proc macro attribute",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            embedding_lookup = json.loads(embedding_search.stdout)
+            self.assertGreater(len(embedding_lookup["results"]), 0)
 
             repo_overview = subprocess.run(
                 [

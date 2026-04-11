@@ -11,6 +11,7 @@ KIND_PRIORITY = {
     "enum": 5,
     "trait": 5,
     "impl": 4,
+    "statement": 4,
     "file": 3,
     "directory": 2,
     "repo": 1,
@@ -50,6 +51,7 @@ def rerank_candidates(candidates: Iterable[Dict[str, object]], query_tokens: Lis
         reasons = set(candidate.get("reasons", []))
         lexical_reason_bonus = 0.5 if "lexical" in reasons else 0.0
         localization_bonus = 0.25 if "symbol-localization" in reasons else 0.0
+        embedding_bonus = 0.15 if "embedding" in reasons else 0.0
         score = (
             float(candidate.get("score") or 0.0)
             + lexical_bonus
@@ -59,6 +61,7 @@ def rerank_candidates(candidates: Iterable[Dict[str, object]], query_tokens: Lis
             + unresolved_penalty
             + lexical_reason_bonus
             + localization_bonus
+            + embedding_bonus
         )
 
         updated = dict(candidate)

@@ -288,6 +288,40 @@ def build_documents(
             },
         }
 
+    for statement in symbols.get("statements", []):
+        yield {
+            "doc_id": stable_id("doc", repo_name, "statement", statement["statement_id"]),
+            "kind": "statement",
+            "repo": repo_name,
+            "path": statement["path"],
+            "name": f"{statement['kind']}@L{statement['span']['start_line']}",
+            "qualified_name": statement["container_qualified_name"],
+            "symbol_id": statement["container_symbol_id"],
+            "title": f"{statement['path']}:{statement['span']['start_line']}",
+            "preview": summarize_preview(statement["text"]),
+            "content": " ".join(
+                item
+                for item in [
+                    statement["kind"],
+                    statement["text"],
+                    statement["container_qualified_name"],
+                    " ".join(path_tags(statement["path"])),
+                    " ".join(target["target_qualified_name"] for target in statement.get("calls", [])),
+                    " ".join(target["target_qualified_name"] for target in statement.get("reads", [])),
+                    " ".join(target["target_qualified_name"] for target in statement.get("writes", [])),
+                ]
+                if item
+            ),
+            "metadata": {
+                "kind": statement["kind"],
+                "path": statement["path"],
+                "container_symbol_id": statement["container_symbol_id"],
+                "container_qualified_name": statement["container_qualified_name"],
+                "line": statement["span"]["start_line"],
+                "tags": path_tags(statement["path"]),
+            },
+        }
+
 
 def build_directory_rollups(repo_map: Dict[str, object], symbols: Dict[str, object]) -> Dict[str, Dict[str, object]]:
     rollups: Dict[str, Dict[str, object]] = defaultdict(lambda: {"files": 0, "symbols": 0, "sample_files": []})

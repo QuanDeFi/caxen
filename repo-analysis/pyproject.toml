@@ -8,4 +8,4 @@ requires-python = ">=3.10"
 testpaths = ["tests/unit", "tests/integration"]
 
 [tool.repo_analysis]
-implemented_phase = "inventory_search_summary_and_agent_toolkit_slice"
+implemented_phase = "compiler_probed_statement_graph_and_embedding_sidecar_slice"

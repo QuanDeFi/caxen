@@ -29,7 +29,7 @@ def build_summary_artifacts(
 
     incoming_counts, outgoing_counts = edge_counts(graph)
     project_summary = build_project_summary(repo_name, manifest, symbols, graph)
-    directory_summaries = build_directory_summaries(repo_map, symbol_records)
+    directory_summaries = build_directory_summaries(repo_map, symbols)
     file_summaries = build_file_summaries(symbols, symbols_by_path)
     symbol_summaries = build_symbol_summaries(symbol_records, incoming_counts, outgoing_counts)
 
@@ -96,6 +96,7 @@ def build_project_summary(
         f"{repo_name} is indexed as {focus}. "
         f"The current analysis slice covers {symbols['summary']['rust_files']} Rust files, "
         f"{symbols['summary']['symbols']} symbols, {symbols['summary']['imports']} imports, "
+        f"{symbols['summary'].get('statements', 0)} statements, "
         f"and {graph['summary']['edges']} graph edges. "
         f"Parser-relevant source roots: {', '.join(source_roots) or 'none detected'}."
     )
@@ -112,12 +113,13 @@ def build_project_summary(
     }
 
 
-def build_directory_summaries(repo_map: Dict[str, object], symbol_records: List[Dict[str, object]]) -> List[Dict[str, object]]:
+def build_directory_summaries(repo_map: Dict[str, object], symbols: Dict[str, object]) -> List[Dict[str, object]]:
     rollups: Dict[str, Dict[str, object]] = defaultdict(
         lambda: {
             "files": 0,
             "rust_files": 0,
             "symbols": 0,
+            "statements": 0,
             "public_symbols": 0,
             "top_symbol_kinds": Counter(),
         }
@@ -128,12 +130,16 @@ def build_directory_summaries(repo_map: Dict[str, object], symbol_records: List[
             if file_record.get("language") == "Rust":
                 rollups[prefix]["rust_files"] += 1
 
-    for symbol in symbol_records:
+    for symbol in symbols.get("symbols", []):
         for prefix in directory_prefixes(symbol["path"]):
             rollups[prefix]["symbols"] += 1
             if str(symbol.get("visibility") or "").startswith("pub"):
                 rollups[prefix]["public_symbols"] += 1
             rollups[prefix]["top_symbol_kinds"][symbol["kind"]] += 1
+
+    for statement in symbols.get("statements", []):
+        for prefix in directory_prefixes(statement["path"]):
+            rollups[prefix]["statements"] += 1
 
     summaries = []
     for directory in repo_map.get("directories", []):
@@ -148,12 +154,14 @@ def build_directory_summaries(repo_map: Dict[str, object], symbol_records: List[
                 "files": rollup.get("files", 0),
                 "rust_files": rollup.get("rust_files", 0),
                 "symbols": rollup.get("symbols", 0),
+                "statements": rollup.get("statements", 0),
                 "public_symbols": rollup.get("public_symbols", 0),
                 "top_symbol_kinds": top_kinds,
                 "tags": tags,
                 "summary": (
                     f"{path} contains {rollup.get('files', 0)} files, "
-                    f"{rollup.get('rust_files', 0)} Rust files, and {rollup.get('symbols', 0)} indexed symbols."
+                    f"{rollup.get('rust_files', 0)} Rust files, {rollup.get('symbols', 0)} indexed symbols, "
+                    f"and {rollup.get('statements', 0)} statements."
                 ),
             }
         )
@@ -166,6 +174,7 @@ def build_file_summaries(
 ) -> List[Dict[str, object]]:
     files = []
     file_records = {item["path"]: item for item in symbols.get("files", [])}
+    statement_counts = Counter(statement["path"] for statement in symbols.get("statements", []))
     for path, file_record in sorted(file_records.items()):
         file_symbols = symbols_by_path.get(path, [])
         public_symbols = [symbol["qualified_name"] for symbol in file_symbols if str(symbol.get("visibility") or "").startswith("pub")]
@@ -179,11 +188,13 @@ def build_file_summaries(
                 "language": file_record.get("language"),
                 "symbols": len(file_symbols),
                 "imports": file_record.get("imports", 0),
+                "statements": statement_counts.get(path, 0),
                 "public_symbols": public_symbols[:8],
                 "top_symbols": top_symbols,
                 "tags": tags,
                 "summary": (
-                    f"{path} defines {len(file_symbols)} symbols in crate {file_record.get('crate')}. "
+                    f"{path} defines {len(file_symbols)} symbols and {statement_counts.get(path, 0)} statements "
+                    f"in crate {file_record.get('crate')}. "
                     f"Top symbols: {', '.join(top_symbols[:3]) or 'none'}."
                 ),
             }

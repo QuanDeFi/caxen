@@ -5,6 +5,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from embeddings.indexer import query_embedding_index
 from rerank.fusion import rerank_candidates
 from search.indexer import search_documents, tokenize
 from symbols.indexer import stable_id
@@ -31,9 +32,11 @@ def retrieve_context(
     limit: int = 8,
     depth: int = 1,
     kinds: Sequence[str] = (),
+    use_embeddings: bool = True,
 ) -> Dict[str, object]:
     tokens = tokenize(query)
     lexical_results = search_documents(search_root, repo_name, query, limit=max(limit * 2, 10), kinds=kinds)
+    embedding_results = query_embedding_index(search_root, repo_name, query, limit=max(limit, 5)) if use_embeddings else []
     graph = load_json(graph_root / repo_name / "graph.json")
     symbols = load_json(parsed_root / repo_name / "symbols.json")
     symbol_by_id = {item["symbol_id"]: item for item in symbols.get("symbols", [])}
@@ -56,6 +59,15 @@ def retrieve_context(
             for localized in localize_file_symbols(tokens, symbols_by_path[result["path"]], base_score=float(result["score"]) * 0.5):
                 add_candidate(candidates, localized)
 
+    for result in embedding_results:
+        add_candidate(
+            candidates,
+            {
+                **result,
+                "reasons": ["embedding"],
+            },
+        )
+
     seed_nodes = []
     for result in lexical_results[:limit]:
         node_id = result_to_node_id(repo_name, result)
@@ -74,9 +86,11 @@ def retrieve_context(
         "repo": repo_name,
         "query": query,
         "lexical_results": lexical_results[:limit],
+        "embedding_results": embedding_results[:limit],
         "selected_context": ranked,
         "summary": {
             "lexical_results": len(lexical_results),
+            "embedding_results": len(embedding_results),
             "expanded_candidates": len(expanded),
             "selected": len(ranked),
         },
@@ -177,7 +191,14 @@ def node_to_candidate(
     edge: Dict[str, object],
     direction: str,
 ) -> Dict[str, object]:
-    kind = "symbol" if node["kind"] not in {"file", "directory", "repository"} and "path" in node else node["kind"]
+    if node["kind"] == "statement":
+        kind = "statement"
+    elif node["kind"] in {"module_ref", "symbol_ref", "type_ref"}:
+        kind = node["kind"]
+    elif node["kind"] not in {"file", "directory", "repository"} and "path" in node:
+        kind = "symbol"
+    else:
+        kind = node["kind"]
     return {
         "doc_id": stable_id("cand", repo_name, node["node_id"], edge["edge_id"], direction),
         "kind": kind,

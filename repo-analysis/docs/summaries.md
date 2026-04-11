@@ -35,6 +35,7 @@ File summaries include:
 
 - crate and module path
 - symbol and import counts
+- statement counts
 - top public symbols
 - heuristic tags
 

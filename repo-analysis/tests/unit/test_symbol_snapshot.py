@@ -52,10 +52,22 @@ class SymbolSnapshotTest(unittest.TestCase):
 
             snapshot = {
                 "summary": artifact["summary"],
+                "parser_backends": {
+                    "rustc_ast_probe": {
+                        "available": artifact["parser_backends"]["rustc_ast_probe"]["available"],
+                        "used": artifact["parser_backends"]["rustc_ast_probe"]["used"],
+                        "files": artifact["parser_backends"]["rustc_ast_probe"]["files"],
+                        "parsed_files": artifact["parser_backends"]["rustc_ast_probe"]["parsed_files"],
+                        "item_counts": artifact["parser_backends"]["rustc_ast_probe"]["item_counts"],
+                        "statement_counts": artifact["parser_backends"]["rustc_ast_probe"]["statement_counts"],
+                        "control_counts": artifact["parser_backends"]["rustc_ast_probe"]["control_counts"],
+                    }
+                },
                 "symbols": [
                     {
                         "kind": symbol["kind"],
                         "qualified_name": symbol["qualified_name"],
+                        "statement_id": bool(symbol["statement_id"]),
                     }
                     for symbol in artifact["symbols"]
                 ],
@@ -73,6 +85,18 @@ class SymbolSnapshotTest(unittest.TestCase):
                         "target": entry["target_qualified_name"],
                     }
                     for entry in artifact["references"]
+                ],
+                "statements": [
+                    {
+                        "kind": entry["kind"],
+                        "container": entry["container_qualified_name"],
+                        "text": entry["text"],
+                        "defines": [item["target_qualified_name"] for item in entry["defines"]],
+                        "reads": [item["target_qualified_name"] for item in entry["reads"]],
+                        "writes": [item["target_qualified_name"] for item in entry["writes"]],
+                        "calls": [item["target_qualified_name"] for item in entry["calls"]],
+                    }
+                    for entry in artifact["statements"]
                 ],
                 "graph_edge_counts": graph["summary"]["edge_counts"],
             }
@@ -130,6 +154,8 @@ class SymbolSnapshotTest(unittest.TestCase):
                 self.assertEqual(cursor.fetchone()[0], artifact["summary"]["imports"])
                 cursor.execute("SELECT COUNT(*) FROM symbol_references")
                 self.assertEqual(cursor.fetchone()[0], artifact["summary"]["references"])
+                cursor.execute("SELECT COUNT(*) FROM statements")
+                self.assertEqual(cursor.fetchone()[0], artifact["summary"]["statements"])
 
             parquet_status = json.loads(parquet_status_path.read_text(encoding="utf-8"))
             self.assertIn("available", parquet_status)

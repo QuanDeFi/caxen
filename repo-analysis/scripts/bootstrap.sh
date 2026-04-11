@@ -31,6 +31,12 @@ else
   echo "WARNING: cargo not found; upstream Rust builds cannot be verified locally." >&2
 fi
 
+if command -v rustc >/dev/null 2>&1; then
+  echo "rustc: $(rustc --version 2>&1)"
+else
+  echo "WARNING: rustc not found; compiler-backed AST probing is unavailable locally." >&2
+fi
+
 if command -v node >/dev/null 2>&1; then
   echo "node: $(node --version 2>&1)"
 else

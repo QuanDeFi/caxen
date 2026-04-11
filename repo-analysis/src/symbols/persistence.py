@@ -111,12 +111,38 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
                 target_kind TEXT
             );
 
+            CREATE TABLE statements (
+                statement_id TEXT PRIMARY KEY,
+                repo TEXT NOT NULL,
+                path TEXT NOT NULL,
+                crate TEXT NOT NULL,
+                module_path TEXT NOT NULL,
+                language TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                start_column INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                end_column INTEGER NOT NULL,
+                container_symbol_id TEXT NOT NULL,
+                container_qualified_name TEXT NOT NULL,
+                parent_statement_id TEXT,
+                previous_statement_id TEXT,
+                nesting_depth INTEGER NOT NULL,
+                defines_json TEXT NOT NULL,
+                reads_json TEXT NOT NULL,
+                writes_json TEXT NOT NULL,
+                calls_json TEXT NOT NULL
+            );
+
             CREATE INDEX idx_symbols_kind ON symbols(kind);
             CREATE INDEX idx_symbols_qname ON symbols(qualified_name);
             CREATE INDEX idx_symbols_container ON symbols(container_symbol_id);
             CREATE INDEX idx_imports_target ON imports(target_qualified_name);
             CREATE INDEX idx_references_kind ON symbol_references(kind);
             CREATE INDEX idx_references_target ON symbol_references(target_qualified_name);
+            CREATE INDEX idx_statements_container ON statements(container_symbol_id);
+            CREATE INDEX idx_statements_kind ON statements(kind);
             """
         )
 
@@ -125,6 +151,7 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
             ("repo", str(payload["repo"])),
             ("generated_at", str(payload["generated_at"])),
             ("parser", str(payload["parser"])),
+            ("parser_backends_json", json.dumps(payload.get("parser_backends", {}))),
             ("source_roots_json", json.dumps(payload["source_roots"])),
             ("path_prefixes_json", json.dumps(payload["path_prefixes"])),
             ("summary_json", json.dumps(payload["summary"])),
@@ -197,6 +224,24 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
             [flatten_reference_row(row) for row in payload["references"]],
         )
 
+        cursor.executemany(
+            """
+            INSERT INTO statements(
+                statement_id, repo, path, crate, module_path, language, kind, text,
+                start_line, start_column, end_line, end_column, container_symbol_id,
+                container_qualified_name, parent_statement_id, previous_statement_id,
+                nesting_depth, defines_json, reads_json, writes_json, calls_json
+            )
+            VALUES (
+                :statement_id, :repo, :path, :crate, :module_path, :language, :kind, :text,
+                :start_line, :start_column, :end_line, :end_column, :container_symbol_id,
+                :container_qualified_name, :parent_statement_id, :previous_statement_id,
+                :nesting_depth, :defines_json, :reads_json, :writes_json, :calls_json
+            )
+            """,
+            [flatten_statement_row(row) for row in payload.get("statements", [])],
+        )
+
         connection.commit()
     finally:
         connection.close()
@@ -227,6 +272,7 @@ def write_symbol_parquet_bundle(output_root: Path, repo_name: str, payload: Dict
         "symbols.parquet": [flatten_symbol_row(row) for row in payload["symbols"]],
         "imports.parquet": [flatten_import_row(row) for row in payload["imports"]],
         "references.parquet": [flatten_reference_row(row) for row in payload["references"]],
+        "statements.parquet": [flatten_statement_row(row) for row in payload.get("statements", [])],
     }
 
     for filename, rows in datasets.items():
@@ -294,6 +340,33 @@ def flatten_reference_row(row: Dict[str, object]) -> Dict[str, object]:
         "target_symbol_id": row["target_symbol_id"],
         "target_qualified_name": row["target_qualified_name"],
         "target_kind": row["target_kind"],
+    }
+
+
+def flatten_statement_row(row: Dict[str, object]) -> Dict[str, object]:
+    span = row["span"]
+    return {
+        "statement_id": row["statement_id"],
+        "repo": row["repo"],
+        "path": row["path"],
+        "crate": row["crate"],
+        "module_path": row["module_path"],
+        "language": row["language"],
+        "kind": row["kind"],
+        "text": row["text"],
+        "start_line": span["start_line"],
+        "start_column": span["start_column"],
+        "end_line": span["end_line"],
+        "end_column": span["end_column"],
+        "container_symbol_id": row["container_symbol_id"],
+        "container_qualified_name": row["container_qualified_name"],
+        "parent_statement_id": row["parent_statement_id"],
+        "previous_statement_id": row["previous_statement_id"],
+        "nesting_depth": row["nesting_depth"],
+        "defines_json": json.dumps(row["defines"]),
+        "reads_json": json.dumps(row["reads"]),
+        "writes_json": json.dumps(row["writes"]),
+        "calls_json": json.dumps(row["calls"]),
     }
 
 

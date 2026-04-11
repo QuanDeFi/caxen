@@ -11,7 +11,7 @@ Analysis toolkit for Carbon and Yellowstone Vixen.
 
 ## Current Milestone
 
-The implemented slice in this repository now covers the Phase 0-3 foundation:
+The implemented slice in this repository now covers the current Phase 0-6 foundation plus the first deeper analysis layer:
 
 - workspace bootstrap and verification
 - raw repo inventory adapters
@@ -20,11 +20,14 @@ The implemented slice in this repository now covers the Phase 0-3 foundation:
 - deterministic symbol, SQLite, and graph artifacts for scoped Rust source paths
 - first semantic graph edges for imports, impls, calls, and uses
 - SQLite FTS-based lexical search artifacts over repo/file/symbol documents
+- `rustc` AST probe metadata and persisted statement artifacts
+- statement-level graph nodes with first `CONTROL_FLOW`, `DATA_FLOW`, `DEPENDENCE`, `READS`, `WRITES`, and `REFS` edges
+- a local embedding sidecar over indexed search documents
 - deterministic project/directory/file/symbol summaries
 - agent-facing CLI operations for repo overview, symbol lookup, call tracing, and context prep
-- a lightweight benchmark harness for lexical-only vs lexical-plus-graph retrieval
+- a lightweight benchmark harness for lexical, lexical-plus-graph, and embedding retrieval
 
-Compiler-backed parsing, richer graph semantics, embeddings, and broader evaluation coverage remain future phases.
+The remaining future work is the more advanced version of these layers: stronger compiler-backed parsing, richer interprocedural semantics, model-backed embeddings, and broader evaluation coverage.
 
 ## Quickstart
 
@@ -35,6 +38,7 @@ Compiler-backed parsing, richer graph semantics, embeddings, and broader evaluat
 ./scripts/parse_repos.sh
 ./scripts/build_index.sh
 ./scripts/build_search.sh
+./scripts/build_embeddings.sh
 ./scripts/export_summaries.sh
 ./scripts/run_benchmarks.sh
 ```
@@ -70,6 +74,11 @@ When `pyarrow` is available, `build_index.sh` also writes parquet tables for fil
 - `data/search/<repo>/search.sqlite3`
 - `data/search/<repo>/search_manifest.json`
 
+`build_embeddings.sh` writes the optional embedding sidecar to:
+
+- `data/search/<repo>/embedding_index.json`
+- `data/search/<repo>/embedding_manifest.json`
+
 `export_summaries.sh` writes deterministic summary artifacts to:
 
 - `data/summaries/<repo>/project.json`
@@ -86,6 +95,7 @@ The CLI now exposes:
 - `find-symbol`
 - `trace-calls`
 - `compare-repos`
+- `embedding-search`
 - `find-parsers`
 - `find-datasources`
 - `find-decoders`

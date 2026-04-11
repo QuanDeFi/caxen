@@ -26,6 +26,7 @@ from agents.toolkit import (
 from adapters.carbon.adapter import inventory as inventory_carbon
 from adapters.yellowstone_vixen.adapter import inventory as inventory_yellowstone_vixen
 from common.inventory import write_inventory
+from embeddings.indexer import build_embedding_index, query_embedding_index
 from evaluation.harness import run_benchmarks
 from graph.builder import build_graph_artifact, write_graph_artifact
 from search.indexer import build_search_index
@@ -121,6 +122,13 @@ def build_parser() -> argparse.ArgumentParser:
     build_summaries.add_argument("--summary-root", required=True)
     build_summaries.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
 
+    build_embeddings = subparsers.add_parser(
+        "build-embeddings",
+        help="Build the optional embedding sidecar over search documents.",
+    )
+    build_embeddings.add_argument("--search-root", required=True)
+    build_embeddings.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
+
     run_eval = subparsers.add_parser(
         "run-benchmarks",
         help="Run the lightweight retrieval benchmark slice.",
@@ -141,6 +149,12 @@ def build_parser() -> argparse.ArgumentParser:
     find_symbol_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     find_symbol_cmd.add_argument("query")
     find_symbol_cmd.add_argument("--limit", type=int, default=10)
+
+    embedding_search_cmd = subparsers.add_parser("embedding-search", help="Run semantic search over embedding vectors.")
+    embedding_search_cmd.add_argument("--search-root", required=True)
+    embedding_search_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    embedding_search_cmd.add_argument("query")
+    embedding_search_cmd.add_argument("--limit", type=int, default=10)
 
     trace_calls_cmd = subparsers.add_parser("trace-calls", help="Trace callers and callees for a symbol.")
     trace_calls_cmd.add_argument("--search-root", required=True)
@@ -278,6 +292,15 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_build_embeddings(args: argparse.Namespace) -> int:
+    search_root = Path(args.search_root).resolve()
+    repo_names = args.repo or sorted(ADAPTERS)
+    for repo_name in repo_names:
+        payload = build_embedding_index(search_root, repo_name)
+        print(f"Wrote embeddings for {repo_name} to {search_root / repo_name} ({payload['summary']['documents']} documents)")
+    return 0
+
+
 def handle_run_benchmarks(args: argparse.Namespace) -> int:
     payload = run_benchmarks(
         Path(args.search_root).resolve(),
@@ -308,12 +331,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         return handle_build_search(args)
     if args.command == "build-summaries":
         return handle_build_summaries(args)
+    if args.command == "build-embeddings":
+        return handle_build_embeddings(args)
     if args.command == "run-benchmarks":
         return handle_run_benchmarks(args)
     if args.command == "repo-overview":
         return print_json(repo_overview(Path(args.summary_root).resolve(), args.repo))
     if args.command == "find-symbol":
         return print_json(find_symbol(Path(args.search_root).resolve(), args.repo, args.query, limit=args.limit))
+    if args.command == "embedding-search":
+        return print_json(
+            {
+                "repo": args.repo,
+                "query": args.query,
+                "results": query_embedding_index(Path(args.search_root).resolve(), args.repo, args.query, limit=args.limit),
+            }
+        )
     if args.command == "trace-calls":
         return print_json(
             trace_calls(

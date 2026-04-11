@@ -11,7 +11,7 @@ The upstream repositories remain structurally intact in sibling folders. All loc
 
 ## Implemented Milestone
 
-The current implemented architecture covers the first durable Phase 0-6 slice of the system:
+The current implemented architecture covers the first durable Phase 0-6 slice of the system plus the first deeper analysis layer:
 
 1. workspace bootstrap
 2. upstream repo synchronization and verification
@@ -19,6 +19,7 @@ The current implemented architecture covers the first durable Phase 0-6 slice of
 4. initial Rust parser ingestion into symbol and graph artifacts
 5. lexical search indexing
 6. deterministic summaries and agent-facing query operations
+7. first compiler-probed statement/data/control analysis and an embedding sidecar
 
 This gives later comparison, retrieval, and planning stages a stable inventory/search/summary substrate.
 
@@ -29,7 +30,8 @@ This gives later comparison, retrieval, and planning stages a stable inventory/s
 The current implemented subset is narrower than the full roadmap:
 
 - implemented: workspace bootstrap, repo sync/verification, normalized raw inventory, initial Rust parser ingestion, symbol artifacts, SQLite persistence, optional parquet export path, first semantic graph edges, SQLite FTS lexical search, graph-backed retrieval, deterministic summaries, agent toolkit commands, and a lightweight benchmark harness
-- not implemented yet: tree-sitter or rust-analyzer-backed ingestion, statement-level graph nodes as first-class outputs, control-flow/data-flow/dependence edges, embedding sidecar retrieval, and deeper benchmark coverage
+- implemented: first `rustc` AST probing, persisted statement artifacts, first statement-level control/data/dependence-style graph edges, and a local embedding sidecar
+- not implemented yet: tree-sitter or rust-analyzer-backed ingestion, stronger compiler-backed symbol resolution, richer interprocedural control/data semantics, model-backed embeddings, and deeper benchmark coverage
 
 Use this document and the code under `src/` as the source of truth for current behavior. Use `AGENTS.md` as the roadmap for the next layers.
 
@@ -55,6 +57,21 @@ Current subcommand:
 
 - `parse-repos`
 - `build-index`
+- `build-search`
+- `build-embeddings`
+- `build-summaries`
+- `run-benchmarks`
+- `repo-overview`
+- `find-symbol`
+- `embedding-search`
+- `trace-calls`
+- `compare-repos`
+- `find-parsers`
+- `find-datasources`
+- `find-decoders`
+- `find-runtime-handlers`
+- `summarize-path`
+- `prepare-context`
 
 ### Adapters
 
@@ -91,6 +108,12 @@ Each adapter contributes:
 - tracks multi-line struct/enum/union container spans
 - carries doc comments, visibility, test markers, and spans into parsed symbols
 
+`src/parsers/rustc_backend.py` adds a compiler-backed probe layer:
+
+- invokes `rustc -Z unpretty=ast-tree` under `RUSTC_BOOTSTRAP=1`
+- records per-file parse success and AST-derived item/statement/control counts
+- aggregates backend availability and probe counts into the parsed symbol artifact
+
 ### Symbol Index
 
 `src/symbols/indexer.py` consumes raw inventory roots and writes:
@@ -106,6 +129,8 @@ It now includes:
 - struct fields, enum variants, and simple local variables
 - resolved import and impl links where the current symbol table can support them
 - symbol-level reference records for call and use sites
+- persisted statement records with define/read/write/call rollups
+- compiler-probe metadata under `parser_backends`
 
 SQLite persistence is always written. Parquet export is implemented as an optional path that activates when `pyarrow` is installed.
 
@@ -124,6 +149,12 @@ The current graph includes repository, file, symbol, and reference nodes with:
 - `IMPLEMENTS`
 - `CALLS`
 - `USES`
+- `CONTROL_FLOW`
+- `DATA_FLOW`
+- `DEPENDENCE`
+- `READS`
+- `WRITES`
+- `REFS`
 
 ### Search Layer
 
@@ -139,9 +170,18 @@ The current graph includes repository, file, symbol, and reference nodes with:
 `src/retrieval/engine.py` implements the current coarse-to-fine retrieval slice:
 
 - lexical shortlist from SQLite FTS
+- optional embedding recall from the local sidecar
 - graph-neighbor expansion from indexed symbol/file seeds
 - symbol localization inside hot files
 - lightweight score fusion for final context selection
+
+### Embedding Sidecar
+
+`src/embeddings/indexer.py` builds an optional local vector sidecar under `data/search/<repo>/`:
+
+- hashed TF-IDF-style vectors over indexed documents
+- persisted `embedding_index.json` and `embedding_manifest.json`
+- bounded semantic recall used as a side path in retrieval rather than as the primary layer
 
 ### Summaries
 
@@ -174,7 +214,7 @@ These summaries are generated from raw inventory, symbol artifacts, and graph ed
 
 `src/evaluation/harness.py` provides the current benchmark slice:
 
-- lexical-only vs lexical-plus-graph comparison
+- lexical-only vs lexical-plus-graph vs embedding comparison
 - deterministic query cases over the pinned upstream repos
 - JSON output under `data/eval/benchmarks.json`
 
@@ -205,17 +245,23 @@ The current parser slice also emits:
   - extracted symbols with spans, docstrings, visibility, and container links
   - normalized import records
   - reference records for calls and uses
+  - compiler-probe metadata
+  - statement records with define/read/write/call rollups
 - `symbols.sqlite3`
-  - queryable local persistence for files, symbols, imports, and references
+  - queryable local persistence for files, symbols, imports, references, and statements
 - `parquet_status.json`
   - whether parquet export ran on the current machine
 - `graph.json`
   - repository/file/symbol/reference nodes
   - structural and first semantic edges derived from the symbol artifact
 - `search.sqlite3`
-  - SQLite FTS5 lexical search over repo, directory, file, and symbol documents
+  - SQLite FTS5 lexical search over repo, directory, file, symbol, and statement documents
 - `search_manifest.json`
   - search document counts and artifact metadata
+- `embedding_index.json`
+  - local hashed vector sidecar over indexed documents
+- `embedding_manifest.json`
+  - embedding model, dimensions, and document counts
 - `project.json`, `directories.json`, `files.json`, `symbols.json`
   - deterministic summary artifacts for agent-facing navigation
 - `benchmarks.json`
@@ -225,23 +271,24 @@ The current parser slice also emits:
 
 The next architectural layers build on top of raw inventory:
 
-1. higher-fidelity Rust parsing beyond the initial deterministic slice
+1. higher-fidelity Rust parsing beyond the current deterministic-plus-probe slice
 2. wider parquet availability across environments without relying on machine-local setup drift
-3. broader graph construction and query APIs
-4. optional embedding sidecar and richer reranking
-5. stronger directory/file/symbol summaries with incremental refresh
-6. broader benchmark coverage and comparison tasks
+3. stronger compiler-backed resolution and query APIs
+4. richer interprocedural graph construction and retrieval
+5. model-backed embeddings and better fusion/reranking
+6. stronger directory/file/symbol summaries with incremental refresh
+7. broader benchmark coverage and comparison tasks
 
 ## Explicit Future-Work Note
 
-The current implemented slice now includes deterministic JSON artifacts, SQLite persistence, lexical search, summaries, and first semantic graph edges.
+The current implemented slice now includes deterministic JSON artifacts, SQLite persistence, lexical search, summaries, first semantic graph edges, a compiler probe, statement artifacts, and an embedding sidecar.
 
 The next unresolved layers are still important:
 
 - parquet export depends on `pyarrow` being present in the active Python environment
 - cross-file symbol resolution is still heuristic rather than compiler-backed
-- control-flow, data-flow, dependence, and deeper statement-level graph edges are not implemented yet
-- no embedding/vector sidecar is implemented yet
+- the current statement/control/data/dependence graph is intra-function and heuristic
+- the current embedding/vector sidecar is local hashed TF-IDF rather than a model-backed embedding stack
 - the benchmark harness is intentionally small and should not be treated as a complete evaluation program
 
-Those should be treated as the next expansion layers on top of the current inventory/search/summary foundation rather than as missing bug fixes in the current slice.
+Those should be treated as the next expansion layers on top of the current inventory/search/summary/statement foundation rather than as missing bug fixes in the current slice.
