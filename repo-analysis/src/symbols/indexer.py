@@ -3,13 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import resource
 import subprocess
+import sys
+import time
 import tomllib
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import DefaultDict, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, DefaultDict, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from common.inventory import is_generated_path
 from parsers.rust import (
@@ -138,6 +141,7 @@ class ParsedFileContext:
     compiler_probe: Dict[str, object]
     backend_probes: Dict[str, Dict[str, object]]
     primary_parser_backend: str
+    parse_elapsed_ms: float
 
 
 @dataclass(frozen=True)
@@ -162,12 +166,69 @@ def build_symbol_index(
     repo_root: Path,
     raw_root: Path,
     path_prefixes: Sequence[str] = (),
+    progress_callback: Callable[[Dict[str, object]], None] | None = None,
 ) -> Dict[str, object]:
     manifest = load_raw_manifest(raw_root, repo_name)
     parser_roots = manifest.get("parser_relevant_source_roots", [])
     workspace_index = build_workspace_index(repo_root)
     rust_files = discover_rust_files(repo_root, parser_roots, normalize_prefixes(path_prefixes))
-    contexts = [parse_rust_source_file(repo_root, path, workspace_index) for path in rust_files]
+    run_started = time.perf_counter()
+    contexts: List[ParsedFileContext] = []
+    backend_failures: DefaultDict[str, int] = defaultdict(int)
+    slowest_files: List[Dict[str, object]] = []
+
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "event": "repo_scan_started",
+                "repo": repo_name,
+                "parser_roots": len(parser_roots),
+                "rust_files_total": len(rust_files),
+                "path_prefixes": list(normalize_prefixes(path_prefixes)),
+                "rss_mb": current_rss_mb(),
+                "elapsed_ms": 0.0,
+            }
+        )
+
+    for index, path in enumerate(rust_files, start=1):
+        file_started = time.perf_counter()
+        context = parse_rust_source_file(repo_root, path, workspace_index)
+        contexts.append(context)
+        for backend_name, probe in context.backend_probes.items():
+            if probe.get("used") and not probe.get("parsed"):
+                backend_failures[backend_name] += 1
+        if context.compiler_probe.get("used") and not context.compiler_probe.get("parsed"):
+            backend_failures["rustc_ast_probe"] += 1
+
+        file_elapsed_ms = round((time.perf_counter() - file_started) * 1000, 3)
+        slowest_files.append(
+            {
+                "path": context.parsed.path,
+                "elapsed_ms": file_elapsed_ms,
+                "primary_parser_backend": context.primary_parser_backend,
+            }
+        )
+        slowest_files.sort(key=lambda item: item["elapsed_ms"], reverse=True)
+        del slowest_files[10:]
+
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "event": "file_parsed",
+                    "repo": repo_name,
+                    "index": index,
+                    "total": len(rust_files),
+                    "path": context.parsed.path,
+                    "crate": context.parsed.crate_name,
+                    "module_path": context.parsed.module_path,
+                    "elapsed_ms": round((time.perf_counter() - run_started) * 1000, 3),
+                    "file_elapsed_ms": file_elapsed_ms,
+                    "rss_mb": current_rss_mb(),
+                    "primary_parser_backend": context.primary_parser_backend,
+                    "backend_failures": dict(sorted(backend_failures.items())),
+                    "slowest_files": list(slowest_files),
+                }
+            )
 
     for context in contexts:
         enrich_context_symbols(context)
@@ -247,6 +308,12 @@ def build_symbol_index(
             "kind_counts": kind_counts,
             "reference_kind_counts": reference_kind_counts,
             "statement_kind_counts": statement_kind_counts,
+        },
+        "build_metrics": {
+            "elapsed_ms": round((time.perf_counter() - run_started) * 1000, 3),
+            "rss_mb": current_rss_mb(),
+            "backend_failures": dict(sorted(backend_failures.items())),
+            "slowest_files": list(slowest_files),
         },
     }
 
@@ -2250,6 +2317,7 @@ def parse_rust_source_file(
     source_path: Path,
     workspace_index: WorkspaceIndex,
 ) -> ParsedFileContext:
+    started = time.perf_counter()
     package_info = nearest_cargo_package(source_path, repo_root, workspace_index)
     crate_root = package_info.root
     crate_name = package_info.package_name
@@ -2284,7 +2352,16 @@ def parse_rust_source_file(
         compiler_probe=compiler_probe,
         backend_probes=backend_probes,
         primary_parser_backend=primary_parser_backend,
+        parse_elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
     )
+
+
+def current_rss_mb() -> float:
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    rss_kb = usage.ru_maxrss
+    if sys.platform == "darwin":
+        return round(rss_kb / (1024 * 1024), 2)
+    return round(rss_kb / 1024, 2)
 
 
 def pick_best_symbol_candidate(

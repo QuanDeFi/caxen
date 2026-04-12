@@ -5,6 +5,7 @@ import os
 import subprocess
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 from queue import Queue
 from typing import Dict, Iterable, List, Optional, Sequence
@@ -28,6 +29,7 @@ SYMBOL_KIND_MAP = {
 }
 
 
+@lru_cache(maxsize=1)
 def rust_analyzer_available() -> bool:
     command = rust_analyzer_command()
     if not command:

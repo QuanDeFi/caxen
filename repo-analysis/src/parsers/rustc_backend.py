@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
 
@@ -38,6 +39,7 @@ CONTROL_KIND_PATTERNS = {
 }
 
 
+@lru_cache(maxsize=1)
 def rustc_available() -> bool:
     try:
         result = subprocess.run(

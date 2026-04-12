@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import re
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -128,13 +129,14 @@ def aggregate_tree_sitter_probes(file_probes: Iterable[Dict[str, object]]) -> Di
     }
 
 
-def load_rust_parser() -> Tuple[object | None, List[str]]:
+@lru_cache(maxsize=1)
+def load_rust_parser() -> Tuple[object | None, Tuple[str, ...]]:
     diagnostics: List[str] = []
 
     try:
         module = importlib.import_module("tree_sitter_languages")
         parser = module.get_parser("rust")
-        return parser, ["loaded parser from tree_sitter_languages"]
+        return parser, ("loaded parser from tree_sitter_languages",)
     except Exception as exc:  # pragma: no cover - optional import path
         diagnostics.append(f"tree_sitter_languages unavailable: {exc}")
 
@@ -143,7 +145,7 @@ def load_rust_parser() -> Tuple[object | None, List[str]]:
         parser = tree_sitter.Parser()
     except Exception as exc:  # pragma: no cover - optional import path
         diagnostics.append(f"tree_sitter unavailable: {exc}")
-        return None, diagnostics
+        return None, tuple(diagnostics)
 
     language = load_tree_sitter_rust_language(diagnostics)
     if language is None:
@@ -156,8 +158,8 @@ def load_rust_parser() -> Tuple[object | None, List[str]]:
             parser.language = language
     except Exception as exc:  # pragma: no cover - optional backend
         diagnostics.append(f"failed to configure tree-sitter parser: {exc}")
-        return None, diagnostics
-    return parser, diagnostics
+        return None, tuple(diagnostics)
+    return parser, tuple(diagnostics)
 
 
 def load_tree_sitter_rust_language(diagnostics: List[str]) -> object | None:

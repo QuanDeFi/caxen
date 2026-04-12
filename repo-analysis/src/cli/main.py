@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -116,6 +117,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--path-prefix",
         action="append",
         help="Optional repo-relative file or directory prefix to narrow indexing scope.",
+    )
+    build_index.add_argument(
+        "--progress-interval",
+        type=int,
+        default=100,
+        help="Emit progress logs every N parsed files.",
     )
 
     build_search = subparsers.add_parser(
@@ -409,14 +416,78 @@ def handle_build_index(args: argparse.Namespace) -> int:
         if not repo_root.exists():
             raise FileNotFoundError(f"Missing repo root: {repo_root}")
 
-        native_worker = probe_native_worker()
-        symbol_index = build_symbol_index(
-            repo_name,
-            repo_root,
-            raw_root,
-            path_prefixes=path_prefixes,
+        repo_progress_path = parsed_root / repo_name / "build_progress.json"
+        progress_started = time.perf_counter()
+        emit_build_progress(
+            repo_progress_path,
+            {
+                "event": "repo_started",
+                "repo": repo_name,
+                "path_prefixes": list(path_prefixes),
+                "started_at": timestamp_now(),
+                "elapsed_ms": 0.0,
+            },
+            log_message=(
+                f"[build-index] repo={repo_name} status=started "
+                f"path_prefixes={list(path_prefixes) or ['<all>']}"
+            ),
         )
-        graph_artifact = build_graph_artifact(symbol_index)
+
+        def progress_callback(event: Dict[str, object]) -> None:
+            should_log = False
+            log_message = None
+            event_name = str(event.get("event") or "")
+            if event_name == "repo_scan_started":
+                log_message = (
+                    f"[build-index] repo={repo_name} status=scanning "
+                    f"rust_files={event.get('rust_files_total')} parser_roots={event.get('parser_roots')} "
+                    f"rss_mb={event.get('rss_mb')}"
+                )
+                should_log = True
+            elif event_name == "file_parsed":
+                index = int(event.get("index") or 0)
+                total = int(event.get("total") or 0)
+                file_elapsed_ms = float(event.get("file_elapsed_ms") or 0.0)
+                if index == 1 or index == total or (args.progress_interval > 0 and index % args.progress_interval == 0):
+                    should_log = True
+                if file_elapsed_ms >= 10000:
+                    should_log = True
+                if should_log:
+                    log_message = (
+                        f"[build-index] repo={repo_name} progress={index}/{total} "
+                        f"file={event.get('path')} file_ms={file_elapsed_ms:.1f} "
+                        f"elapsed_ms={float(event.get('elapsed_ms') or 0.0):.1f} "
+                        f"rss_mb={float(event.get('rss_mb') or 0.0):.1f} "
+                        f"backend_failures={json.dumps(event.get('backend_failures', {}), sort_keys=True)}"
+                    )
+            emit_build_progress(repo_progress_path, event, log_message=log_message if should_log else None)
+
+        native_worker = probe_native_worker()
+        try:
+            symbol_index = build_symbol_index(
+                repo_name,
+                repo_root,
+                raw_root,
+                path_prefixes=path_prefixes,
+                progress_callback=progress_callback,
+            )
+            graph_artifact = build_graph_artifact(symbol_index)
+        except Exception as exc:
+            emit_build_progress(
+                repo_progress_path,
+                {
+                    "event": "repo_failed",
+                    "repo": repo_name,
+                    "elapsed_ms": round((time.perf_counter() - progress_started) * 1000, 3),
+                    "failed_at": timestamp_now(),
+                    "error": {
+                        "type": exc.__class__.__name__,
+                        "message": str(exc),
+                    },
+                },
+                log_message=f"[build-index] repo={repo_name} status=failed error={exc.__class__.__name__}: {exc}",
+            )
+            raise
 
         write_symbol_index(parsed_root, repo_name, symbol_index)
         write_symbol_database(parsed_root, repo_name, symbol_index)
@@ -447,10 +518,42 @@ def handle_build_index(args: argparse.Namespace) -> int:
             },
         )
 
-        print(f"Wrote parsed symbols for {repo_name} to {parsed_root / repo_name}")
-        print(f"Wrote graph artifact for {repo_name} to {graph_root / repo_name}")
+        completed_event = {
+            "event": "repo_completed",
+            "repo": repo_name,
+            "elapsed_ms": round((time.perf_counter() - progress_started) * 1000, 3),
+            "summary": symbol_index.get("summary", {}),
+            "build_metrics": symbol_index.get("build_metrics", {}),
+            "graph_summary": graph_artifact.get("summary", {}),
+            "completed_at": timestamp_now(),
+        }
+        emit_build_progress(
+            repo_progress_path,
+            completed_event,
+            log_message=(
+                f"[build-index] repo={repo_name} status=completed "
+                f"symbols={symbol_index.get('summary', {}).get('symbols')} "
+                f"statements={symbol_index.get('summary', {}).get('statements')} "
+                f"graph_edges={graph_artifact.get('summary', {}).get('edges')} "
+                f"elapsed_ms={completed_event['elapsed_ms']}"
+            ),
+        )
+
+        print(f"Wrote parsed symbols for {repo_name} to {parsed_root / repo_name}", flush=True)
+        print(f"Wrote graph artifact for {repo_name} to {graph_root / repo_name}", flush=True)
 
     return 0
+
+
+def emit_build_progress(progress_path: Path, payload: Dict[str, object], *, log_message: str | None = None) -> None:
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_path.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
+    if log_message:
+        print(log_message, flush=True)
+
+
+def timestamp_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def handle_build_search(args: argparse.Namespace) -> int:
