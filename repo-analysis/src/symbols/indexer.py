@@ -17,6 +17,7 @@ from typing import Callable, DefaultDict, Dict, Iterable, List, Optional, Sequen
 from common.inventory import is_generated_path
 from parsers.rust import (
     ParsedRustFile,
+    RustImport,
     RustSymbol,
     TextSpan,
     clean_rust_source_lines,
@@ -63,6 +64,7 @@ VARIANT_RE = re.compile(
 )
 
 FUNCTION_LIKE_KINDS = {"function", "method"}
+CACHE_SCHEMA_VERSION = "rust-file-cache-v1"
 KEYWORDS = {
     "Self",
     "as",
@@ -142,6 +144,7 @@ class ParsedFileContext:
     backend_probes: Dict[str, Dict[str, object]]
     primary_parser_backend: str
     parse_elapsed_ms: float
+    cache_hit: bool = False
 
 
 @dataclass(frozen=True)
@@ -167,6 +170,7 @@ def build_symbol_index(
     raw_root: Path,
     path_prefixes: Sequence[str] = (),
     progress_callback: Callable[[Dict[str, object]], None] | None = None,
+    cache_root: Path | None = None,
 ) -> Dict[str, object]:
     manifest = load_raw_manifest(raw_root, repo_name)
     parser_roots = manifest.get("parser_relevant_source_roots", [])
@@ -192,7 +196,7 @@ def build_symbol_index(
 
     for index, path in enumerate(rust_files, start=1):
         file_started = time.perf_counter()
-        context = parse_rust_source_file(repo_root, path, workspace_index)
+        context = load_or_parse_rust_source_file(repo_root, path, workspace_index, cache_root)
         contexts.append(context)
         for backend_name, probe in context.backend_probes.items():
             if probe.get("used") and not probe.get("parsed"):
@@ -225,13 +229,11 @@ def build_symbol_index(
                     "file_elapsed_ms": file_elapsed_ms,
                     "rss_mb": current_rss_mb(),
                     "primary_parser_backend": context.primary_parser_backend,
+                    "cache_hit": context.cache_hit,
                     "backend_failures": dict(sorted(backend_failures.items())),
                     "slowest_files": list(slowest_files),
                 }
             )
-
-    for context in contexts:
-        enrich_context_symbols(context)
 
     file_records: List[Dict[str, object]] = []
     symbol_records: List[Dict[str, object]] = []
@@ -239,15 +241,7 @@ def build_symbol_index(
 
     for context in contexts:
         context.symbol_id_by_local = {
-            symbol.local_id: stable_id(
-                "sym",
-                repo_name,
-                context.parsed.path,
-                symbol.kind,
-                symbol.qualified_name,
-                str(symbol.span.start_line),
-                str(symbol.span.start_column),
-            )
+            symbol.local_id: symbol_stable_id(repo_name, context.parsed.path, symbol)
             for symbol in context.parsed.symbols
         }
         file_records.append(
@@ -271,6 +265,13 @@ def build_symbol_index(
     reference_records = build_reference_records(repo_name, contexts, resolution_index)
     statement_records = build_statement_records(repo_name, contexts, symbol_records, resolution_index)
     enrich_symbol_semantics(symbol_records, reference_records, statement_records, resolution_index)
+    duplicate_symbol_ids = find_duplicate_ids(symbol_records, "symbol_id")
+    if duplicate_symbol_ids:
+        raise ValueError(
+            "Duplicate symbol_id values detected: "
+            + ", ".join(sorted(duplicate_symbol_ids[:10]))
+            + (" ..." if len(duplicate_symbol_ids) > 10 else "")
+        )
     compiler_backends = {
         "rustc_ast_probe": aggregate_rustc_probes([context.compiler_probe for context in contexts]),
         "tree_sitter_rust": aggregate_tree_sitter_probes(
@@ -312,6 +313,8 @@ def build_symbol_index(
         "build_metrics": {
             "elapsed_ms": round((time.perf_counter() - run_started) * 1000, 3),
             "rss_mb": current_rss_mb(),
+            "cache_hits": sum(1 for context in contexts if context.cache_hit),
+            "cache_misses": sum(1 for context in contexts if not context.cache_hit),
             "backend_failures": dict(sorted(backend_failures.items())),
             "slowest_files": list(slowest_files),
         },
@@ -1551,6 +1554,19 @@ def discover_rust_files(repo_root: Path, parser_roots: Iterable[str], path_prefi
         absolute_root = repo_root / parser_root
         if not absolute_root.exists():
             continue
+        if absolute_root.is_file():
+            if absolute_root.suffix != ".rs":
+                continue
+            relative_path = absolute_root.relative_to(repo_root).as_posix()
+            if relative_path in seen:
+                continue
+            if is_generated_path(relative_path):
+                continue
+            if path_prefixes and not matches_path_prefix(relative_path, path_prefixes):
+                continue
+            seen.add(relative_path)
+            candidates.append(absolute_root)
+            continue
         for path in sorted(absolute_root.rglob("*.rs")):
             relative_path = path.relative_to(repo_root).as_posix()
             if relative_path in seen:
@@ -2187,9 +2203,22 @@ def merge_backend_symbols(
 
         existing = symbols_by_qname.get(qualified_name)
         if existing is None:
-            existing = find_backend_symbol_match(parsed.symbols, kind, str(backend_symbol["name"]), container_qualified_name)
+            existing = find_backend_symbol_match(
+                parsed.symbols,
+                kind,
+                str(backend_symbol["name"]),
+                container_qualified_name,
+                backend_symbol=backend_symbol,
+            )
 
         if existing is not None:
+            if (
+                kind in FUNCTION_LIKE_KINDS
+                and existing.kind in FUNCTION_LIKE_KINDS
+                and not container_qualified_name
+                and existing.container_qualified_name
+            ):
+                qualified_name = existing.qualified_name
             update_symbol_from_backend(existing, backend_symbol, qualified_name)
             symbols_by_qname[existing.qualified_name] = existing
             used_backend = True
@@ -2262,12 +2291,26 @@ def find_backend_symbol_match(
     kind: str,
     name: str,
     container_qualified_name: Optional[str],
+    *,
+    backend_symbol: Optional[Dict[str, object]] = None,
 ) -> Optional[RustSymbol]:
+    backend_span = backend_range_to_span(backend_symbol) if backend_symbol is not None else None
     for symbol in symbols:
-        if symbol.kind != kind or symbol.name != name:
+        same_kind = symbol.kind == kind
+        aliased_callable_kind = (
+            kind in FUNCTION_LIKE_KINDS and symbol.kind in FUNCTION_LIKE_KINDS
+        )
+        if (not same_kind and not aliased_callable_kind) or symbol.name != name:
             continue
         if container_qualified_name and symbol.container_qualified_name != container_qualified_name:
             continue
+        if backend_span is not None:
+            same_start = (
+                symbol.span.start_line == backend_span.start_line
+                and symbol.span.start_column == backend_span.start_column
+            )
+            if not same_start and aliased_callable_kind:
+                continue
         return symbol
     return None
 
@@ -2275,7 +2318,8 @@ def find_backend_symbol_match(
 def update_symbol_from_backend(symbol: RustSymbol, backend_symbol: Dict[str, object], qualified_name: str) -> None:
     backend_span = backend_range_to_span(backend_symbol)
     symbol.qualified_name = qualified_name
-    symbol.module_path = backend_symbol_module_path(symbol.module_path, qualified_name, symbol.container_qualified_name)
+    if symbol.kind not in FUNCTION_LIKE_KINDS or symbol.container_qualified_name is None:
+        symbol.module_path = backend_symbol_module_path(symbol.module_path, qualified_name, symbol.container_qualified_name)
     if backend_span.start_line <= symbol.span.start_line:
         symbol.span.start_line = backend_span.start_line
         symbol.span.start_column = backend_span.start_column
@@ -2353,6 +2397,7 @@ def parse_rust_source_file(
         backend_probes=backend_probes,
         primary_parser_backend=primary_parser_backend,
         parse_elapsed_ms=round((time.perf_counter() - started) * 1000, 3),
+        cache_hit=False,
     )
 
 
@@ -2362,6 +2407,197 @@ def current_rss_mb() -> float:
     if sys.platform == "darwin":
         return round(rss_kb / (1024 * 1024), 2)
     return round(rss_kb / 1024, 2)
+
+
+def load_or_parse_rust_source_file(
+    repo_root: Path,
+    source_path: Path,
+    workspace_index: WorkspaceIndex,
+    cache_root: Path | None,
+) -> ParsedFileContext:
+    package_info = nearest_cargo_package(source_path, repo_root, workspace_index)
+    source = source_path.read_text(encoding="utf-8")
+    cache_path = file_cache_path(cache_root, repo_root, source_path) if cache_root is not None else None
+    cache_key = build_file_cache_key(source_path, source, package_info.manifest_path)
+
+    if cache_path is not None:
+        cached = load_cached_file_context(
+            cache_path,
+            repo_root,
+            source_path,
+            workspace_index,
+            package_info,
+            source,
+            cache_key,
+        )
+        if cached is not None:
+            return cached
+
+    context = parse_rust_source_file(repo_root, source_path, workspace_index)
+    enrich_context_symbols(context)
+    if cache_path is not None:
+        write_cached_file_context(cache_path, context, cache_key)
+    return context
+
+
+def file_cache_path(cache_root: Path | None, repo_root: Path, source_path: Path) -> Path:
+    assert cache_root is not None
+    relative_path = source_path.relative_to(repo_root)
+    return cache_root / "file-cache" / relative_path.with_suffix(relative_path.suffix + ".json")
+
+
+def build_file_cache_key(source_path: Path, source: str, manifest_path: Path) -> Dict[str, object]:
+    manifest_stat = manifest_path.stat()
+    source_stat = source_path.stat()
+    return {
+        "schema_version": CACHE_SCHEMA_VERSION,
+        "source_sha1": hashlib.sha1(source.encode("utf-8")).hexdigest(),
+        "source_size": source_stat.st_size,
+        "source_mtime_ns": source_stat.st_mtime_ns,
+        "manifest_path": str(manifest_path),
+        "manifest_mtime_ns": manifest_stat.st_mtime_ns,
+    }
+
+
+def load_cached_file_context(
+    cache_path: Path,
+    repo_root: Path,
+    source_path: Path,
+    workspace_index: WorkspaceIndex,
+    package_info: CargoPackageInfo,
+    source: str,
+    cache_key: Dict[str, object],
+) -> ParsedFileContext | None:
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if payload.get("cache_key") != cache_key:
+        return None
+    parsed_payload = payload.get("parsed")
+    if not isinstance(parsed_payload, dict):
+        return None
+
+    parsed = parsed_rust_file_from_payload(parsed_payload)
+    return ParsedFileContext(
+        source_path=source_path,
+        package_info=package_info,
+        workspace_index=workspace_index,
+        parsed=parsed,
+        source=source,
+        source_lines=source.splitlines(),
+        cleaned_lines=clean_rust_source_lines(source),
+        crate_root=parsed.module_path.split("::")[0],
+        dependency_aliases=package_info.dependency_aliases,
+        symbol_id_by_local={},
+        import_aliases={},
+        compiler_probe=dict(payload.get("compiler_probe") or {}),
+        backend_probes={key: dict(value) for key, value in dict(payload.get("backend_probes") or {}).items()},
+        primary_parser_backend=str(payload.get("primary_parser_backend") or "rust-simple-v3"),
+        parse_elapsed_ms=float(payload.get("parse_elapsed_ms") or 0.0),
+        cache_hit=True,
+    )
+
+
+def write_cached_file_context(cache_path: Path, context: ParsedFileContext, cache_key: Dict[str, object]) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "cache_key": cache_key,
+        "primary_parser_backend": context.primary_parser_backend,
+        "parse_elapsed_ms": context.parse_elapsed_ms,
+        "compiler_probe": context.compiler_probe,
+        "backend_probes": context.backend_probes,
+        "parsed": parsed_rust_file_to_payload(context.parsed),
+    }
+    cache_path.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
+
+
+def parsed_rust_file_to_payload(parsed: ParsedRustFile) -> Dict[str, object]:
+    return {
+        "path": parsed.path,
+        "crate_name": parsed.crate_name,
+        "module_path": parsed.module_path,
+        "symbols": [rust_symbol_to_payload(symbol) for symbol in parsed.symbols],
+        "imports": [rust_import_to_payload(item) for item in parsed.imports],
+    }
+
+
+def parsed_rust_file_from_payload(payload: Dict[str, object]) -> ParsedRustFile:
+    return ParsedRustFile(
+        path=str(payload["path"]),
+        crate_name=str(payload["crate_name"]),
+        module_path=str(payload["module_path"]),
+        symbols=[rust_symbol_from_payload(item) for item in payload.get("symbols", [])],
+        imports=[rust_import_from_payload(item) for item in payload.get("imports", [])],
+    )
+
+
+def rust_symbol_to_payload(symbol: RustSymbol) -> Dict[str, object]:
+    return {
+        "local_id": symbol.local_id,
+        "kind": symbol.kind,
+        "name": symbol.name,
+        "qualified_name": symbol.qualified_name,
+        "module_path": symbol.module_path,
+        "span": span_to_dict(symbol.span),
+        "signature": symbol.signature,
+        "visibility": symbol.visibility,
+        "docstring": symbol.docstring,
+        "container_local_id": symbol.container_local_id,
+        "container_qualified_name": symbol.container_qualified_name,
+        "attributes": list(symbol.attributes),
+        "is_test": symbol.is_test,
+        "impl_target": symbol.impl_target,
+        "impl_trait": symbol.impl_trait,
+        "super_traits": list(symbol.super_traits),
+    }
+
+
+def rust_symbol_from_payload(payload: Dict[str, object]) -> RustSymbol:
+    return RustSymbol(
+        local_id=int(payload["local_id"]),
+        kind=str(payload["kind"]),
+        name=str(payload["name"]),
+        qualified_name=str(payload["qualified_name"]),
+        module_path=str(payload["module_path"]),
+        span=span_from_dict(dict(payload["span"])),
+        signature=str(payload["signature"]),
+        visibility=str(payload["visibility"]),
+        docstring=payload.get("docstring"),
+        container_local_id=payload.get("container_local_id"),
+        container_qualified_name=payload.get("container_qualified_name"),
+        attributes=tuple(payload.get("attributes", [])),
+        is_test=bool(payload.get("is_test")),
+        impl_target=payload.get("impl_target"),
+        impl_trait=payload.get("impl_trait"),
+        super_traits=tuple(payload.get("super_traits", [])),
+    )
+
+
+def rust_import_to_payload(item: RustImport) -> Dict[str, object]:
+    return {
+        "path": item.path,
+        "module_path": item.module_path,
+        "span": span_to_dict(item.span),
+        "visibility": item.visibility,
+        "signature": item.signature,
+        "container_local_id": item.container_local_id,
+        "container_qualified_name": item.container_qualified_name,
+    }
+
+
+def rust_import_from_payload(payload: Dict[str, object]) -> RustImport:
+    return RustImport(
+        path=str(payload["path"]),
+        module_path=str(payload["module_path"]),
+        span=span_from_dict(dict(payload["span"])),
+        visibility=str(payload["visibility"]),
+        signature=str(payload["signature"]),
+        container_local_id=payload.get("container_local_id"),
+        container_qualified_name=payload.get("container_qualified_name"),
+    )
 
 
 def pick_best_symbol_candidate(
@@ -2481,6 +2717,15 @@ def span_to_dict(span: TextSpan) -> Dict[str, int]:
     }
 
 
+def span_from_dict(payload: Dict[str, object]) -> TextSpan:
+    return TextSpan(
+        start_line=int(payload["start_line"]),
+        start_column=int(payload["start_column"]),
+        end_line=int(payload["end_line"]),
+        end_column=int(payload["end_column"]),
+    )
+
+
 def split_top_level(value: str) -> List[str]:
     depth = 0
     current: List[str] = []
@@ -2521,6 +2766,27 @@ def split_top_level_alias(value: str) -> Tuple[str, Optional[str]]:
 def stable_id(prefix: str, *parts: str) -> str:
     payload = "|".join(parts).encode("utf-8")
     return f"{prefix}:{hashlib.sha1(payload).hexdigest()[:16]}"
+
+
+def symbol_stable_id(repo_name: str, path: str, symbol: RustSymbol) -> str:
+    return stable_id(
+        "sym",
+        repo_name,
+        path,
+        str(symbol.local_id),
+        symbol.kind,
+        symbol.qualified_name,
+        str(symbol.span.start_line),
+        str(symbol.span.start_column),
+        str(symbol.span.end_line),
+        str(symbol.span.end_column),
+        collapse_whitespace(symbol.signature),
+        symbol.visibility,
+        ",".join(symbol.attributes),
+        symbol.impl_target or "",
+        symbol.impl_trait or "",
+        ",".join(symbol.super_traits),
+    )
 
 
 def strip_expression_noise(expression: str) -> str:
@@ -2582,6 +2848,15 @@ def symbol_to_record(repo_name: str, context: ParsedFileContext, symbol: RustSym
 
 def timestamp_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def find_duplicate_ids(rows: Sequence[Dict[str, object]], field: str) -> List[str]:
+    counts: DefaultDict[str, int] = defaultdict(int)
+    for row in rows:
+        value = str(row.get(field) or "")
+        if value:
+            counts[value] += 1
+    return [value for value, count in counts.items() if count > 1]
 
 
 def unique_positioned_values(values: Iterable[Tuple[str, int, int]]) -> List[Tuple[str, int, int]]:

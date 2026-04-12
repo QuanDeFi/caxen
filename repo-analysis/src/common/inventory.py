@@ -149,6 +149,12 @@ def collect_source_roots(repo_root: Path, package_roots: Iterable[str]) -> List[
         src_dir = package_path / "src"
         if src_dir.exists():
             roots.append(src_dir.relative_to(repo_root).as_posix())
+        tests_dir = package_path / "tests"
+        if tests_dir.exists():
+            roots.append(tests_dir.relative_to(repo_root).as_posix())
+        build_script = package_path / "build.rs"
+        if build_script.exists():
+            roots.append(build_script.relative_to(repo_root).as_posix())
     return sorted(dict.fromkeys(roots))
 
 
@@ -171,9 +177,19 @@ def collect_analysis_surface_roots(repo_root: Path, analysis_surfaces: Sequence[
             continue
         if (surface_path / "src").exists():
             roots.append((surface_path / "src").relative_to(repo_root).as_posix())
+        if (surface_path / "tests").exists():
+            roots.append((surface_path / "tests").relative_to(repo_root).as_posix())
+        if (surface_path / "build.rs").exists():
+            roots.append((surface_path / "build.rs").relative_to(repo_root).as_posix())
         for child in sorted(surface_path.iterdir()):
-            if child.is_dir() and (child / "src").exists():
+            if not child.is_dir():
+                continue
+            if (child / "src").exists():
                 roots.append((child / "src").relative_to(repo_root).as_posix())
+            if (child / "tests").exists():
+                roots.append((child / "tests").relative_to(repo_root).as_posix())
+            if (child / "build.rs").exists():
+                roots.append((child / "build.rs").relative_to(repo_root).as_posix())
     return sorted(dict.fromkeys(roots))
 
 

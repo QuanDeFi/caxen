@@ -470,6 +470,7 @@ def handle_build_index(args: argparse.Namespace) -> int:
                 raw_root,
                 path_prefixes=path_prefixes,
                 progress_callback=progress_callback,
+                cache_root=parsed_root / repo_name,
             )
             graph_artifact = build_graph_artifact(symbol_index)
         except Exception as exc:
