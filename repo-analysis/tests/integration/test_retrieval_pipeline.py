@@ -118,6 +118,7 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             self.assertTrue((search_root / "yellowstone-vixen" / "tantivy").exists())
             self.assertTrue((search_root / "yellowstone-vixen" / "embedding_index.json").exists())
             self.assertTrue((summary_root / "yellowstone-vixen" / "project.json").exists())
+            self.assertTrue((summary_root / "yellowstone-vixen" / "packages.json").exists())
 
             find_symbol = subprocess.run(
                 [
@@ -136,6 +137,44 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             )
             symbol_lookup = json.loads(find_symbol.stdout)
             self.assertTrue(any(item["name"] == "vixen" for item in symbol_lookup["results"]))
+
+            find_file = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "find-file",
+                    "--search-root",
+                    str(search_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "crates/proc-macro/src/lib.rs",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            file_lookup = json.loads(find_file.stdout)
+            self.assertTrue(any(item["path"] == "crates/proc-macro/src/lib.rs" for item in file_lookup["results"]))
+
+            lexical_search = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "search-lexical",
+                    "--search-root",
+                    str(search_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "--kind",
+                    "package",
+                    "proc macro",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            lexical_payload = json.loads(lexical_search.stdout)
+            self.assertGreater(len(lexical_payload["results"]), 0)
 
             embedding_search = subprocess.run(
                 [
@@ -314,6 +353,130 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             )
             graph_payload = json.loads(graph_query.stdout)
             self.assertEqual(graph_payload["operation"], "callers_of")
+
+            refs = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "refs-of",
+                    "--search-root",
+                    str(search_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "vixen_parser",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            refs_payload = json.loads(refs.stdout)
+            self.assertGreaterEqual(len(refs_payload["neighbors"]), 1)
+
+            signature = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "get-symbol-signature",
+                    "--search-root",
+                    str(search_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "vixen_parser",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            signature_payload = json.loads(signature.stdout)
+            self.assertIsNotNone(signature_payload["signature"])
+
+            body = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "get-symbol-body",
+                    "--search-root",
+                    str(search_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "include_vixen_parser",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            body_payload = json.loads(body.stdout)
+            self.assertIsNotNone(body_payload["body"])
+
+            context_lookup = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "get-enclosing-context",
+                    "--search-root",
+                    str(search_root),
+                    "--summary-root",
+                    str(summary_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "vixen_parser",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            context_payload = json.loads(context_lookup.stdout)
+            self.assertIsNotNone(context_payload["context"])
+
+            expand = subprocess.run(
+                [
+                    "python3",
+                    str(cli),
+                    "expand-subgraph",
+                    "--search-root",
+                    str(search_root),
+                    "--parsed-root",
+                    str(parsed_root),
+                    "--graph-root",
+                    str(graph_root),
+                    "--repo",
+                    "yellowstone-vixen",
+                    "vixen_parser",
+                    "--edge-type",
+                    "CALLS",
+                    "--edge-type",
+                    "USES_TYPE",
+                    "--depth",
+                    "2",
+                    "--budget",
+                    "10",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            expand_payload = json.loads(expand.stdout)
+            self.assertEqual(expand_payload["operation"], "neighbors")
+
+            graph_json = json.loads((graph_root / "yellowstone-vixen" / "graph.json").read_text(encoding="utf-8"))
+            node_kinds = {item["kind"] for item in graph_json["nodes"]}
+            edge_types = {item["type"] for item in graph_json["edges"]}
+            self.assertIn("directory", node_kinds)
+            self.assertIn("package", node_kinds)
+            self.assertIn("project_summary", node_kinds)
+            self.assertIn("SUMMARIZED_BY", edge_types)
 
             path_between = subprocess.run(
                 [

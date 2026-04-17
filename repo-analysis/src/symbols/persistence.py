@@ -27,11 +27,13 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
             CREATE TABLE files (
                 path TEXT PRIMARY KEY,
                 crate TEXT NOT NULL,
+                package_name TEXT NOT NULL,
                 module_path TEXT NOT NULL,
                 language TEXT NOT NULL,
                 symbols INTEGER NOT NULL,
                 imports INTEGER NOT NULL,
-                primary_parser_backend TEXT NOT NULL
+                primary_parser_backend TEXT NOT NULL,
+                content_hash TEXT
             );
 
             CREATE TABLE symbols (
@@ -39,6 +41,7 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
                 repo TEXT NOT NULL,
                 path TEXT NOT NULL,
                 crate TEXT NOT NULL,
+                package_name TEXT NOT NULL,
                 module_path TEXT NOT NULL,
                 language TEXT NOT NULL,
                 kind TEXT NOT NULL,
@@ -66,6 +69,8 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
                 resolved_impl_trait_symbol_id TEXT,
                 resolved_impl_trait_qualified_name TEXT,
                 resolved_super_traits_json TEXT NOT NULL,
+                summary_id TEXT,
+                normalized_body_hash TEXT,
                 semantic_summary_json TEXT NOT NULL
             );
 
@@ -139,14 +144,48 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
                 calls_json TEXT NOT NULL
             );
 
+            CREATE TABLE tests (
+                test_id TEXT PRIMARY KEY,
+                symbol_id TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                path TEXT NOT NULL,
+                qualified_name TEXT NOT NULL,
+                kind TEXT NOT NULL
+            );
+
+            CREATE TABLE summaries (
+                summary_id TEXT PRIMARY KEY,
+                repo TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                path TEXT,
+                symbol_id TEXT,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+
+            CREATE TABLE index_runs (
+                run_id TEXT PRIMARY KEY,
+                repo TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                parser TEXT NOT NULL,
+                schema_version TEXT NOT NULL,
+                summary_json TEXT NOT NULL,
+                build_metrics_json TEXT NOT NULL
+            );
+
             CREATE INDEX idx_symbols_kind ON symbols(kind);
             CREATE INDEX idx_symbols_qname ON symbols(qualified_name);
             CREATE INDEX idx_symbols_container ON symbols(container_symbol_id);
+            CREATE INDEX idx_symbols_summary_id ON symbols(summary_id);
             CREATE INDEX idx_imports_target ON imports(target_qualified_name);
             CREATE INDEX idx_references_kind ON symbol_references(kind);
             CREATE INDEX idx_references_target ON symbol_references(target_qualified_name);
             CREATE INDEX idx_statements_container ON statements(container_symbol_id);
             CREATE INDEX idx_statements_kind ON statements(kind);
+            CREATE INDEX idx_summaries_scope ON summaries(scope);
+            CREATE INDEX idx_summaries_path ON summaries(path);
+            CREATE INDEX idx_summaries_symbol_id ON summaries(symbol_id);
             """
         )
 
@@ -165,8 +204,8 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
 
         cursor.executemany(
             """
-            INSERT INTO files(path, crate, module_path, language, symbols, imports, primary_parser_backend)
-            VALUES (:path, :crate, :module_path, :language, :symbols, :imports, :primary_parser_backend)
+            INSERT INTO files(path, crate, package_name, module_path, language, symbols, imports, primary_parser_backend, content_hash)
+            VALUES (:path, :crate, :package_name, :module_path, :language, :symbols, :imports, :primary_parser_backend, :content_hash)
             """,
             payload["files"],
         )
@@ -174,24 +213,24 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
         cursor.executemany(
             """
             INSERT INTO symbols(
-                symbol_id, repo, path, crate, module_path, language, kind, name, qualified_name,
+                symbol_id, repo, path, crate, package_name, module_path, language, kind, name, qualified_name,
                 start_line, start_column, end_line, end_column, signature, docstring, visibility,
                 container_symbol_id, container_qualified_name, statement_id, scope_symbol_id,
                 reference_target_symbol_id, attributes_json, is_test, impl_target, impl_trait,
                 super_traits_json,
                 resolved_impl_target_symbol_id, resolved_impl_target_qualified_name,
                 resolved_impl_trait_symbol_id, resolved_impl_trait_qualified_name,
-                resolved_super_traits_json, semantic_summary_json
+                resolved_super_traits_json, summary_id, normalized_body_hash, semantic_summary_json
             )
             VALUES (
-                :symbol_id, :repo, :path, :crate, :module_path, :language, :kind, :name, :qualified_name,
+                :symbol_id, :repo, :path, :crate, :package_name, :module_path, :language, :kind, :name, :qualified_name,
                 :start_line, :start_column, :end_line, :end_column, :signature, :docstring, :visibility,
                 :container_symbol_id, :container_qualified_name, :statement_id, :scope_symbol_id,
                 :reference_target_symbol_id, :attributes_json, :is_test, :impl_target, :impl_trait,
                 :super_traits_json,
                 :resolved_impl_target_symbol_id, :resolved_impl_target_qualified_name,
                 :resolved_impl_trait_symbol_id, :resolved_impl_trait_qualified_name,
-                :resolved_super_traits_json, :semantic_summary_json
+                :resolved_super_traits_json, :summary_id, :normalized_body_hash, :semantic_summary_json
             )
             """,
             [flatten_symbol_row(row) for row in payload["symbols"]],
@@ -249,6 +288,41 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
             )
             """,
             [flatten_statement_row(row) for row in payload.get("statements", [])],
+        )
+
+        cursor.executemany(
+            """
+            INSERT INTO tests(test_id, symbol_id, repo, path, qualified_name, kind)
+            VALUES (:test_id, :symbol_id, :repo, :path, :qualified_name, :kind)
+            """,
+            [
+                {
+                    "test_id": f"test:{row['symbol_id']}",
+                    "symbol_id": row["symbol_id"],
+                    "repo": row["repo"],
+                    "path": row["path"],
+                    "qualified_name": row["qualified_name"],
+                    "kind": row["kind"],
+                }
+                for row in payload["symbols"]
+                if row.get("is_test")
+            ],
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO index_runs(run_id, repo, generated_at, parser, schema_version, summary_json, build_metrics_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                f"run:{payload['repo']}:{payload['generated_at']}",
+                payload["repo"],
+                payload["generated_at"],
+                payload["parser"],
+                str(payload["schema_version"]),
+                json.dumps(payload.get("summary", {})),
+                json.dumps(payload.get("build_metrics", {})),
+            ],
         )
 
         connection.commit()
@@ -386,6 +460,7 @@ def flatten_symbol_row(row: Dict[str, object]) -> Dict[str, object]:
         "repo": row["repo"],
         "path": row["path"],
         "crate": row["crate"],
+        "package_name": row["package_name"],
         "module_path": row["module_path"],
         "language": row["language"],
         "kind": row["kind"],
@@ -413,8 +488,69 @@ def flatten_symbol_row(row: Dict[str, object]) -> Dict[str, object]:
         "resolved_impl_trait_symbol_id": row["resolved_impl_trait_symbol_id"],
         "resolved_impl_trait_qualified_name": row["resolved_impl_trait_qualified_name"],
         "resolved_super_traits_json": json.dumps(row.get("resolved_super_traits", [])),
+        "summary_id": row.get("summary_id"),
+        "normalized_body_hash": row.get("normalized_body_hash"),
         "semantic_summary_json": json.dumps(row.get("semantic_summary", {})),
     }
+
+
+def write_summary_database(output_root: Path, repo_name: str, payload: Dict[str, object]) -> None:
+    target = output_root / repo_name / "symbols.sqlite3"
+    if not target.exists():
+        return
+
+    summary_rows = build_summary_rows(repo_name, payload)
+    with sqlite3.connect(target) as connection:
+        cursor = connection.cursor()
+        cursor.execute("DELETE FROM summaries")
+        cursor.executemany(
+            """
+            INSERT INTO summaries(summary_id, repo, scope, path, symbol_id, title, summary, payload_json)
+            VALUES (:summary_id, :repo, :scope, :path, :symbol_id, :title, :summary, :payload_json)
+            """,
+            summary_rows,
+        )
+        connection.commit()
+
+
+def build_summary_rows(repo_name: str, payload: Dict[str, object]) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+
+    project = payload.get("project") or {}
+    if project:
+        rows.append(
+            {
+                "summary_id": str(project.get("summary_id") or f"sum:{repo_name}:project"),
+                "repo": repo_name,
+                "scope": "project",
+                "path": None,
+                "symbol_id": None,
+                "title": project.get("repo") or repo_name,
+                "summary": project.get("summary") or "",
+                "payload_json": json.dumps(project),
+            }
+        )
+
+    for scope, items in (
+        ("package", payload.get("packages", [])),
+        ("directory", payload.get("directories", [])),
+        ("file", payload.get("files", [])),
+        ("symbol", payload.get("symbols", [])),
+    ):
+        for item in items:
+            rows.append(
+                {
+                    "summary_id": str(item.get("summary_id") or ""),
+                    "repo": repo_name,
+                    "scope": scope,
+                    "path": item.get("path"),
+                    "symbol_id": item.get("symbol_id"),
+                    "title": item.get("qualified_name") or item.get("path") or item.get("name") or repo_name,
+                    "summary": item.get("summary") or "",
+                    "payload_json": json.dumps(item),
+                }
+            )
+    return rows
 
 
 def write_json(path: Path, payload: Dict[str, object]) -> None:

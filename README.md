@@ -4,28 +4,41 @@ This repository is an umbrella workspace for comparative analysis of two Solana 
 
 ## Top-level model
 
-- `carbon/`: upstream `sevenlabs-hq/carbon` pinned to the commit currently published on `origin/v1.0-rc`.
+- `carbon/`: upstream `sevenlabs-hq/carbon` pinned to an explicit submodule commit.
 - `yellowstone-vixen/`: upstream `rpcpool/yellowstone-vixen` pinned to an explicit commit.
 - `repo-analysis/`: all local parser/index/search/summarization/evaluation tooling.
 
 Upstream source trees are preserved as close to upstream as possible. New analysis code belongs under `repo-analysis/`.
 
-## Getting started
 
-```bash
-git submodule update --init --recursive
-./repo-analysis/scripts/bootstrap.sh
-./repo-analysis/scripts/sync_repos.sh --verify
-./repo-analysis/scripts/parse_repos.sh
-./repo-analysis/scripts/build_index.sh
-./repo-analysis/scripts/build_search.sh
-./repo-analysis/scripts/build_embeddings.sh
-./repo-analysis/scripts/export_summaries.sh
-```
+## What Repo Analysis Contains
 
-## Repository policy highlights
+`repo-analysis` now provides:
 
-- Do not move or flatten upstream repository content.
-- Keep retrieval parser-first, symbol-aware, graph-backed, and selective.
-- Keep implementation details in `repo-analysis/docs/` and code in `repo-analysis/src/`.
-- Treat retrieval as parser-first, starting from raw inventory plus deterministic Rust symbol, statement graph, lexical search, embedding sidecar, summary, and graph artifacts.
+- raw inventory generation for the upstream repos
+- Rust symbol and statement extraction
+- graph artifacts in JSON and SQLite
+- lexical search artifacts in SQLite and Tantivy
+- optional embedding sidecar artifacts
+- deterministic repo, package, directory, file, and symbol summaries
+- graph query, retrieval-planning, answer-bundle, and evaluation CLI commands
+- native worker support for tree-sitter inspection and BM25 indexing
+- body/doc chunk indexing for symbol-level retrieval
+- summary sync back into the graph and `symbols.sqlite3`
+- explicit lookup/navigation tools for files, lexical search, signatures, bodies, enclosing context, implementations, inheritance, and bounded subgraph expansion
+
+The main implementation lives under:
+
+- `repo-analysis/src/`
+- `repo-analysis/native/`
+- `repo-analysis/scripts/`
+- `repo-analysis/tests/`
+
+Generated local artifacts live under:
+
+- `repo-analysis/data/raw/`
+- `repo-analysis/data/parsed/`
+- `repo-analysis/data/graph/`
+- `repo-analysis/data/search/`
+- `repo-analysis/data/summaries/`
+- `repo-analysis/data/eval/`

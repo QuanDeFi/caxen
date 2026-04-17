@@ -313,8 +313,18 @@ def select_relevant_summaries(
 ) -> Dict[str, object]:
     selected_paths = {str(item.get("path")) for item in selected_context if item.get("path")}
     selected_symbol_ids = {str(item.get("symbol_id")) for item in selected_context if item.get("symbol_id")}
+    selected_crates = {
+        str(item.get("metadata", {}).get("crate") or "")
+        for item in selected_context
+        if item.get("metadata", {}).get("crate")
+    }
     return {
         "project": summaries["project"],
+        "packages": [
+            item
+            for item in summaries.get("packages", [])
+            if str(item.get("package_name") or "") in selected_crates
+        ][:5],
         "directories": [
             item
             for item in summaries["directories"]

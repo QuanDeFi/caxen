@@ -17,18 +17,28 @@ from agents.toolkit import (
     callers_of,
     compare_repos,
     execute_graph_query,
+    expand_subgraph,
     find_datasources,
     find_decoders,
+    find_file,
     find_parsers,
     find_runtime_handlers,
     find_symbol,
+    get_enclosing_context,
+    get_summary,
+    get_symbol_body,
+    get_symbol_signature,
+    implements_of,
+    inherits_of,
     path_between,
     plan_query,
     prepare_context,
     prepare_answer_bundle,
     reads_of,
+    refs_of,
     repo_overview,
     retrieve_iterative,
+    search_lexical,
     score_external_answers,
     summarize_path,
     statement_slice,
@@ -47,7 +57,7 @@ from evaluation.harness import export_benchmark_prompts, run_benchmarks, score_a
 from graph.builder import build_graph_artifact, write_graph_artifact
 from graph.store import write_graph_database
 from search.indexer import build_search_index
-from summaries.builder import build_summary_artifacts, write_summary_artifacts
+from summaries.builder import build_summary_artifacts, sync_summary_state, write_summary_artifacts
 from symbols.indexer import build_symbol_index, write_symbol_index
 from symbols.persistence import write_symbol_database, write_symbol_parquet_bundle
 
@@ -176,6 +186,20 @@ def build_parser() -> argparse.ArgumentParser:
     find_symbol_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     find_symbol_cmd.add_argument("query")
     find_symbol_cmd.add_argument("--limit", type=int, default=10)
+
+    find_file_cmd = subparsers.add_parser("find-file", help="Find indexed files and directories by path pattern.")
+    find_file_cmd.add_argument("--search-root", required=True)
+    find_file_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    find_file_cmd.add_argument("path_pattern")
+    find_file_cmd.add_argument("--limit", type=int, default=20)
+
+    search_lexical_cmd = subparsers.add_parser("search-lexical", help="Run scoped lexical search over indexed documents.")
+    search_lexical_cmd.add_argument("--search-root", required=True)
+    search_lexical_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    search_lexical_cmd.add_argument("query")
+    search_lexical_cmd.add_argument("--kind", action="append")
+    search_lexical_cmd.add_argument("--path-prefix")
+    search_lexical_cmd.add_argument("--limit", type=int, default=10)
 
     embedding_search_cmd = subparsers.add_parser("embedding-search", help="Run semantic search over embedding vectors.")
     embedding_search_cmd.add_argument("--search-root", required=True)
@@ -327,6 +351,70 @@ def build_parser() -> argparse.ArgumentParser:
     writes_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     writes_of_cmd.add_argument("symbol")
     writes_of_cmd.add_argument("--limit", type=int, default=20)
+
+    refs_of_cmd = subparsers.add_parser("refs-of", help="List reference relationships for a symbol.")
+    refs_of_cmd.add_argument("--search-root", required=True)
+    refs_of_cmd.add_argument("--parsed-root", required=True)
+    refs_of_cmd.add_argument("--graph-root", required=True)
+    refs_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    refs_of_cmd.add_argument("symbol")
+    refs_of_cmd.add_argument("--limit", type=int, default=20)
+
+    implements_of_cmd = subparsers.add_parser("implements-of", help="List implementations of a trait or interface symbol.")
+    implements_of_cmd.add_argument("--search-root", required=True)
+    implements_of_cmd.add_argument("--parsed-root", required=True)
+    implements_of_cmd.add_argument("--graph-root", required=True)
+    implements_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    implements_of_cmd.add_argument("symbol")
+    implements_of_cmd.add_argument("--limit", type=int, default=20)
+
+    inherits_of_cmd = subparsers.add_parser("inherits-of", help="List inherited parents for a trait or type symbol.")
+    inherits_of_cmd.add_argument("--search-root", required=True)
+    inherits_of_cmd.add_argument("--parsed-root", required=True)
+    inherits_of_cmd.add_argument("--graph-root", required=True)
+    inherits_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    inherits_of_cmd.add_argument("symbol")
+    inherits_of_cmd.add_argument("--limit", type=int, default=20)
+
+    get_summary_cmd = subparsers.add_parser("get-summary", help="Resolve a summary payload for a graph or summary node.")
+    get_summary_cmd.add_argument("--search-root", required=True)
+    get_summary_cmd.add_argument("--summary-root", required=True)
+    get_summary_cmd.add_argument("--graph-root", required=True)
+    get_summary_cmd.add_argument("--parsed-root", required=True)
+    get_summary_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    get_summary_cmd.add_argument("node_id")
+
+    get_symbol_signature_cmd = subparsers.add_parser("get-symbol-signature", help="Return a resolved symbol signature.")
+    get_symbol_signature_cmd.add_argument("--search-root", required=True)
+    get_symbol_signature_cmd.add_argument("--parsed-root", required=True)
+    get_symbol_signature_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    get_symbol_signature_cmd.add_argument("symbol")
+
+    get_symbol_body_cmd = subparsers.add_parser("get-symbol-body", help="Return the indexed body chunk for a symbol.")
+    get_symbol_body_cmd.add_argument("--search-root", required=True)
+    get_symbol_body_cmd.add_argument("--parsed-root", required=True)
+    get_symbol_body_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    get_symbol_body_cmd.add_argument("symbol")
+
+    get_enclosing_context_cmd = subparsers.add_parser("get-enclosing-context", help="Return enclosing summary and statement context for a symbol.")
+    get_enclosing_context_cmd.add_argument("--search-root", required=True)
+    get_enclosing_context_cmd.add_argument("--summary-root", required=True)
+    get_enclosing_context_cmd.add_argument("--graph-root", required=True)
+    get_enclosing_context_cmd.add_argument("--parsed-root", required=True)
+    get_enclosing_context_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    get_enclosing_context_cmd.add_argument("symbol")
+
+    expand_subgraph_cmd = subparsers.add_parser("expand-subgraph", help="Expand a bounded graph neighborhood from a seed.")
+    expand_subgraph_cmd.add_argument("--search-root", required=True)
+    expand_subgraph_cmd.add_argument("--parsed-root", required=True)
+    expand_subgraph_cmd.add_argument("--graph-root", required=True)
+    expand_subgraph_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
+    expand_subgraph_cmd.add_argument("seed")
+    expand_subgraph_cmd.add_argument("--edge-type", action="append")
+    expand_subgraph_cmd.add_argument("--direction", choices=("incoming", "outgoing", "both"), default="both")
+    expand_subgraph_cmd.add_argument("--depth", type=int, default=1)
+    expand_subgraph_cmd.add_argument("--node-kind", action="append")
+    expand_subgraph_cmd.add_argument("--budget", type=int, default=20)
 
     plan_query_cmd = subparsers.add_parser("plan-query", help="Plan the retrieval recipe for a task.")
     plan_query_cmd.add_argument("--search-root", required=True)
@@ -583,6 +671,26 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
     for repo_name in repo_names:
         payload = build_summary_artifacts(repo_name, raw_root, parsed_root, graph_root)
         write_summary_artifacts(summary_root, repo_name, payload)
+        sync_summary_state(parsed_root, graph_root, repo_name, payload)
+        update_query_manifest(
+            parsed_root,
+            repo_name,
+            artifacts={
+                "summary_project": f"data/summaries/{repo_name}/project.json",
+                "summary_packages": f"data/summaries/{repo_name}/packages.json",
+                "summary_directories": f"data/summaries/{repo_name}/directories.json",
+                "summary_files": f"data/summaries/{repo_name}/files.json",
+                "summary_symbols": f"data/summaries/{repo_name}/symbols.json",
+            },
+            features={
+                "summary_graph_nodes": True,
+                "summary_sqlite_table": True,
+            },
+            build={
+                "summary_schema_version": payload["schema_version"],
+                "summary_counts": payload["summary"],
+            },
+        )
         print(f"Wrote summaries for {repo_name} to {summary_root / repo_name}")
     return 0
 
@@ -665,6 +773,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         return print_json(repo_overview(Path(args.summary_root).resolve(), args.repo))
     if args.command == "find-symbol":
         return print_json(find_symbol(Path(args.search_root).resolve(), args.repo, args.query, limit=args.limit))
+    if args.command == "find-file":
+        return print_json(find_file(Path(args.search_root).resolve(), args.repo, args.path_pattern, limit=args.limit))
+    if args.command == "search-lexical":
+        return print_json(
+            search_lexical(
+                Path(args.search_root).resolve(),
+                args.repo,
+                args.query,
+                limit=args.limit,
+                kinds=tuple(args.kind or ()),
+                path_prefix=args.path_prefix,
+            )
+        )
     if args.command == "embedding-search":
         return print_json(
             {
@@ -822,6 +943,94 @@ def main(argv: Optional[List[str]] = None) -> int:
                 args.repo,
                 args.symbol,
                 limit=args.limit,
+            )
+        )
+    if args.command == "refs-of":
+        return print_json(
+            refs_of(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.graph_root).resolve(),
+                args.repo,
+                args.symbol,
+                limit=args.limit,
+            )
+        )
+    if args.command == "implements-of":
+        return print_json(
+            implements_of(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.graph_root).resolve(),
+                args.repo,
+                args.symbol,
+                limit=args.limit,
+            )
+        )
+    if args.command == "inherits-of":
+        return print_json(
+            inherits_of(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.graph_root).resolve(),
+                args.repo,
+                args.symbol,
+                limit=args.limit,
+            )
+        )
+    if args.command == "get-summary":
+        return print_json(
+            get_summary(
+                Path(args.search_root).resolve(),
+                Path(args.summary_root).resolve(),
+                Path(args.graph_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                args.repo,
+                args.node_id,
+            )
+        )
+    if args.command == "get-symbol-signature":
+        return print_json(
+            get_symbol_signature(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                args.repo,
+                args.symbol,
+            )
+        )
+    if args.command == "get-symbol-body":
+        return print_json(
+            get_symbol_body(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                args.repo,
+                args.symbol,
+            )
+        )
+    if args.command == "get-enclosing-context":
+        return print_json(
+            get_enclosing_context(
+                Path(args.search_root).resolve(),
+                Path(args.summary_root).resolve(),
+                Path(args.graph_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                args.repo,
+                args.symbol,
+            )
+        )
+    if args.command == "expand-subgraph":
+        return print_json(
+            expand_subgraph(
+                Path(args.search_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.graph_root).resolve(),
+                args.repo,
+                args.seed,
+                edge_types=tuple(args.edge_type or ()),
+                direction=args.direction,
+                depth=args.depth,
+                node_kinds=tuple(args.node_kind or ()),
+                budget=args.budget,
             )
         )
     if args.command == "plan-query":

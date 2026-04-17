@@ -5,6 +5,7 @@
     "imports": 2,
     "references": 5,
     "statements": 4,
+    "tests": 0,
     "kind_counts": [
       {
         "kind": "enum",
@@ -257,7 +258,7 @@
     },
     {
       "type": "CONTAINS",
-      "count": 11
+      "count": 16
     },
     {
       "type": "CONTROL_FLOW",
@@ -268,12 +269,20 @@
       "count": 1
     },
     {
+      "type": "DECLARES",
+      "count": 6
+    },
+    {
       "type": "DEFINES",
       "count": 7
     },
     {
       "type": "IMPORTS",
       "count": 2
+    },
+    {
+      "type": "NEIGHBOR",
+      "count": 14
     },
     {
       "type": "READS",
@@ -289,6 +298,10 @@
     },
     {
       "type": "USES",
+      "count": 3
+    },
+    {
+      "type": "USES_TYPE",
       "count": 3
     }
   ]

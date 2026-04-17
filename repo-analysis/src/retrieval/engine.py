@@ -236,11 +236,26 @@ def node_to_candidate(
     edge: Dict[str, object],
     direction: str,
 ) -> Dict[str, object]:
-    if node["kind"] == "statement":
-        kind = "statement"
-    elif node["kind"] in {"module_ref", "symbol_ref", "type_ref"}:
+    if node["kind"] in {
+        "statement",
+        "file",
+        "directory",
+        "repository",
+        "package",
+        "dependency",
+        "test",
+        "project_summary",
+        "package_summary",
+        "directory_summary",
+        "file_summary",
+        "symbol_summary",
+        "module_ref",
+        "symbol_ref",
+        "type_ref",
+        "trait_ref",
+    }:
         kind = node["kind"]
-    elif node["kind"] not in {"file", "directory", "repository"} and "path" in node:
+    elif "path" in node:
         kind = "symbol"
     else:
         kind = node["kind"]
@@ -354,10 +369,10 @@ def classify_query(tokens: Sequence[str], query: str) -> Dict[str, object]:
 def default_query_kinds(query_profile: Dict[str, object]) -> Tuple[str, ...]:
     intent = query_profile.get("intent")
     if intent == "docs":
-        return ("repo", "directory", "file", "symbol")
+        return ("repo", "package", "directory", "file", "doc", "symbol")
     if intent == "symbol":
-        return ("symbol", "statement", "file")
-    return ("symbol", "file", "statement", "directory")
+        return ("symbol", "function_body", "type_body", "statement", "file")
+    return ("symbol", "function_body", "type_body", "file", "statement", "directory", "package")
 
 
 def apply_summary_bonus(

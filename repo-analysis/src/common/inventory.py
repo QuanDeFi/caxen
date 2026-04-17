@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -228,6 +229,7 @@ def collect_files(repo_root: Path) -> Dict[str, object]:
                 "extension": extension,
                 "language": language,
                 "generated": generated,
+                "content_hash": sha1_file(path),
             }
             files.append(file_record)
 
@@ -365,6 +367,7 @@ def git_metadata(repo_root: Path, expected_ref: Optional[str]) -> Dict[str, Opti
         "git_ref": run_git(repo_root, ["rev-parse", "HEAD"]) or None,
         "git_branch": branch or "DETACHED",
         "git_remote": run_git(repo_root, ["remote", "get-url", "origin"]) or None,
+        "git_dirty": "dirty" if run_git(repo_root, ["status", "--porcelain"]) else "clean",
         "expected_ref": expected_ref,
     }
 
@@ -446,3 +449,11 @@ def write_inventory(output_root: Path, repo: str, inventory: Dict[str, object]) 
         with target.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2, sort_keys=False)
             handle.write("\n")
+
+
+def sha1_file(path: Path) -> str:
+    digest = hashlib.sha1()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

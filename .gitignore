@@ -15,6 +15,7 @@ node_modules/
 .mypy_cache/
 __pycache__/
 *.pyc
+repo-analysis/logs
 
 # Build artifacts
 build/

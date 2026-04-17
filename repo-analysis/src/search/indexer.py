@@ -11,7 +11,7 @@ from common.query_manifest import update_query_manifest
 from symbols.indexer import stable_id, timestamp_now
 
 
-SCHEMA_VERSION = "0.2.0"
+SCHEMA_VERSION = "0.3.0"
 TEXT_EXTENSIONS = {
     ".c",
     ".cc",
@@ -24,7 +24,6 @@ TEXT_EXTENSIONS = {
     ".js",
     ".json",
     ".jsx",
-    ".md",
     ".proto",
     ".py",
     ".rs",
@@ -153,6 +152,22 @@ def search_documents(
         return results
 
 
+def search_documents_scoped(
+    search_root: Path,
+    repo_name: str,
+    query: str,
+    *,
+    limit: int = 10,
+    kinds: Sequence[str] = (),
+    path_prefix: Optional[str] = None,
+) -> List[Dict[str, object]]:
+    results = search_documents(search_root, repo_name, query, limit=max(limit * 3, limit), kinds=kinds)
+    if path_prefix:
+        normalized_prefix = path_prefix.rstrip("/")
+        results = [item for item in results if str(item.get("path") or "").startswith(normalized_prefix)]
+    return results[:limit]
+
+
 def list_documents(
     search_root: Path,
     repo_name: str,
@@ -190,6 +205,71 @@ def list_documents(
         return [row_to_result(row, score=0.0) for row in rows]
 
 
+def find_files(
+    search_root: Path,
+    repo_name: str,
+    path_pattern: str,
+    *,
+    limit: int = 20,
+) -> List[Dict[str, object]]:
+    sqlite_path = search_root / repo_name / "search.sqlite3"
+    if not sqlite_path.exists():
+        return []
+
+    like_pattern = path_pattern.replace("*", "%")
+    if "%" not in like_pattern:
+        like_pattern = f"%{like_pattern}%"
+
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT doc_id, kind, repo, path, name, qualified_name, symbol_id, title, preview, metadata_json
+            FROM documents
+            WHERE kind IN ('directory', 'file')
+              AND path LIKE ?
+            ORDER BY kind, LENGTH(COALESCE(path, '')), COALESCE(path, '')
+            LIMIT ?
+            """,
+            [like_pattern, limit],
+        ).fetchall()
+    return [row_to_result(row, score=0.0) for row in rows]
+
+
+def lookup_symbol_documents(
+    search_root: Path,
+    repo_name: str,
+    symbol_id: str,
+    *,
+    kinds: Sequence[str] = (),
+    limit: int = 20,
+) -> List[Dict[str, object]]:
+    sqlite_path = search_root / repo_name / "search.sqlite3"
+    if not sqlite_path.exists():
+        return []
+
+    clauses = ["symbol_id = ?"]
+    params: List[object] = [symbol_id]
+    if kinds:
+        clauses.append(f"kind IN ({','.join('?' for _ in kinds)})")
+        params.extend(kinds)
+    params.append(limit)
+
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            (
+                "SELECT doc_id, kind, repo, path, name, qualified_name, symbol_id, title, preview, metadata_json "
+                "FROM documents "
+                f"WHERE {' AND '.join(clauses)} "
+                "ORDER BY kind, COALESCE(path, ''), COALESCE(name, ''), COALESCE(qualified_name, '') "
+                "LIMIT ?"
+            ),
+            params,
+        ).fetchall()
+    return [row_to_result(row, score=0.0) for row in rows]
+
+
 def load_search_manifest(search_root: Path, repo_name: str) -> Dict[str, object]:
     return load_json(search_root / repo_name / "search_manifest.json")
 
@@ -204,6 +284,7 @@ def build_documents(
     files_by_path = {item["path"]: item for item in repo_map.get("files", [])}
     parsed_files_by_path = {item["path"]: item for item in symbols.get("files", [])}
     symbol_counts_by_path = Counter(item["path"] for item in symbols.get("symbols", []))
+    package_rollups = build_package_rollups(symbols)
     directory_rollups = build_directory_rollups(repo_map, symbols)
 
     yield {
@@ -263,6 +344,35 @@ def build_documents(
             },
         }
 
+    for package_name, rollup in sorted(package_rollups.items()):
+        yield {
+            "doc_id": stable_id("doc", repo_name, "package", package_name),
+            "kind": "package",
+            "repo": repo_name,
+            "path": None,
+            "name": package_name,
+            "qualified_name": package_name,
+            "symbol_id": None,
+            "title": package_name,
+            "preview": f"Package overview for {package_name}",
+            "content": " ".join(
+                item
+                for item in [
+                    package_name,
+                    " ".join(rollup.get("module_paths", [])),
+                    " ".join(rollup.get("top_symbol_kinds", [])),
+                    " ".join(rollup.get("sample_files", [])),
+                ]
+                if item
+            ),
+            "metadata": {
+                "files": rollup.get("files", 0),
+                "symbols": rollup.get("symbols", 0),
+                "module_paths": rollup.get("module_paths", []),
+                "top_symbol_kinds": rollup.get("top_symbol_kinds", []),
+            },
+        }
+
     for path, file_record in sorted(files_by_path.items()):
         parsed_file = parsed_files_by_path.get(path, {})
         source_text = read_indexable_file(repo_root / path, file_record)
@@ -292,8 +402,10 @@ def build_documents(
             "metadata": {
                 "language": file_record.get("language"),
                 "generated": bool(file_record.get("generated")),
+                "content_hash": file_record.get("content_hash"),
                 "symbols": symbol_counts_by_path.get(path, 0),
                 "crate": parsed_file.get("crate"),
+                "package_name": parsed_file.get("package_name"),
                 "module_path": parsed_file.get("module_path"),
                 "primary_parser_backend": parsed_file.get("primary_parser_backend"),
                 "tags": path_tags(path),
@@ -346,10 +458,79 @@ def build_documents(
                 "container_symbol_id": symbol["container_symbol_id"],
                 "container_qualified_name": symbol["container_qualified_name"],
                 "is_test": symbol["is_test"],
+                "summary_id": symbol.get("summary_id"),
+                "normalized_body_hash": symbol.get("normalized_body_hash"),
                 "semantic_summary": symbol.get("semantic_summary", {}),
                 "tags": symbol_tags,
             },
         }
+
+        body_kind = symbol_body_kind(symbol)
+        body_text = extract_symbol_chunk(repo_root, symbol)
+        if body_kind and body_text:
+            yield {
+                "doc_id": stable_id("doc", repo_name, body_kind, symbol["symbol_id"]),
+                "kind": body_kind,
+                "repo": repo_name,
+                "path": symbol["path"],
+                "name": symbol["name"],
+                "qualified_name": symbol["qualified_name"],
+                "symbol_id": symbol["symbol_id"],
+                "title": f"{symbol['qualified_name']} body",
+                "preview": summarize_preview(body_text),
+                "content": " ".join(
+                    item
+                    for item in [
+                        symbol["kind"],
+                        symbol["name"],
+                        symbol["qualified_name"],
+                        body_text,
+                        symbol.get("docstring"),
+                    ]
+                    if item
+                ),
+                "metadata": {
+                    "kind": symbol["kind"],
+                    "path": symbol["path"],
+                    "module_path": symbol["module_path"],
+                    "crate": symbol["crate"],
+                    "body_kind": body_kind,
+                    "summary_id": symbol.get("summary_id"),
+                    "normalized_body_hash": symbol.get("normalized_body_hash"),
+                    "tags": symbol_tags,
+                },
+            }
+
+        if symbol.get("docstring"):
+            yield {
+                "doc_id": stable_id("doc", repo_name, "doc", symbol["symbol_id"]),
+                "kind": "doc",
+                "repo": repo_name,
+                "path": symbol["path"],
+                "name": symbol["name"],
+                "qualified_name": symbol["qualified_name"],
+                "symbol_id": symbol["symbol_id"],
+                "title": f"{symbol['qualified_name']} docs",
+                "preview": summarize_preview(symbol["docstring"]),
+                "content": " ".join(
+                    item
+                    for item in [
+                        symbol["kind"],
+                        symbol["name"],
+                        symbol["qualified_name"],
+                        symbol["docstring"],
+                    ]
+                    if item
+                ),
+                "metadata": {
+                    "kind": symbol["kind"],
+                    "path": symbol["path"],
+                    "module_path": symbol["module_path"],
+                    "crate": symbol["crate"],
+                    "summary_id": symbol.get("summary_id"),
+                    "tags": symbol_tags + ["doc"],
+                },
+            }
 
     for statement in symbols.get("statements", []):
         yield {
@@ -402,6 +583,42 @@ def build_directory_rollups(repo_map: Dict[str, object], symbols: Dict[str, obje
     return rollups
 
 
+def build_package_rollups(symbols: Dict[str, object]) -> Dict[str, Dict[str, object]]:
+    rollups: Dict[str, Dict[str, object]] = defaultdict(
+        lambda: {
+            "files": 0,
+            "symbols": 0,
+            "sample_files": [],
+            "module_paths": [],
+            "top_symbol_kinds": [],
+        }
+    )
+    top_symbol_kinds: Dict[str, Counter] = defaultdict(Counter)
+    for file_record in symbols.get("files", []):
+        package_name = str(file_record.get("package_name") or file_record.get("crate") or "")
+        if not package_name:
+            continue
+        bucket = rollups[package_name]
+        bucket["files"] += 1
+        if len(bucket["sample_files"]) < 8:
+            bucket["sample_files"].append(file_record["path"])
+        module_path = str(file_record.get("module_path") or "")
+        if module_path and module_path not in bucket["module_paths"]:
+            bucket["module_paths"].append(module_path)
+
+    for symbol in symbols.get("symbols", []):
+        package_name = str(symbol.get("package_name") or symbol.get("crate") or "")
+        if not package_name:
+            continue
+        rollups[package_name]["symbols"] += 1
+        top_symbol_kinds[package_name][symbol["kind"]] += 1
+
+    for package_name, counts in top_symbol_kinds.items():
+        rollups[package_name]["top_symbol_kinds"] = [kind for kind, _count in counts.most_common(5)]
+
+    return rollups
+
+
 def path_prefixes(path: str) -> List[str]:
     parts = PurePosixPath(path).parts
     prefixes = ["."]
@@ -429,6 +646,30 @@ def build_symbol_tags(symbol: Dict[str, object]) -> List[str]:
     if symbol.get("super_traits"):
         tags.append("trait")
     return list(dict.fromkeys(tag for tag in tags if tag))
+
+
+def symbol_body_kind(symbol: Dict[str, object]) -> str | None:
+    kind = str(symbol.get("kind") or "")
+    if kind in {"fn", "function", "method"}:
+        return "function_body"
+    if kind in {"struct", "enum", "trait", "impl", "type"}:
+        return "type_body"
+    return None
+
+
+def extract_symbol_chunk(repo_root: Path, symbol: Dict[str, object]) -> str:
+    path = repo_root / str(symbol["path"])
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return ""
+    span = symbol.get("span") or {}
+    start_line = max(int(span.get("start_line") or 1), 1)
+    end_line = max(int(span.get("end_line") or start_line), start_line)
+    if start_line > len(lines):
+        return ""
+    selected = lines[start_line - 1 : min(end_line, len(lines))]
+    return "\n".join(selected).strip()
 
 
 def path_tags(path: str) -> List[str]:

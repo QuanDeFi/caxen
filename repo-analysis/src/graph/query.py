@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter, defaultdict, deque
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -32,8 +33,17 @@ EDGE_DIRECTIONS = {
 }
 NON_SYMBOL_NODE_KINDS = {
     "repository",
+    "directory",
     "file",
+    "package",
+    "dependency",
+    "test",
     "statement",
+    "project_summary",
+    "package_summary",
+    "directory_summary",
+    "file_summary",
+    "symbol_summary",
     "module_ref",
     "symbol_ref",
     "trait_ref",
@@ -306,6 +316,46 @@ def refs_of(
     )
 
 
+def implements_of(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 20,
+) -> Dict[str, object]:
+    return _neighbors_wrapper(
+        search_root,
+        parsed_root,
+        graph_root,
+        repo_name,
+        symbol_query,
+        operation="implements_of",
+        limit=limit,
+    )
+
+
+def inherits_of(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 20,
+) -> Dict[str, object]:
+    return _neighbors_wrapper(
+        search_root,
+        parsed_root,
+        graph_root,
+        repo_name,
+        symbol_query,
+        operation="inherits_of",
+        limit=limit,
+    )
+
+
 def statement_slice(
     search_root: Path,
     parsed_root: Path,
@@ -401,6 +451,19 @@ def symbol_summary(
 
 
 def load_graph_view(graph_root: Path, repo_name: str) -> Dict[str, object]:
+    return _load_graph_view_cached(str(graph_root.resolve()), repo_name)
+
+
+@lru_cache(maxsize=8)
+def _load_graph_view_cached(graph_root: str, repo_name: str) -> Dict[str, object]:
+    root = Path(graph_root)
+    sqlite_path = root / repo_name / "graph.sqlite3"
+    if sqlite_path.exists():
+        return load_graph_sqlite(sqlite_path)
+    return load_graph_json(root / repo_name / "graph.json")
+
+
+def load_graph_view_uncached(graph_root: Path, repo_name: str) -> Dict[str, object]:
     sqlite_path = graph_root / repo_name / "graph.sqlite3"
     if sqlite_path.exists():
         return load_graph_sqlite(sqlite_path)
@@ -488,7 +551,12 @@ def edge_sort_key(edge: Dict[str, object]) -> Tuple[str, str, str]:
 
 
 def load_symbols_payload(parsed_root: Path, repo_name: str) -> Dict[str, object]:
-    return load_json(parsed_root / repo_name / "symbols.json")
+    return _load_symbols_payload_cached(str(parsed_root.resolve()), repo_name)
+
+
+@lru_cache(maxsize=8)
+def _load_symbols_payload_cached(parsed_root: str, repo_name: str) -> Dict[str, object]:
+    return load_json(Path(parsed_root) / repo_name / "symbols.json")
 
 
 def resolve_seed_matches(

@@ -1,115 +1,64 @@
 # repo-analysis
 
-Analysis toolkit for Carbon and Yellowstone Vixen.
+Local analysis toolkit for the upstream repos in this workspace.
 
-## Intent
+## Run
 
-- Inventory both upstream repositories.
-- Parse and index symbols with parser-first ingestion.
-- Build graph-aware retrieval and hierarchical summaries.
-- Evaluate retrieval strategies and agent workflows.
-
-## Current Milestone
-
-The implemented slice in this repository now covers the current Phase 0-6 foundation plus the first deeper analysis layer:
-
-- workspace bootstrap and verification
-- raw repo inventory adapters
-- normalized `manifest.json` and `repo_map.json` outputs
-- first Rust-oriented parser ingestion
-- deterministic symbol, SQLite, and graph artifacts for scoped Rust source paths
-- first semantic graph edges for imports, impls, calls, and uses
-- a native Rust helper for tree-sitter-backed inspection and local BM25 index builds
-- SQLite metadata plus Tantivy BM25 lexical search artifacts over repo/file/symbol documents
-- `rustc` AST probe metadata and persisted statement artifacts
-- statement-level graph nodes with first `CONTROL_FLOW`, `DATA_FLOW`, `DEPENDENCE`, `READS`, `WRITES`, and `REFS` edges
-- backend-preferred parser fusion that uses `rust-analyzer` document symbols or `tree-sitter` symbols when available and records the chosen primary backend per file
-- workspace-aware cross-crate resolution using Cargo metadata with dependency-alias support
-- interprocedural semantic summaries propagated across direct call chains
-- canonical `graph.sqlite3` storage and `query_manifest.json` build metadata
-- a provider-based embedding sidecar over indexed search documents with an OpenAI-backed path when configured
-- deterministic project/directory/file/symbol summaries
-- graph-query, retrieval-planning, iterative retrieval, and answer-bundle CLI operations
-- a broader benchmark harness for lexical, graph, rerank, summary-aware, vector, and selective retrieval modes with answer-quality, bundle-sufficiency, prompt-export, and offline answer scoring
-
-The remaining work is now about fidelity and coverage rather than missing subsystems: deeper compiler/LSP-backed resolution, stronger interprocedural precision, broader benchmark coverage, and wider optional-backend availability across environments.
-
-## Quickstart
+From the workspace root:
 
 ```bash
-./scripts/bootstrap.sh
-./scripts/sync_repos.sh
-./scripts/sync_repos.sh --verify
-./scripts/parse_repos.sh
-./scripts/build_index.sh
-./scripts/build_search.sh
-./scripts/build_embeddings.sh
-./scripts/export_summaries.sh
-./scripts/run_benchmarks.sh
+./repo-analysis/scripts/bootstrap.sh
+./repo-analysis/scripts/sync_repos.sh --verify
+./repo-analysis/scripts/parse_repos.sh
+./repo-analysis/scripts/build_index.sh
+./repo-analysis/scripts/build_search.sh
+./repo-analysis/scripts/export_summaries.sh
+./repo-analysis/scripts/run_benchmarks.sh
 ```
 
-## Structure
+Optional:
 
-- `configs/`: pipeline configuration.
-- `docs/`: architecture, schemas, retrieval, summaries, evaluation docs.
-- `scripts/`: repeatable operational entry points.
-- `src/`: adapters, parsers, symbols, graph, retrieval, agents.
-- `tests/`: unit/integration/golden fixtures.
+```bash
+./repo-analysis/scripts/build_embeddings.sh
+```
 
-## Outputs
+## Main outputs
 
-`parse_repos.sh` writes normalized raw inventory files to:
+- `data/raw/<repo>/`: raw inventory
+- `data/parsed/<repo>/`: symbols, SQLite, parquet status, query manifest
+- `data/graph/<repo>/`: graph JSON and SQLite
+- `data/search/<repo>/`: lexical search, BM25/Tantivy, and optional embeddings
+- `data/summaries/<repo>/`: project/package/directory/file/symbol summaries
+- `data/eval/`: benchmark and scoring output
 
-- `data/raw/carbon/manifest.json`
-- `data/raw/carbon/repo_map.json`
-- `data/raw/yellowstone-vixen/manifest.json`
-- `data/raw/yellowstone-vixen/repo_map.json`
+`build-summaries` also syncs summary rows into `symbols.sqlite3` and summary nodes/edges into the graph.
 
-`build_index.sh` writes the first parser/symbol/graph artifacts to:
+## CLI
 
-- `data/parsed/<repo>/symbols.json`
-- `data/parsed/<repo>/symbols.sqlite3`
-- `data/parsed/<repo>/parquet_status.json`
-- `data/parsed/<repo>/query_manifest.json`
-- `data/graph/<repo>/graph.json`
-- `data/graph/<repo>/graph.sqlite3`
+Use:
 
-When `pyarrow` is available, `build_index.sh` also writes parquet tables for files, symbols, imports, and references under `data/parsed/<repo>/`.
+```bash
+python3 repo-analysis/src/cli/main.py --help
+```
 
-`build_search.sh` writes lexical search artifacts to:
+Commands:
 
-- `data/search/<repo>/search.sqlite3`
-- `data/search/<repo>/documents.jsonl`
-- `data/search/<repo>/tantivy/`
-- `data/search/<repo>/search_manifest.json`
-
-`build_embeddings.sh` writes the optional embedding sidecar to:
-
-- `data/search/<repo>/embedding_index.json`
-- `data/search/<repo>/embedding_manifest.json`
-
-Set `OPENAI_API_KEY` and optionally `REPO_ANALYSIS_EMBEDDING_PROVIDER=openai` to build a model-backed dense embedding index instead of the default local hashing index.
-
-`export_summaries.sh` writes deterministic summary artifacts to:
-
-- `data/summaries/<repo>/project.json`
-- `data/summaries/<repo>/directories.json`
-- `data/summaries/<repo>/files.json`
-- `data/summaries/<repo>/symbols.json`
-- `data/summaries/<repo>/summary_manifest.json`
-
-## Toolkit
-
-The CLI now exposes:
-
+- `parse-repos`
+- `build-index`
+- `build-search`
+- `build-summaries`
+- `build-embeddings`
+- `run-benchmarks`
 - `repo-overview`
 - `find-symbol`
-- `where-defined`
+- `find-file`
+- `search-lexical`
+- `embedding-search`
 - `trace-calls`
+- `where-defined`
 - `who-imports`
 - `adjacent-symbols`
 - `compare-repos`
-- `embedding-search`
 - `find-parsers`
 - `find-datasources`
 - `find-decoders`
@@ -123,9 +72,43 @@ The CLI now exposes:
 - `callees-of`
 - `reads-of`
 - `writes-of`
+- `refs-of`
+- `implements-of`
+- `inherits-of`
+- `expand-subgraph`
+- `get-summary`
+- `get-symbol-signature`
+- `get-symbol-body`
+- `get-enclosing-context`
 - `plan-query`
 - `prepare-answer-bundle`
 - `retrieve-iterative`
 - `export-benchmark-prompts`
 - `score-answer-bundles`
 - `score-external-answers`
+
+## LLM agent use
+
+For grounded repo questions, use `repo-analysis` outputs before opening arbitrary files.
+
+Recommended order:
+
+1. Read `data/parsed/<repo>/query_manifest.json` to see which artifacts exist.
+2. Use summaries first:
+   `repo-overview`, `summarize-path`, `get-summary`
+3. Use lexical/symbol lookup next:
+   `find-symbol`, `find-file`, `search-lexical`, `where-defined`
+4. Use graph expansion for relationships:
+   `who-imports`, `callers-of`, `callees-of`, `reads-of`, `writes-of`, `refs-of`, `implements-of`, `inherits-of`, `path-between`, `expand-subgraph`, `statement-slice`
+5. Prepare final evidence for answering:
+   `prepare-context`, `plan-query`, `prepare-answer-bundle`, `retrieve-iterative`
+
+Prefer these artifacts:
+
+- `data/summaries/<repo>/`
+- `data/parsed/<repo>/symbols.json`
+- `data/graph/<repo>/graph.sqlite3`
+- `data/search/<repo>/search.sqlite3`
+- `data/search/<repo>/tantivy/`
+
+Treat `prepare-answer-bundle` as the default handoff artifact for an external LLM. It is the compact, provenance-carrying context package.

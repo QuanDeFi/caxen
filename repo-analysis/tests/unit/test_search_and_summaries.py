@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -11,13 +12,22 @@ if str(SRC_ROOT) not in sys.path:
 
 from agents.toolkit import (
     execute_graph_query,
+    expand_subgraph,
+    find_file,
     find_symbol,
+    get_enclosing_context,
+    get_summary,
+    get_symbol_body,
+    get_symbol_signature,
+    implements_of,
     path_between,
     plan_query,
     prepare_answer_bundle,
     prepare_context,
+    refs_of,
     repo_overview,
     retrieve_iterative,
+    search_lexical,
     statement_slice,
     summarize_path,
     trace_calls,
@@ -29,8 +39,9 @@ from graph.builder import build_graph_artifact, write_graph_artifact
 from graph.store import write_graph_database
 from retrieval.engine import retrieve_context
 from search.indexer import build_search_index, search_documents
-from summaries.builder import build_summary_artifacts, write_summary_artifacts
+from summaries.builder import build_summary_artifacts, sync_summary_state, write_summary_artifacts
 from symbols.indexer import build_symbol_index, write_symbol_index
+from symbols.persistence import write_symbol_database
 
 
 def seed_demo_workspace(root: Path) -> dict[str, Path]:
@@ -49,15 +60,31 @@ def seed_demo_workspace(root: Path) -> dict[str, Path]:
     (repo_root / "src" / "lib.rs").write_text(
         "\n".join(
             [
+                "pub trait ProvidesAnswer {",
+                "    fn answer(&self) -> u64;",
+                "}",
+                "",
+                "/// Return the canonical demo answer.",
                 "pub fn helper() -> u64 {",
                 "    7",
                 "}",
                 "",
                 "pub struct Demo;",
                 "",
-                "impl Demo {",
-                "    pub fn answer(&self) -> u64 {",
+                "impl ProvidesAnswer for Demo {",
+                "    fn answer(&self) -> u64 {",
                 "        helper()",
+                "    }",
+                "}",
+                "",
+                "#[cfg(test)]",
+                "mod tests {",
+                "    use super::*;",
+                "",
+                "    #[test]",
+                "    fn demo_answer() {",
+                "        let demo = Demo;",
+                "        assert_eq!(ProvidesAnswer::answer(&demo), 7);",
                 "    }",
                 "}",
             ]
@@ -107,6 +134,7 @@ def seed_demo_workspace(root: Path) -> dict[str, Path]:
 
     symbol_index = build_symbol_index("demo", repo_root, raw_root, path_prefixes=("src/lib.rs",))
     write_symbol_index(parsed_root, "demo", symbol_index)
+    write_symbol_database(parsed_root, "demo", symbol_index)
     graph = build_graph_artifact(symbol_index)
     write_graph_artifact(graph_root, "demo", graph)
     write_graph_database(graph_root, "demo", graph)
@@ -114,6 +142,7 @@ def seed_demo_workspace(root: Path) -> dict[str, Path]:
     build_embedding_index(search_root, "demo")
     summary_artifacts = build_summary_artifacts("demo", raw_root, parsed_root, graph_root)
     write_summary_artifacts(summary_root, "demo", summary_artifacts)
+    sync_summary_state(parsed_root, graph_root, "demo", summary_artifacts)
 
     return {
         "repo_root": repo_root,
@@ -146,6 +175,19 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertTrue(symbols["parser_backends"]["rustc_ast_probe"]["available"])
             self.assertGreater(symbols["summary"]["statements"], 0)
             self.assertIn("search_sqlite", query_manifest["artifacts"])
+            self.assertTrue(all(item.get("summary_id") for item in symbols["symbols"]))
+            self.assertTrue(all(item.get("normalized_body_hash") for item in symbols["symbols"]))
+
+            with sqlite3.connect(paths["parsed_root"] / "demo" / "symbols.sqlite3") as connection:
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    ).fetchall()
+                }
+                self.assertIn("tests", tables)
+                self.assertIn("summaries", tables)
+                self.assertIn("index_runs", tables)
 
             embedding_results = query_embedding_index(paths["search_root"], "demo", "helper answer", limit=5)
             self.assertGreater(len(embedding_results), 0)
@@ -206,6 +248,8 @@ class SearchAndSummaryTest(unittest.TestCase):
             directory_summary = summarize_path(paths["summary_root"], "demo", "src")
             self.assertEqual(directory_summary["kind"], "directory")
             self.assertEqual(directory_summary["summary"]["path"], "src")
+            packages = json.loads((paths["summary_root"] / "demo" / "packages.json").read_text(encoding="utf-8"))
+            self.assertTrue(any(item["package_name"] == "demo-crate" for item in packages))
 
     def test_benchmark_harness_reports_answer_quality(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -257,6 +301,87 @@ class SearchAndSummaryTest(unittest.TestCase):
             )
             self.assertEqual(neighbors["operation"], "callers_of")
             self.assertTrue(any(item["name"] == "answer" for item in neighbors["results"]))
+
+            package_search = search_lexical(
+                paths["search_root"],
+                "demo",
+                "demo-crate",
+                limit=5,
+                kinds=("package",),
+            )
+            self.assertTrue(any(item["kind"] == "package" for item in package_search["results"]))
+
+            file_lookup = find_file(paths["search_root"], "demo", "src/lib.rs", limit=5)
+            self.assertTrue(any(item["path"] == "src/lib.rs" for item in file_lookup["results"]))
+
+            signature = get_symbol_signature(paths["search_root"], paths["parsed_root"], "demo", "helper")
+            self.assertIn("helper()", signature["signature"])
+
+            body = get_symbol_body(paths["search_root"], paths["parsed_root"], "demo", "answer")
+            self.assertEqual(body["body"]["kind"], "function_body")
+
+            context = get_enclosing_context(
+                paths["search_root"],
+                paths["summary_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                "demo",
+                "answer",
+            )
+            self.assertEqual(context["context"]["symbol"]["name"], "answer")
+
+            refs = refs_of(
+                paths["search_root"],
+                paths["parsed_root"],
+                paths["graph_root"],
+                "demo",
+                "answer",
+                limit=10,
+            )
+            self.assertGreaterEqual(len(refs["neighbors"]), 1)
+
+            impls = implements_of(
+                paths["search_root"],
+                paths["parsed_root"],
+                paths["graph_root"],
+                "demo",
+                "ProvidesAnswer",
+                limit=10,
+            )
+            self.assertTrue(any(item["name"] == "Demo" or item["kind"] == "impl" for item in impls["neighbors"]))
+
+            subgraph = expand_subgraph(
+                paths["search_root"],
+                paths["parsed_root"],
+                paths["graph_root"],
+                "demo",
+                "helper",
+                edge_types=("CALLS", "USES_TYPE", "NEIGHBOR"),
+                depth=2,
+                budget=10,
+            )
+            self.assertEqual(subgraph["operation"], "neighbors")
+
+            graph_payload = json.loads((paths["graph_root"] / "demo" / "graph.json").read_text(encoding="utf-8"))
+            node_kinds = {item["kind"] for item in graph_payload["nodes"]}
+            self.assertIn("directory", node_kinds)
+            self.assertIn("package", node_kinds)
+            self.assertIn("test", node_kinds)
+            self.assertIn("symbol_summary", node_kinds)
+            edge_types = {item["type"] for item in graph_payload["edges"]}
+            self.assertIn("SUMMARIZED_BY", edge_types)
+            self.assertIn("OVERRIDES", edge_types)
+            self.assertIn("NEIGHBOR", edge_types)
+
+            summary_payload = get_summary(
+                paths["search_root"],
+                paths["summary_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                "demo",
+                graph_payload["nodes"][0]["node_id"],
+            )
+            self.assertEqual(summary_payload["repo"], "demo")
 
             slice_payload = statement_slice(
                 paths["search_root"],

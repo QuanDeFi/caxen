@@ -248,11 +248,13 @@ def build_symbol_index(
             {
                 "path": context.parsed.path,
                 "crate": context.parsed.crate_name,
+                "package_name": context.package_info.package_name,
                 "module_path": context.parsed.module_path,
                 "language": "Rust",
                 "symbols": len(context.parsed.symbols),
                 "imports": len(context.parsed.imports),
                 "primary_parser_backend": context.primary_parser_backend,
+                "content_hash": hashlib.sha1(context.source.encode("utf-8")).hexdigest(),
             }
         )
         for symbol in context.parsed.symbols:
@@ -265,6 +267,7 @@ def build_symbol_index(
     reference_records = build_reference_records(repo_name, contexts, resolution_index)
     statement_records = build_statement_records(repo_name, contexts, symbol_records, resolution_index)
     enrich_symbol_semantics(symbol_records, reference_records, statement_records, resolution_index)
+    enrich_symbol_artifact_metadata(symbol_records, statement_records)
     duplicate_symbol_ids = find_duplicate_ids(symbol_records, "symbol_id")
     if duplicate_symbol_ids:
         raise ValueError(
@@ -287,7 +290,7 @@ def build_symbol_index(
     statement_kind_counts = rollup_counts(item["kind"] for item in statement_records)
 
     return {
-        "schema_version": "0.5.0",
+        "schema_version": "0.6.0",
         "repo": repo_name,
         "generated_at": timestamp_now(),
         "parser": "rust-backend-fused-v2",
@@ -306,6 +309,7 @@ def build_symbol_index(
             "imports": len(import_records),
             "references": len(reference_records),
             "statements": len(statement_records),
+            "tests": sum(1 for item in symbol_records if item.get("is_test")),
             "kind_counts": kind_counts,
             "reference_kind_counts": reference_kind_counts,
             "statement_kind_counts": statement_kind_counts,
@@ -2804,11 +2808,13 @@ def strip_expression_noise(expression: str) -> str:
 
 def symbol_to_record(repo_name: str, context: ParsedFileContext, symbol: RustSymbol) -> Dict[str, object]:
     scope_symbol_id = context.symbol_id_by_local.get(symbol.container_local_id) if symbol.kind == "local" else None
+    symbol_id = context.symbol_id_by_local[symbol.local_id]
     return {
-        "symbol_id": context.symbol_id_by_local[symbol.local_id],
+        "symbol_id": symbol_id,
         "repo": repo_name,
         "path": context.parsed.path,
         "crate": context.parsed.crate_name,
+        "package_name": context.package_info.package_name,
         "module_path": symbol.module_path,
         "language": "Rust",
         "kind": symbol.kind,
@@ -2833,6 +2839,8 @@ def symbol_to_record(repo_name: str, context: ParsedFileContext, symbol: RustSym
         "resolved_impl_trait_symbol_id": None,
         "resolved_impl_trait_qualified_name": None,
         "resolved_super_traits": [],
+        "summary_id": stable_id("sum", repo_name, "symbol", symbol_id),
+        "normalized_body_hash": None,
         "semantic_summary": {
             "direct_calls": [],
             "transitive_calls": [],
@@ -2844,6 +2852,31 @@ def symbol_to_record(repo_name: str, context: ParsedFileContext, symbol: RustSym
             "interprocedural_references": [],
         },
     }
+
+
+def enrich_symbol_artifact_metadata(
+    symbol_records: Sequence[Dict[str, object]],
+    statement_records: Sequence[Dict[str, object]],
+) -> None:
+    statements_by_symbol: DefaultDict[str, List[Dict[str, object]]] = defaultdict(list)
+    for statement in statement_records:
+        statements_by_symbol[str(statement["container_symbol_id"])].append(statement)
+
+    for symbol in symbol_records:
+        chunks = [
+            collapse_whitespace(str(statement.get("text") or ""))
+            for statement in sorted(
+                statements_by_symbol.get(symbol["symbol_id"], []),
+                key=lambda item: (
+                    int(item["span"]["start_line"]),
+                    int(item["span"]["start_column"]),
+                    str(item["statement_id"]),
+                ),
+            )
+            if str(statement.get("text") or "").strip()
+        ]
+        normalized_body = "\n".join(chunks) if chunks else collapse_whitespace(str(symbol.get("signature") or ""))
+        symbol["normalized_body_hash"] = hashlib.sha1(normalized_body.encode("utf-8")).hexdigest() if normalized_body else None
 
 
 def timestamp_now() -> str:

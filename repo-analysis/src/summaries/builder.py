@@ -5,10 +5,12 @@ from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Dict, Iterable, List, Tuple
 
-from symbols.indexer import timestamp_now
+from graph.store import write_graph_database
+from symbols.indexer import stable_id, timestamp_now
+from symbols.persistence import write_summary_database
 
 
-SCHEMA_VERSION = "0.1.0"
+SCHEMA_VERSION = "0.2.0"
 
 
 def build_summary_artifacts(
@@ -29,6 +31,7 @@ def build_summary_artifacts(
 
     incoming_counts, outgoing_counts = edge_counts(graph)
     project_summary = build_project_summary(repo_name, manifest, symbols, graph)
+    package_summaries = build_package_summaries(symbols)
     directory_summaries = build_directory_summaries(repo_map, symbols)
     file_summaries = build_file_summaries(symbols, symbols_by_path)
     symbol_summaries = build_symbol_summaries(symbol_records, incoming_counts, outgoing_counts)
@@ -38,10 +41,12 @@ def build_summary_artifacts(
         "repo": repo_name,
         "generated_at": timestamp_now(),
         "project": project_summary,
+        "packages": package_summaries,
         "directories": directory_summaries,
         "files": file_summaries,
         "symbols": symbol_summaries,
         "summary": {
+            "packages": len(package_summaries),
             "directories": len(directory_summaries),
             "files": len(file_summaries),
             "symbols": len(symbol_summaries),
@@ -55,6 +60,7 @@ def write_summary_artifacts(output_root: Path, repo_name: str, payload: Dict[str
 
     for filename, value in (
         ("project.json", payload["project"]),
+        ("packages.json", payload["packages"]),
         ("directories.json", payload["directories"]),
         ("files.json", payload["files"]),
         ("symbols.json", payload["symbols"]),
@@ -74,6 +80,7 @@ def load_summary_artifacts(summary_root: Path, repo_name: str) -> Dict[str, obje
     repo_root = summary_root / repo_name
     return {
         "project": load_json(repo_root / "project.json"),
+        "packages": load_json(repo_root / "packages.json"),
         "directories": load_json(repo_root / "directories.json"),
         "files": load_json(repo_root / "files.json"),
         "symbols": load_json(repo_root / "symbols.json"),
@@ -101,6 +108,7 @@ def build_project_summary(
         f"Parser-relevant source roots: {', '.join(source_roots) or 'none detected'}."
     )
     return {
+        "summary_id": stable_id("sum", repo_name, "project"),
         "repo": repo_name,
         "focus": focus,
         "analysis_surfaces": list(manifest.get("module_graph_seeds", {}).get("analysis_surfaces", [])),
@@ -111,6 +119,63 @@ def build_project_summary(
         "top_symbol_kinds": top_kinds,
         "summary": summary,
     }
+
+
+def build_package_summaries(symbols: Dict[str, object]) -> List[Dict[str, object]]:
+    rollups: Dict[str, Dict[str, object]] = defaultdict(
+        lambda: {
+            "files": set(),
+            "module_paths": set(),
+            "symbols": 0,
+            "public_symbols": 0,
+            "statements": 0,
+            "top_symbol_kinds": Counter(),
+        }
+    )
+    for file_record in symbols.get("files", []):
+        package_name = str(file_record.get("package_name") or file_record.get("crate") or "")
+        if not package_name:
+            continue
+        rollups[package_name]["files"].add(file_record["path"])
+        if file_record.get("module_path"):
+            rollups[package_name]["module_paths"].add(file_record["module_path"])
+
+    for symbol in symbols.get("symbols", []):
+        package_name = str(symbol.get("package_name") or symbol.get("crate") or "")
+        if not package_name:
+            continue
+        rollups[package_name]["symbols"] += 1
+        if str(symbol.get("visibility") or "").startswith("pub"):
+            rollups[package_name]["public_symbols"] += 1
+        rollups[package_name]["top_symbol_kinds"][symbol["kind"]] += 1
+
+    for statement in symbols.get("statements", []):
+        package_name = str(statement.get("crate") or "")
+        if not package_name:
+            continue
+        rollups[package_name]["statements"] += 1
+
+    summaries = []
+    for package_name, rollup in sorted(rollups.items()):
+        top_kinds = [kind for kind, _count in rollup["top_symbol_kinds"].most_common(4)]
+        summaries.append(
+            {
+                "summary_id": stable_id("sum", "package", package_name),
+                "package_name": package_name,
+                "files": len(rollup["files"]),
+                "symbols": rollup["symbols"],
+                "public_symbols": rollup["public_symbols"],
+                "statements": rollup["statements"],
+                "top_symbol_kinds": top_kinds,
+                "module_paths": sorted(rollup["module_paths"])[:8],
+                "summary": (
+                    f"{package_name} contains {len(rollup['files'])} files, "
+                    f"{rollup['symbols']} indexed symbols, and {rollup['statements']} statements. "
+                    f"Top symbol kinds: {', '.join(top_kinds) or 'none'}."
+                ),
+            }
+        )
+    return summaries
 
 
 def build_directory_summaries(repo_map: Dict[str, object], symbols: Dict[str, object]) -> List[Dict[str, object]]:
@@ -149,6 +214,7 @@ def build_directory_summaries(repo_map: Dict[str, object], symbols: Dict[str, ob
         tags = path_tags(path)
         summaries.append(
             {
+                "summary_id": stable_id("sum", "directory", path),
                 "path": path,
                 "depth": directory["depth"],
                 "files": rollup.get("files", 0),
@@ -182,8 +248,10 @@ def build_file_summaries(
         tags = path_tags(path)
         files.append(
             {
+                "summary_id": stable_id("sum", "file", path),
                 "path": path,
                 "crate": file_record.get("crate"),
+                "package_name": file_record.get("package_name"),
                 "module_path": file_record.get("module_path"),
                 "language": file_record.get("language"),
                 "symbols": len(file_symbols),
@@ -213,6 +281,7 @@ def build_symbol_summaries(
         outgoing = outgoing_counts.get(symbol["symbol_id"], Counter())
         summaries.append(
             {
+                "summary_id": symbol.get("summary_id") or stable_id("sum", "symbol", symbol["symbol_id"]),
                 "symbol_id": symbol["symbol_id"],
                 "path": symbol["path"],
                 "kind": symbol["kind"],
@@ -230,6 +299,115 @@ def build_symbol_summaries(
             }
         )
     return summaries
+
+
+def sync_summary_state(
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    payload: Dict[str, object],
+) -> None:
+    write_summary_database(parsed_root, repo_name, payload)
+    augment_graph_with_summaries(graph_root, repo_name, payload)
+
+
+def augment_graph_with_summaries(graph_root: Path, repo_name: str, payload: Dict[str, object]) -> None:
+    graph_path = graph_root / repo_name / "graph.json"
+    if not graph_path.exists():
+        return
+
+    graph = load_json(graph_path)
+    node_by_id = {node["node_id"]: node for node in graph.get("nodes", [])}
+    edge_ids = {edge["edge_id"] for edge in graph.get("edges", [])}
+
+    def append_summary_node(node_id: str, kind: str, title: str, path: str | None, symbol_id: str | None, summary: str) -> None:
+        if node_id in node_by_id:
+            return
+        node = {
+            "node_id": node_id,
+            "kind": kind,
+            "repo": repo_name,
+            "path": path,
+            "name": title,
+            "qualified_name": symbol_id,
+            "summary": summary,
+        }
+        graph.setdefault("nodes", []).append(node)
+        node_by_id[node_id] = node
+
+    def append_summary_edge(source_id: str, target_id: str, scope: str, path: str | None = None) -> None:
+        edge = {
+            "edge_id": stable_id("edge", repo_name, "SUMMARIZED_BY", source_id, target_id, scope),
+            "type": "SUMMARIZED_BY",
+            "from": source_id,
+            "to": target_id,
+            "metadata": {
+                "scope": scope,
+                "path": path,
+            },
+        }
+        if edge["edge_id"] in edge_ids:
+            return
+        edge_ids.add(edge["edge_id"])
+        graph.setdefault("edges", []).append(edge)
+
+    repo_node_id = stable_id("repo", repo_name)
+    project = payload.get("project") or {}
+    project_summary_id = str(project.get("summary_id") or stable_id("sum", repo_name, "project"))
+    append_summary_node(project_summary_id, "project_summary", repo_name, None, None, str(project.get("summary") or ""))
+    append_summary_edge(repo_node_id, project_summary_id, "project")
+
+    for package in payload.get("packages", []):
+        summary_id = str(package.get("summary_id"))
+        append_summary_node(summary_id, "package_summary", str(package.get("package_name") or summary_id), None, None, str(package.get("summary") or ""))
+        package_node_id = stable_id("pkg", repo_name, str(package.get("package_name") or ""))
+        if package_node_id in node_by_id:
+            append_summary_edge(package_node_id, summary_id, "package")
+
+    for directory in payload.get("directories", []):
+        summary_id = str(directory.get("summary_id"))
+        path = str(directory.get("path") or "")
+        append_summary_node(summary_id, "directory_summary", path or ".", path or None, None, str(directory.get("summary") or ""))
+        directory_node_id = stable_id("dir", repo_name, path or ".")
+        if directory_node_id in node_by_id:
+            append_summary_edge(directory_node_id, summary_id, "directory", path or None)
+
+    for file_summary in payload.get("files", []):
+        summary_id = str(file_summary.get("summary_id"))
+        path = str(file_summary.get("path") or "")
+        append_summary_node(summary_id, "file_summary", path, path or None, None, str(file_summary.get("summary") or ""))
+        file_node_id = stable_id("file", repo_name, path)
+        if file_node_id in node_by_id:
+            append_summary_edge(file_node_id, summary_id, "file", path)
+
+    for symbol_summary in payload.get("symbols", []):
+        summary_id = str(symbol_summary.get("summary_id"))
+        symbol_id = str(symbol_summary.get("symbol_id") or "")
+        append_summary_node(
+            summary_id,
+            "symbol_summary",
+            str(symbol_summary.get("qualified_name") or symbol_summary.get("name") or summary_id),
+            symbol_summary.get("path"),
+            symbol_id or None,
+            str(symbol_summary.get("summary") or ""),
+        )
+        if symbol_id in node_by_id:
+            append_summary_edge(symbol_id, summary_id, "symbol", symbol_summary.get("path"))
+
+    edge_counts = Counter(edge["type"] for edge in graph.get("edges", []))
+    graph["summary"] = {
+        **graph.get("summary", {}),
+        "nodes": len(graph.get("nodes", [])),
+        "edges": len(graph.get("edges", [])),
+        "edge_counts": [
+            {"type": edge_type, "count": count}
+            for edge_type, count in sorted(edge_counts.items())
+        ],
+    }
+    write_graph_database(graph_root, repo_name, graph)
+    with graph_path.open("w", encoding="utf-8") as handle:
+        json.dump(graph, handle, indent=2, sort_keys=False)
+        handle.write("\n")
 
 
 def edge_counts(graph: Dict[str, object]) -> Tuple[Dict[str, Counter], Dict[str, Counter]]:
