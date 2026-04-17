@@ -40,6 +40,7 @@ from graph.builder import build_graph_artifact
 from graph.query import load_graph_view_uncached
 from graph.store import write_graph_database
 from retrieval.engine import retrieve_context
+from rerank.fusion import rerank_candidates
 from search.indexer import build_search_index, search_documents
 from summaries.builder import build_summary_artifacts, load_summary_artifacts, sync_summary_state, write_summary_artifacts
 from symbols.indexer import build_symbol_index
@@ -155,6 +156,45 @@ def seed_demo_workspace(root: Path) -> dict[str, Path]:
 
 
 class SearchAndSummaryTest(unittest.TestCase):
+    def test_reranker_prefers_trait_symbol_over_field_for_trait_queries(self) -> None:
+        candidates = [
+            {
+                "kind": "symbol",
+                "name": "source",
+                "qualified_name": "yellowstone_vixen::Runtime::source",
+                "path": "crates/runtime/src/lib.rs",
+                "score": 4.2,
+                "metadata": {"kind": "field"},
+                "reasons": ["lexical"],
+            },
+            {
+                "kind": "symbol",
+                "name": "SourceTrait",
+                "qualified_name": "yellowstone_vixen::sources::SourceTrait",
+                "path": "crates/runtime/src/sources.rs",
+                "score": 3.9,
+                "metadata": {"kind": "trait"},
+                "reasons": ["lexical", "symbol-localization"],
+            },
+        ]
+
+        ranked = rerank_candidates(
+            candidates,
+            ["runtime", "source", "trait"],
+            query_profile={
+                "intent": "architecture",
+                "prefer_tags": ["runtime", "source", "trait"],
+                "prefer_symbol_kinds": ["source", "trait"],
+                "requested_symbol_kinds": ["trait"],
+                "prefer_symbols": False,
+                "prefer_docs": False,
+                "type_intent": True,
+                "member_intent": False,
+            },
+        )
+
+        self.assertEqual(ranked[0]["name"], "SourceTrait")
+
     def test_search_index_returns_symbol_hits(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = seed_demo_workspace(Path(tmpdir))

@@ -33,6 +33,8 @@ EDGE_BONUS = {
 ARCHITECTURE_HINTS = {"architecture", "datasource", "decoder", "extension", "handler", "macro", "parser", "runtime", "source", "trait"}
 DOC_HINTS = {"doc", "docs", "documentation", "overview", "readme", "summary"}
 SYMBOL_KIND_HINTS = {"enum", "function", "handler", "macro", "method", "module", "parser", "source", "struct", "trait", "type"}
+TYPE_HINTS = {"trait", "struct", "enum", "type", "class", "interface"}
+MEMBER_HINTS = {"field", "property", "member", "local", "variable", "param", "parameter", "method"}
 
 
 def retrieve_context(
@@ -347,6 +349,8 @@ def classify_query(tokens: Sequence[str], query: str) -> Dict[str, object]:
     token_set = {token.lower() for token in tokens}
     doc_intent = bool(token_set.intersection(DOC_HINTS))
     architecture_intent = bool(token_set.intersection(ARCHITECTURE_HINTS))
+    type_intent = bool(token_set.intersection(TYPE_HINTS))
+    member_intent = bool(token_set.intersection(MEMBER_HINTS))
     symbolish = "::" in query or (len(token_set) <= 2 and not doc_intent and not architecture_intent)
 
     if doc_intent:
@@ -362,8 +366,11 @@ def classify_query(tokens: Sequence[str], query: str) -> Dict[str, object]:
         "intent": intent,
         "prefer_tags": sorted(token for token in token_set if token in ARCHITECTURE_HINTS),
         "prefer_symbol_kinds": sorted(token for token in token_set if token in SYMBOL_KIND_HINTS),
+        "requested_symbol_kinds": sorted(token for token in token_set if token in TYPE_HINTS.union(MEMBER_HINTS)),
         "prefer_docs": doc_intent,
         "prefer_symbols": intent == "symbol",
+        "type_intent": type_intent,
+        "member_intent": member_intent,
     }
 
 
