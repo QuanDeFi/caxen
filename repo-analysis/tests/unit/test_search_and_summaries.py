@@ -35,13 +35,14 @@ from agents.toolkit import (
 from common.query_manifest import load_query_manifest
 from embeddings.indexer import build_embedding_index, query_embedding_index
 from evaluation.harness import export_benchmark_prompts, run_benchmarks, score_answer_bundles, score_external_answers
-from graph.builder import build_graph_artifact, write_graph_artifact
+from graph.builder import build_graph_artifact
+from graph.query import load_graph_view_uncached
 from graph.store import write_graph_database
 from retrieval.engine import retrieve_context
 from search.indexer import build_search_index, search_documents
-from summaries.builder import build_summary_artifacts, sync_summary_state, write_summary_artifacts
-from symbols.indexer import build_symbol_index, write_symbol_index
-from symbols.persistence import write_symbol_database
+from summaries.builder import build_summary_artifacts, load_summary_artifacts, sync_summary_state, write_summary_artifacts
+from symbols.indexer import build_symbol_index
+from symbols.persistence import load_symbol_index, write_symbol_database
 
 
 def seed_demo_workspace(root: Path) -> dict[str, Path]:
@@ -133,10 +134,8 @@ def seed_demo_workspace(root: Path) -> dict[str, Path]:
     )
 
     symbol_index = build_symbol_index("demo", repo_root, raw_root, path_prefixes=("src/lib.rs",))
-    write_symbol_index(parsed_root, "demo", symbol_index)
     write_symbol_database(parsed_root, "demo", symbol_index)
     graph = build_graph_artifact(symbol_index)
-    write_graph_artifact(graph_root, "demo", graph)
     write_graph_database(graph_root, "demo", graph)
     build_search_index("demo", repo_root, raw_root, parsed_root, search_root)
     build_embedding_index(search_root, "demo")
@@ -168,7 +167,7 @@ class SearchAndSummaryTest(unittest.TestCase):
     def test_parser_probe_and_embedding_sidecar_are_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = seed_demo_workspace(Path(tmpdir))
-            symbols = json.loads((paths["parsed_root"] / "demo" / "symbols.json").read_text(encoding="utf-8"))
+            symbols = load_symbol_index(paths["parsed_root"], "demo")
             query_manifest = load_query_manifest(paths["parsed_root"], "demo")
 
             self.assertIn("parser_backends", symbols)
@@ -248,7 +247,7 @@ class SearchAndSummaryTest(unittest.TestCase):
             directory_summary = summarize_path(paths["summary_root"], "demo", "src")
             self.assertEqual(directory_summary["kind"], "directory")
             self.assertEqual(directory_summary["summary"]["path"], "src")
-            packages = json.loads((paths["summary_root"] / "demo" / "packages.json").read_text(encoding="utf-8"))
+            packages = load_summary_artifacts(paths["summary_root"], "demo")["packages"]
             self.assertTrue(any(item["package_name"] == "demo-crate" for item in packages))
 
     def test_benchmark_harness_reports_answer_quality(self) -> None:
@@ -362,7 +361,7 @@ class SearchAndSummaryTest(unittest.TestCase):
             )
             self.assertEqual(subgraph["operation"], "neighbors")
 
-            graph_payload = json.loads((paths["graph_root"] / "demo" / "graph.json").read_text(encoding="utf-8"))
+            graph_payload = load_graph_view_uncached(paths["graph_root"], "demo")["payload"]
             node_kinds = {item["kind"] for item in graph_payload["nodes"]}
             self.assertIn("directory", node_kinds)
             self.assertIn("package", node_kinds)

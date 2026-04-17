@@ -37,9 +37,9 @@ def update_query_manifest(
     payload["schema_version"] = SCHEMA_VERSION
     payload["repo"] = repo_name
     payload["generated_at"] = timestamp_now()
-    payload.setdefault("artifacts", {}).update(artifacts or {})
-    payload.setdefault("features", {}).update(features or {})
-    payload.setdefault("build", {}).update(build or {})
+    merge_section(payload.setdefault("artifacts", {}), artifacts or {})
+    merge_section(payload.setdefault("features", {}), features or {})
+    merge_section(payload.setdefault("build", {}), build or {})
     write_query_manifest(parsed_root, repo_name, payload)
     return payload
 
@@ -54,3 +54,11 @@ def write_query_manifest(parsed_root: Path, repo_name: str, payload: Dict[str, o
 
 def manifest_path(parsed_root: Path, repo_name: str) -> Path:
     return parsed_root / repo_name / "query_manifest.json"
+
+
+def merge_section(target: Dict[str, object], updates: Dict[str, object]) -> None:
+    for key, value in updates.items():
+        if value is None:
+            target.pop(key, None)
+            continue
+        target[key] = value

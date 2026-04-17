@@ -25,13 +25,13 @@ Optional:
 ## Main outputs
 
 - `data/raw/<repo>/`: raw inventory
-- `data/parsed/<repo>/`: symbols, SQLite, parquet status, query manifest
-- `data/graph/<repo>/`: graph JSON and SQLite
-- `data/search/<repo>/`: lexical search, BM25/Tantivy, and optional embeddings
-- `data/summaries/<repo>/`: project/package/directory/file/symbol summaries
+- `data/parsed/<repo>/`: `symbols.sqlite3`, parquet status, query manifest
+- `data/graph/<repo>/`: `graph.sqlite3`
+- `data/search/<repo>/`: `search.sqlite3`, BM25/Tantivy, and optional embeddings
+- `data/summaries/<repo>/`: `summary.sqlite3`
 - `data/eval/`: benchmark and scoring output
 
-`build-summaries` also syncs summary rows into `symbols.sqlite3` and summary nodes/edges into the graph.
+Default runtime is DB-first. JSON exports are optional with `--emit-json` on `build-index`, `build-search`, and `build-summaries`.
 
 ## CLI
 
@@ -105,8 +105,8 @@ Recommended order:
 
 Prefer these artifacts:
 
-- `data/summaries/<repo>/`
-- `data/parsed/<repo>/symbols.json`
+- `data/summaries/<repo>/summary.sqlite3`
+- `data/parsed/<repo>/symbols.sqlite3`
 - `data/graph/<repo>/graph.sqlite3`
 - `data/search/<repo>/search.sqlite3`
 - `data/search/<repo>/tantivy/`

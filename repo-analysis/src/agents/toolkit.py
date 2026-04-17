@@ -35,6 +35,7 @@ from search.indexer import (
     search_documents_scoped,
 )
 from summaries.builder import load_summary_artifacts
+from symbols.persistence import load_symbol_by_id, load_symbols_by_ids
 
 
 DEFAULT_REPOS = ("carbon", "yellowstone-vixen")
@@ -300,9 +301,7 @@ def get_enclosing_context(
     if not symbol:
         return {"repo": repo_name, "query": symbol_query, "context": None}
 
-    all_symbols = load_json(parsed_root / repo_name / "symbols.json").get("symbols", [])
-    symbols_by_id = {item["symbol_id"]: item for item in all_symbols}
-    container = symbols_by_id.get(symbol.get("container_symbol_id"))
+    container = load_symbol_by_id(parsed_root, repo_name, str(symbol.get("container_symbol_id") or ""))
     return {
         "repo": repo_name,
         "query": symbol_query,
@@ -682,11 +681,6 @@ def themed_results(
     return list_documents(search_root, repo_name, limit=limit, kinds=("directory", "file"))
 
 
-def load_json(path: Path) -> Dict[str, object]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
 def compare_repo_from_agent_cache(
     search_root: Path,
     repo_name: str,
@@ -824,12 +818,8 @@ def kind_compare_rank(kind: str) -> int:
 
 
 def resolve_symbol_query(search_root: Path, parsed_root: Path, repo_name: str, symbol_query: str) -> Optional[Dict[str, object]]:
-    symbols = load_json(parsed_root / repo_name / "symbols.json").get("symbols", [])
     if symbol_query.startswith("sym:"):
-        for item in symbols:
-            if item["symbol_id"] == symbol_query:
-                return item
-        return None
+        return load_symbol_by_id(parsed_root, repo_name, symbol_query)
 
     matches = graph_where_defined(search_root, parsed_root, repo_name, symbol_query, limit=1)["matches"]
     if not matches:
@@ -837,10 +827,7 @@ def resolve_symbol_query(search_root: Path, parsed_root: Path, repo_name: str, s
     symbol_id = matches[0]["symbol_id"]
     if not symbol_id:
         return None
-    for item in symbols:
-        if item["symbol_id"] == symbol_id:
-            return item
-    return None
+    return load_symbol_by_id(parsed_root, repo_name, symbol_id)
 
 
 def describe_symbol_row(symbol: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:

@@ -6,9 +6,15 @@ from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, Iterable, List, Tuple
 
+from graph.query import load_graph_view_uncached
 from graph.store import write_graph_database
 from symbols.indexer import stable_id, timestamp_now
-from symbols.persistence import write_summary_database
+from symbols.persistence import (
+    load_summary_bundle_database,
+    load_symbol_index,
+    write_summary_bundle_database,
+    write_summary_database,
+)
 
 
 SCHEMA_VERSION = "0.2.0"
@@ -44,14 +50,14 @@ def build_summary_artifacts(
         files=len(repo_map.get("files", [])),
         directories=len(repo_map.get("directories", [])),
     )
-    symbols = load_json(parsed_root / repo_name / "symbols.json")
+    symbols = load_symbol_index(parsed_root, repo_name)
     emit(
         "loaded_symbols",
         files=len(symbols.get("files", [])),
         symbols=len(symbols.get("symbols", [])),
         statements=len(symbols.get("statements", [])),
     )
-    graph = load_json(graph_root / repo_name / "graph.json")
+    graph = load_graph_view_uncached(graph_root, repo_name)["payload"]
     emit(
         "loaded_graph",
         nodes=len(graph.get("nodes", [])),
@@ -101,9 +107,21 @@ def build_summary_artifacts(
     return payload
 
 
-def write_summary_artifacts(output_root: Path, repo_name: str, payload: Dict[str, object]) -> None:
+def write_summary_artifacts(
+    output_root: Path,
+    repo_name: str,
+    payload: Dict[str, object],
+    *,
+    emit_json: bool = False,
+) -> None:
     repo_output = output_root / repo_name
     repo_output.mkdir(parents=True, exist_ok=True)
+    write_summary_bundle_database(output_root, repo_name, payload)
+
+    if not emit_json:
+        for filename in ("project.json", "packages.json", "directories.json", "files.json", "symbols.json", "summary_manifest.json"):
+            remove_file_if_exists(repo_output / filename)
+        return
 
     for filename, value in (
         ("project.json", payload["project"]),
@@ -124,15 +142,7 @@ def write_summary_artifacts(output_root: Path, repo_name: str, payload: Dict[str
 
 
 def load_summary_artifacts(summary_root: Path, repo_name: str) -> Dict[str, object]:
-    repo_root = summary_root / repo_name
-    return {
-        "project": load_json(repo_root / "project.json"),
-        "packages": load_json(repo_root / "packages.json"),
-        "directories": load_json(repo_root / "directories.json"),
-        "files": load_json(repo_root / "files.json"),
-        "symbols": load_json(repo_root / "symbols.json"),
-        "manifest": load_json(repo_root / "summary_manifest.json"),
-    }
+    return load_summary_bundle_database(summary_root, repo_name)
 
 
 def build_project_summary(
@@ -353,17 +363,21 @@ def sync_summary_state(
     graph_root: Path,
     repo_name: str,
     payload: Dict[str, object],
+    *,
+    emit_json: bool = False,
 ) -> None:
     write_summary_database(parsed_root, repo_name, payload)
-    augment_graph_with_summaries(graph_root, repo_name, payload)
+    augment_graph_with_summaries(graph_root, repo_name, payload, emit_json=emit_json)
 
 
-def augment_graph_with_summaries(graph_root: Path, repo_name: str, payload: Dict[str, object]) -> None:
-    graph_path = graph_root / repo_name / "graph.json"
-    if not graph_path.exists():
-        return
-
-    graph = load_json(graph_path)
+def augment_graph_with_summaries(
+    graph_root: Path,
+    repo_name: str,
+    payload: Dict[str, object],
+    *,
+    emit_json: bool = False,
+) -> None:
+    graph = load_graph_view_uncached(graph_root, repo_name)["payload"]
     node_by_id = {node["node_id"]: node for node in graph.get("nodes", [])}
     edge_ids = {edge["edge_id"] for edge in graph.get("edges", [])}
 
@@ -452,9 +466,11 @@ def augment_graph_with_summaries(graph_root: Path, repo_name: str, payload: Dict
         ],
     }
     write_graph_database(graph_root, repo_name, graph)
-    with graph_path.open("w", encoding="utf-8") as handle:
-        json.dump(graph, handle, indent=2, sort_keys=False)
-        handle.write("\n")
+    if emit_json:
+        graph_path = graph_root / repo_name / "graph.json"
+        with graph_path.open("w", encoding="utf-8") as handle:
+            json.dump(graph, handle, indent=2, sort_keys=False)
+            handle.write("\n")
 
 
 def edge_counts(graph: Dict[str, object]) -> Tuple[Dict[str, Counter], Dict[str, Counter]]:
@@ -502,3 +518,10 @@ def infer_repo_focus(repo_name: str) -> str:
 def load_json(path: Path) -> Dict[str, object]:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def remove_file_if_exists(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return

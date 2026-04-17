@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from graph.query import load_graph_view_uncached
 from embeddings.indexer import query_embedding_index
 from rerank.fusion import rerank_candidates
 from search.indexer import search_documents, tokenize
 from symbols.indexer import stable_id
+from symbols.persistence import load_symbol_index
 from summaries.builder import load_summary_artifacts
 
 
@@ -62,8 +63,8 @@ def retrieve_context(
     embedding_results = (
         query_embedding_index(search_root, repo_name, query, limit=max(limit, 5)) if effective_use_embeddings else []
     )
-    graph = load_json(graph_root / repo_name / "graph.json")
-    symbols = load_json(parsed_root / repo_name / "symbols.json")
+    graph = load_graph_view_uncached(graph_root, repo_name)["payload"]
+    symbols = load_symbol_index(parsed_root, repo_name)
     symbol_by_id = {item["symbol_id"]: item for item in symbols.get("symbols", [])}
     symbols_by_path = defaultdict(list)
     for symbol in symbols.get("symbols", []):
@@ -413,8 +414,3 @@ def sort_candidates(candidates: Sequence[Dict[str, object]]) -> List[Dict[str, o
             str(item.get("qualified_name") or item.get("title") or ""),
         ),
     )
-
-
-def load_json(path: Path) -> Dict[str, object]:
-    with path.open("r", encoding="utf-8") as handle:
-        return json.load(handle)

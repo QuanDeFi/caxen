@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -117,8 +118,7 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             self.assertTrue((search_root / "yellowstone-vixen" / "search.sqlite3").exists())
             self.assertTrue((search_root / "yellowstone-vixen" / "tantivy").exists())
             self.assertTrue((search_root / "yellowstone-vixen" / "embedding_index.json").exists())
-            self.assertTrue((summary_root / "yellowstone-vixen" / "project.json").exists())
-            self.assertTrue((summary_root / "yellowstone-vixen" / "packages.json").exists())
+            self.assertTrue((summary_root / "yellowstone-vixen" / "summary.sqlite3").exists())
 
             find_symbol = subprocess.run(
                 [
@@ -470,9 +470,10 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             expand_payload = json.loads(expand.stdout)
             self.assertEqual(expand_payload["operation"], "neighbors")
 
-            graph_json = json.loads((graph_root / "yellowstone-vixen" / "graph.json").read_text(encoding="utf-8"))
-            node_kinds = {item["kind"] for item in graph_json["nodes"]}
-            edge_types = {item["type"] for item in graph_json["edges"]}
+            with sqlite3.connect(graph_root / "yellowstone-vixen" / "graph.sqlite3") as connection:
+                cursor = connection.cursor()
+                node_kinds = {row[0] for row in cursor.execute("SELECT DISTINCT kind FROM nodes").fetchall()}
+                edge_types = {row[0] for row in cursor.execute("SELECT DISTINCT type FROM edges").fetchall()}
             self.assertIn("directory", node_kinds)
             self.assertIn("package", node_kinds)
             self.assertIn("project_summary", node_kinds)

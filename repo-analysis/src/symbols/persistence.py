@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional, Sequence
 
 
 def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, object]) -> None:
@@ -328,6 +329,7 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
         connection.commit()
     finally:
         connection.close()
+    _load_symbol_index_cached.cache_clear()
 
 
 def write_symbol_parquet_bundle(output_root: Path, repo_name: str, payload: Dict[str, object]) -> None:
@@ -513,6 +515,103 @@ def write_summary_database(output_root: Path, repo_name: str, payload: Dict[str,
         connection.commit()
 
 
+def write_summary_bundle_database(output_root: Path, repo_name: str, payload: Dict[str, object]) -> None:
+    repo_output = output_root / repo_name
+    repo_output.mkdir(parents=True, exist_ok=True)
+    target = repo_output / "summary.sqlite3"
+    if target.exists():
+        target.unlink()
+
+    summary_rows = build_summary_rows(repo_name, payload)
+    with sqlite3.connect(target) as connection:
+        cursor = connection.cursor()
+        cursor.executescript(
+            """
+            CREATE TABLE metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            CREATE TABLE summaries (
+                summary_id TEXT PRIMARY KEY,
+                repo TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                path TEXT,
+                symbol_id TEXT,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                payload_json TEXT NOT NULL
+            );
+
+            CREATE INDEX idx_summaries_scope ON summaries(scope);
+            CREATE INDEX idx_summaries_path ON summaries(path);
+            CREATE INDEX idx_summaries_symbol_id ON summaries(symbol_id);
+            """
+        )
+        cursor.executemany(
+            "INSERT INTO metadata(key, value) VALUES (?, ?)",
+            [
+                ("schema_version", str(payload["schema_version"])),
+                ("repo", str(payload["repo"])),
+                ("generated_at", str(payload["generated_at"])),
+                ("summary_json", json.dumps(payload.get("summary", {}))),
+            ],
+        )
+        cursor.executemany(
+            """
+            INSERT INTO summaries(summary_id, repo, scope, path, symbol_id, title, summary, payload_json)
+            VALUES (:summary_id, :repo, :scope, :path, :symbol_id, :title, :summary, :payload_json)
+            """,
+            summary_rows,
+        )
+        connection.commit()
+
+
+def load_summary_bundle_database(summary_root: Path, repo_name: str) -> Dict[str, object]:
+    sqlite_path = summary_root / repo_name / "summary.sqlite3"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.row_factory = sqlite3.Row
+        metadata_rows = dict(connection.execute("SELECT key, value FROM metadata").fetchall())
+        rows = connection.execute(
+            """
+            SELECT summary_id, repo, scope, path, symbol_id, title, summary, payload_json
+            FROM summaries
+            ORDER BY scope, COALESCE(path, ''), COALESCE(symbol_id, ''), title
+            """
+        ).fetchall()
+
+    payload = {
+        "project": {},
+        "packages": [],
+        "directories": [],
+        "files": [],
+        "symbols": [],
+        "manifest": {
+            "schema_version": metadata_rows.get("schema_version"),
+            "repo": metadata_rows.get("repo") or repo_name,
+            "generated_at": metadata_rows.get("generated_at"),
+            "summary": json.loads(metadata_rows.get("summary_json") or "{}"),
+        },
+    }
+
+    scope_map = {
+        "package": "packages",
+        "directory": "directories",
+        "file": "files",
+        "symbol": "symbols",
+    }
+    for row in rows:
+        record = json.loads(row["payload_json"] or "{}")
+        scope = str(row["scope"])
+        if scope == "project":
+            payload["project"] = record
+            continue
+        collection = scope_map.get(scope)
+        if collection:
+            payload[collection].append(record)
+    return payload
+
+
 def build_summary_rows(repo_name: str, payload: Dict[str, object]) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
 
@@ -557,3 +656,277 @@ def write_json(path: Path, payload: Dict[str, object]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=False)
         handle.write("\n")
+
+
+def load_symbol_index(parsed_root: Path, repo_name: str) -> Dict[str, object]:
+    return _load_symbol_index_cached(str(parsed_root.resolve()), repo_name)
+
+
+@lru_cache(maxsize=8)
+def _load_symbol_index_cached(parsed_root: str, repo_name: str) -> Dict[str, object]:
+    sqlite_path = Path(parsed_root) / repo_name / "symbols.sqlite3"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.row_factory = sqlite3.Row
+        metadata_rows = dict(connection.execute("SELECT key, value FROM metadata").fetchall())
+        files = [
+            {
+                "path": row["path"],
+                "crate": row["crate"],
+                "package_name": row["package_name"],
+                "module_path": row["module_path"],
+                "language": row["language"],
+                "symbols": int(row["symbols"]),
+                "imports": int(row["imports"]),
+                "primary_parser_backend": row["primary_parser_backend"],
+                "content_hash": row["content_hash"],
+            }
+            for row in connection.execute(
+                """
+                SELECT path, crate, package_name, module_path, language, symbols, imports, primary_parser_backend, content_hash
+                FROM files
+                ORDER BY path
+                """
+            )
+        ]
+        symbols = [
+            unflatten_symbol_row(row)
+            for row in connection.execute(
+                """
+                SELECT symbol_id, repo, path, crate, package_name, module_path, language, kind, name, qualified_name,
+                       start_line, start_column, end_line, end_column, signature, docstring, visibility,
+                       container_symbol_id, container_qualified_name, statement_id, scope_symbol_id,
+                       reference_target_symbol_id, attributes_json, is_test, impl_target, impl_trait,
+                       super_traits_json, resolved_impl_target_symbol_id, resolved_impl_target_qualified_name,
+                       resolved_impl_trait_symbol_id, resolved_impl_trait_qualified_name,
+                       resolved_super_traits_json, summary_id, normalized_body_hash, semantic_summary_json
+                FROM symbols
+                ORDER BY path, start_line, start_column, qualified_name, symbol_id
+                """
+            )
+        ]
+        imports = [
+            unflatten_import_row(row)
+            for row in connection.execute(
+                """
+                SELECT import_id, repo, path, crate, module_path, language, visibility, signature,
+                       raw_target, target, normalized_target, alias, start_line, start_column,
+                       end_line, end_column, container_symbol_id, container_qualified_name,
+                       target_symbol_id, target_qualified_name, target_kind
+                FROM imports
+                ORDER BY path, start_line, start_column, import_id
+                """
+            )
+        ]
+        references = [
+            unflatten_reference_row(row)
+            for row in connection.execute(
+                """
+                SELECT reference_id, repo, path, crate, module_path, language, kind, name,
+                       qualified_name_hint, start_line, start_column, end_line, end_column,
+                       container_symbol_id, container_qualified_name, scope_symbol_id,
+                       target_symbol_id, target_qualified_name, target_kind
+                FROM symbol_references
+                ORDER BY path, start_line, start_column, reference_id
+                """
+            )
+        ]
+        statements = [
+            unflatten_statement_row(row)
+            for row in connection.execute(
+                """
+                SELECT statement_id, repo, path, crate, module_path, language, kind, text,
+                       start_line, start_column, end_line, end_column, container_symbol_id,
+                       container_qualified_name, parent_statement_id, previous_statement_id,
+                       nesting_depth, defines_json, reads_json, writes_json, calls_json
+                FROM statements
+                ORDER BY path, start_line, start_column, statement_id
+                """
+            )
+        ]
+
+    return {
+        "schema_version": metadata_rows.get("schema_version"),
+        "repo": metadata_rows.get("repo") or repo_name,
+        "generated_at": metadata_rows.get("generated_at"),
+        "parser": metadata_rows.get("parser"),
+        "primary_parser_backends": json.loads(metadata_rows.get("primary_parser_backends_json") or "[]"),
+        "parser_backends": json.loads(metadata_rows.get("parser_backends_json") or "{}"),
+        "source_roots": json.loads(metadata_rows.get("source_roots_json") or "[]"),
+        "path_prefixes": json.loads(metadata_rows.get("path_prefixes_json") or "[]"),
+        "summary": json.loads(metadata_rows.get("summary_json") or "{}"),
+        "files": files,
+        "symbols": symbols,
+        "imports": imports,
+        "references": references,
+        "statements": statements,
+    }
+
+
+def load_symbol_by_id(parsed_root: Path, repo_name: str, symbol_id: str) -> Optional[Dict[str, object]]:
+    sqlite_path = parsed_root / repo_name / "symbols.sqlite3"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT symbol_id, repo, path, crate, package_name, module_path, language, kind, name, qualified_name,
+                   start_line, start_column, end_line, end_column, signature, docstring, visibility,
+                   container_symbol_id, container_qualified_name, statement_id, scope_symbol_id,
+                   reference_target_symbol_id, attributes_json, is_test, impl_target, impl_trait,
+                   super_traits_json, resolved_impl_target_symbol_id, resolved_impl_target_qualified_name,
+                   resolved_impl_trait_symbol_id, resolved_impl_trait_qualified_name,
+                   resolved_super_traits_json, summary_id, normalized_body_hash, semantic_summary_json
+            FROM symbols
+            WHERE symbol_id = ?
+            """,
+            [symbol_id],
+        ).fetchone()
+    return unflatten_symbol_row(row) if row else None
+
+
+def load_symbols_by_ids(parsed_root: Path, repo_name: str, symbol_ids: Sequence[str]) -> Dict[str, Dict[str, object]]:
+    symbol_ids = [symbol_id for symbol_id in symbol_ids if symbol_id]
+    if not symbol_ids:
+        return {}
+    sqlite_path = parsed_root / repo_name / "symbols.sqlite3"
+    placeholders = ",".join("?" for _ in symbol_ids)
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            f"""
+            SELECT symbol_id, repo, path, crate, package_name, module_path, language, kind, name, qualified_name,
+                   start_line, start_column, end_line, end_column, signature, docstring, visibility,
+                   container_symbol_id, container_qualified_name, statement_id, scope_symbol_id,
+                   reference_target_symbol_id, attributes_json, is_test, impl_target, impl_trait,
+                   super_traits_json, resolved_impl_target_symbol_id, resolved_impl_target_qualified_name,
+                   resolved_impl_trait_symbol_id, resolved_impl_trait_qualified_name,
+                   resolved_super_traits_json, summary_id, normalized_body_hash, semantic_summary_json
+            FROM symbols
+            WHERE symbol_id IN ({placeholders})
+            """,
+            symbol_ids,
+        ).fetchall()
+    return {str(row["symbol_id"]): unflatten_symbol_row(row) for row in rows}
+
+
+def unflatten_symbol_row(row: sqlite3.Row) -> Dict[str, object]:
+    return {
+        "symbol_id": row["symbol_id"],
+        "repo": row["repo"],
+        "path": row["path"],
+        "crate": row["crate"],
+        "package_name": row["package_name"],
+        "module_path": row["module_path"],
+        "language": row["language"],
+        "kind": row["kind"],
+        "name": row["name"],
+        "qualified_name": row["qualified_name"],
+        "span": {
+            "start_line": int(row["start_line"]),
+            "start_column": int(row["start_column"]),
+            "end_line": int(row["end_line"]),
+            "end_column": int(row["end_column"]),
+        },
+        "signature": row["signature"],
+        "docstring": row["docstring"],
+        "visibility": row["visibility"],
+        "container_symbol_id": row["container_symbol_id"],
+        "container_qualified_name": row["container_qualified_name"],
+        "statement_id": row["statement_id"],
+        "scope_symbol_id": row["scope_symbol_id"],
+        "reference_target_symbol_id": row["reference_target_symbol_id"],
+        "attributes": json.loads(row["attributes_json"] or "[]"),
+        "is_test": bool(row["is_test"]),
+        "impl_target": row["impl_target"],
+        "impl_trait": row["impl_trait"],
+        "super_traits": json.loads(row["super_traits_json"] or "[]"),
+        "resolved_impl_target_symbol_id": row["resolved_impl_target_symbol_id"],
+        "resolved_impl_target_qualified_name": row["resolved_impl_target_qualified_name"],
+        "resolved_impl_trait_symbol_id": row["resolved_impl_trait_symbol_id"],
+        "resolved_impl_trait_qualified_name": row["resolved_impl_trait_qualified_name"],
+        "resolved_super_traits": json.loads(row["resolved_super_traits_json"] or "[]"),
+        "summary_id": row["summary_id"],
+        "normalized_body_hash": row["normalized_body_hash"],
+        "semantic_summary": json.loads(row["semantic_summary_json"] or "{}"),
+    }
+
+
+def unflatten_import_row(row: sqlite3.Row) -> Dict[str, object]:
+    return {
+        "import_id": row["import_id"],
+        "repo": row["repo"],
+        "path": row["path"],
+        "crate": row["crate"],
+        "module_path": row["module_path"],
+        "language": row["language"],
+        "visibility": row["visibility"],
+        "signature": row["signature"],
+        "raw_target": row["raw_target"],
+        "target": row["target"],
+        "normalized_target": row["normalized_target"],
+        "alias": row["alias"],
+        "span": {
+            "start_line": int(row["start_line"]),
+            "start_column": int(row["start_column"]),
+            "end_line": int(row["end_line"]),
+            "end_column": int(row["end_column"]),
+        },
+        "container_symbol_id": row["container_symbol_id"],
+        "container_qualified_name": row["container_qualified_name"],
+        "target_symbol_id": row["target_symbol_id"],
+        "target_qualified_name": row["target_qualified_name"],
+        "target_kind": row["target_kind"],
+    }
+
+
+def unflatten_reference_row(row: sqlite3.Row) -> Dict[str, object]:
+    return {
+        "reference_id": row["reference_id"],
+        "repo": row["repo"],
+        "path": row["path"],
+        "crate": row["crate"],
+        "module_path": row["module_path"],
+        "language": row["language"],
+        "kind": row["kind"],
+        "name": row["name"],
+        "qualified_name_hint": row["qualified_name_hint"],
+        "span": {
+            "start_line": int(row["start_line"]),
+            "start_column": int(row["start_column"]),
+            "end_line": int(row["end_line"]),
+            "end_column": int(row["end_column"]),
+        },
+        "container_symbol_id": row["container_symbol_id"],
+        "container_qualified_name": row["container_qualified_name"],
+        "scope_symbol_id": row["scope_symbol_id"],
+        "target_symbol_id": row["target_symbol_id"],
+        "target_qualified_name": row["target_qualified_name"],
+        "target_kind": row["target_kind"],
+    }
+
+
+def unflatten_statement_row(row: sqlite3.Row) -> Dict[str, object]:
+    return {
+        "statement_id": row["statement_id"],
+        "repo": row["repo"],
+        "path": row["path"],
+        "crate": row["crate"],
+        "module_path": row["module_path"],
+        "language": row["language"],
+        "kind": row["kind"],
+        "text": row["text"],
+        "span": {
+            "start_line": int(row["start_line"]),
+            "start_column": int(row["start_column"]),
+            "end_line": int(row["end_line"]),
+            "end_column": int(row["end_column"]),
+        },
+        "container_symbol_id": row["container_symbol_id"],
+        "container_qualified_name": row["container_qualified_name"],
+        "parent_statement_id": row["parent_statement_id"],
+        "previous_statement_id": row["previous_statement_id"],
+        "nesting_depth": int(row["nesting_depth"]),
+        "defines": json.loads(row["defines_json"] or "[]"),
+        "reads": json.loads(row["reads_json"] or "[]"),
+        "writes": json.loads(row["writes_json"] or "[]"),
+        "calls": json.loads(row["calls_json"] or "[]"),
+    }

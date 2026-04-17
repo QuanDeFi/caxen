@@ -17,14 +17,14 @@ Upstream source trees are preserved as close to upstream as possible. New analys
 
 - raw inventory generation for the upstream repos
 - Rust symbol and statement extraction
-- graph artifacts in JSON and SQLite
-- lexical search artifacts in SQLite and Tantivy
+- DB-first graph artifacts in SQLite, with optional JSON export
+- DB-first lexical search artifacts in SQLite and Tantivy
 - optional embedding sidecar artifacts
-- deterministic repo, package, directory, file, and symbol summaries
+- DB-first repo, package, directory, file, and symbol summaries
 - graph query, retrieval-planning, answer-bundle, and evaluation CLI commands
 - native worker support for tree-sitter inspection and BM25 indexing
 - body/doc chunk indexing for symbol-level retrieval
-- summary sync back into the graph and `symbols.sqlite3`
+- summary sync back into the graph, `symbols.sqlite3`, and `summary.sqlite3`
 - explicit lookup/navigation tools for files, lexical search, signatures, bodies, enclosing context, implementations, inheritance, and bounded subgraph expansion
 
 The main implementation lives under:

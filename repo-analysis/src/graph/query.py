@@ -9,6 +9,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from search.indexer import search_documents
 from symbols.indexer import stable_id
+from symbols.persistence import load_symbol_index
 
 
 EDGE_DEFAULTS = {
@@ -48,6 +49,24 @@ NON_SYMBOL_NODE_KINDS = {
     "symbol_ref",
     "trait_ref",
     "type_ref",
+}
+CACHEABLE_NEIGHBOR_EDGE_TYPES = {
+    "CALLS",
+    "DECLARES",
+    "DEFINES",
+    "IMPLEMENTS",
+    "IMPORTS",
+    "INHERITS",
+    "NEIGHBOR",
+    "OVERRIDES",
+    "READS",
+    "REFS",
+    "REFERENCES",
+    "SUMMARIZED_BY",
+    "TESTS",
+    "USES",
+    "USES_TYPE",
+    "WRITES",
 }
 
 
@@ -157,14 +176,15 @@ def execute_cached_graph_query(
     request: Dict[str, object],
 ) -> Optional[Dict[str, object]]:
     operation = str(request.get("operation") or "neighbors")
-    if operation != "symbol_summary":
-        return None
-
     sqlite_path = graph_root / repo_name / "graph.sqlite3"
     if not sqlite_path.exists():
         return None
 
     limit = max(int(request.get("limit") or 20), 1)
+    depth = max(int(request.get("depth") or 1), 0)
+    direction = str(request.get("direction") or EDGE_DIRECTIONS.get(operation, "both"))
+    edge_types = tuple(request.get("edge_types") or EDGE_DEFAULTS.get(operation, ()))
+    node_kinds = tuple(request.get("node_kinds") or ())
     seeds = resolve_cached_seed_matches(search_root, repo_name, request.get("seed") or request.get("query"), limit=max(limit, 10))
     if not seeds:
         return {
@@ -172,11 +192,11 @@ def execute_cached_graph_query(
             "operation": operation,
             "graph_backend": "sqlite",
             "request": {
-                "direction": str(request.get("direction") or EDGE_DIRECTIONS.get(operation, "both")),
-                "edge_types": list(request.get("edge_types") or EDGE_DEFAULTS.get(operation, ())),
-                "depth": max(int(request.get("depth") or 1), 0),
+                "direction": direction,
+                "edge_types": list(edge_types),
+                "depth": depth,
                 "limit": limit,
-                "node_kinds": list(request.get("node_kinds") or ()),
+                "node_kinds": list(node_kinds),
                 "seed": request.get("seed") or request.get("query"),
             },
             "seeds": [],
@@ -185,7 +205,18 @@ def execute_cached_graph_query(
 
     with sqlite3.connect(sqlite_path) as connection:
         connection.row_factory = sqlite3.Row
-        if not has_symbol_summary_cache(connection):
+        if operation == "symbol_summary":
+            if not has_symbol_summary_cache(connection):
+                return None
+        elif operation in {"callers_of", "callees_of"}:
+            if not has_neighbor_cache(connection):
+                return None
+        elif operation == "neighbors":
+            if not can_use_cached_neighbors(request, depth=depth, edge_types=edge_types):
+                return None
+            if not has_neighbor_cache(connection):
+                return None
+        else:
             return None
         seed_rows = load_nodes_by_id(connection, [seed["node_id"] for seed in seeds])
         described_seeds = [describe_sqlite_node(seed_rows[seed["node_id"]]) for seed in seeds if seed["node_id"] in seed_rows]
@@ -195,17 +226,27 @@ def execute_cached_graph_query(
             "operation": operation,
             "graph_backend": "sqlite",
             "request": {
-                "direction": str(request.get("direction") or EDGE_DIRECTIONS.get(operation, "both")),
-                "edge_types": list(request.get("edge_types") or EDGE_DEFAULTS.get(operation, ())),
-                "depth": max(int(request.get("depth") or 1), 0),
+                "direction": direction,
+                "edge_types": list(edge_types),
+                "depth": depth,
                 "limit": limit,
-                "node_kinds": list(request.get("node_kinds") or ()),
+                "node_kinds": list(node_kinds),
                 "seed": request.get("seed") or request.get("query"),
             },
             "seeds": described_seeds,
         }
 
-        payload["results"] = build_cached_symbol_summaries(connection, seeds, limit=limit)
+        if operation == "symbol_summary":
+            payload["results"] = build_cached_symbol_summaries(connection, seeds, limit=limit)
+        else:
+            payload["results"] = build_cached_neighbors(
+                connection,
+                seeds,
+                direction=direction,
+                edge_types=edge_types,
+                node_kinds=node_kinds,
+                limit=limit,
+            )
         return payload
 
 
@@ -540,6 +581,27 @@ def has_symbol_summary_cache(connection: sqlite3.Connection) -> bool:
     return row is not None
 
 
+def has_neighbor_cache(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='neighbor_cache'"
+    ).fetchone()
+    return row is not None
+
+
+def can_use_cached_neighbors(
+    request: Dict[str, object],
+    *,
+    depth: int,
+    edge_types: Sequence[str],
+) -> bool:
+    if depth > 1:
+        return False
+    requested_edge_types = set(edge_types)
+    if not requested_edge_types:
+        return False
+    return requested_edge_types.issubset(CACHEABLE_NEIGHBOR_EDGE_TYPES)
+
+
 def load_graph_json(path: Path) -> Dict[str, object]:
     payload = load_json(path)
     return graph_indexes(payload, backend="json")
@@ -621,12 +683,7 @@ def edge_sort_key(edge: Dict[str, object]) -> Tuple[str, str, str]:
 
 
 def load_symbols_payload(parsed_root: Path, repo_name: str) -> Dict[str, object]:
-    return _load_symbols_payload_cached(str(parsed_root.resolve()), repo_name)
-
-
-@lru_cache(maxsize=8)
-def _load_symbols_payload_cached(parsed_root: str, repo_name: str) -> Dict[str, object]:
-    return load_json(Path(parsed_root) / repo_name / "symbols.json")
+    return load_symbol_index(parsed_root, repo_name)
 
 
 def resolve_seed_matches(
@@ -1352,6 +1409,105 @@ def build_cached_symbol_summaries(
         )
     )
     return results
+
+
+def build_cached_neighbors(
+    connection: sqlite3.Connection,
+    seeds: Sequence[Dict[str, object]],
+    *,
+    direction: str,
+    edge_types: Sequence[str],
+    node_kinds: Sequence[str],
+    limit: int,
+) -> List[Dict[str, object]]:
+    seed_ids = [seed["node_id"] for seed in seeds]
+    if not seed_ids:
+        return []
+    cache_rows = connection.execute(
+        f"""
+        SELECT node_id, outgoing_edges_json, incoming_edges_json
+        FROM neighbor_cache
+        WHERE node_id IN ({','.join('?' for _ in seed_ids)})
+        """,
+        seed_ids,
+    ).fetchall()
+    cache_by_id = {str(row["node_id"]): row for row in cache_rows}
+    requested_edge_types = set(edge_types)
+    requested_node_kinds = set(node_kinds)
+    raw_entries: list[dict[str, object]] = []
+    referenced_ids: set[str] = set()
+
+    for seed in seeds:
+        row = cache_by_id.get(seed["node_id"])
+        if not row:
+            continue
+        if direction in {"outgoing", "both"}:
+            for entry in json.loads(row["outgoing_edges_json"] or "[]"):
+                if requested_edge_types and str(entry.get("edge_type") or "") not in requested_edge_types:
+                    continue
+                raw_entries.append(
+                    {
+                        "direction": "outgoing",
+                        "arrived_via": "seed",
+                        "depth": 1,
+                        "edge_type": str(entry.get("edge_type") or ""),
+                        "neighbor_id": str(entry.get("neighbor_id") or ""),
+                        "edge_metadata": dict(entry.get("edge_metadata") or {}),
+                    }
+                )
+                referenced_ids.add(str(entry.get("neighbor_id") or ""))
+        if direction in {"incoming", "both"}:
+            for entry in json.loads(row["incoming_edges_json"] or "[]"):
+                if requested_edge_types and str(entry.get("edge_type") or "") not in requested_edge_types:
+                    continue
+                raw_entries.append(
+                    {
+                        "direction": "incoming",
+                        "arrived_via": "seed",
+                        "depth": 1,
+                        "edge_type": str(entry.get("edge_type") or ""),
+                        "neighbor_id": str(entry.get("neighbor_id") or ""),
+                        "edge_metadata": dict(entry.get("edge_metadata") or {}),
+                    }
+                )
+                referenced_ids.add(str(entry.get("neighbor_id") or ""))
+
+    node_rows = load_nodes_by_id(connection, list(referenced_ids))
+    results: list[Dict[str, object]] = []
+    seen = set()
+    for entry in raw_entries:
+        neighbor_id = str(entry["neighbor_id"])
+        if not neighbor_id:
+            continue
+        row = node_rows.get(neighbor_id)
+        if not row:
+            continue
+        if requested_node_kinds and str(row["kind"]) not in requested_node_kinds:
+            continue
+        dedupe_key = (neighbor_id, str(entry["edge_type"]), str(entry["direction"]), 1)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        results.append(
+            {
+                "depth": 1,
+                "direction": str(entry["direction"]),
+                "edge_type": str(entry["edge_type"]),
+                "arrived_via": "seed",
+                **describe_sqlite_node(row),
+                "edge_metadata": dict(entry["edge_metadata"]),
+            }
+        )
+
+    results.sort(
+        key=lambda item: (
+            int(item["depth"]),
+            str(item["edge_type"]),
+            str(item.get("path") or ""),
+            str(item.get("qualified_name") or item.get("name") or ""),
+        )
+    )
+    return results[:limit]
 
 
 def hydrate_cached_node_list(

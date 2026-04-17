@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import tempfile
 import time
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
@@ -10,6 +11,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence
 from common.native_tool import build_bm25_index, native_worker_available, query_bm25_index
 from common.query_manifest import update_query_manifest
 from symbols.indexer import stable_id, timestamp_now
+from symbols.persistence import load_symbol_index
 
 
 SCHEMA_VERSION = "0.3.0"
@@ -47,6 +49,8 @@ def build_search_index(
     raw_root: Path,
     parsed_root: Path,
     output_root: Path,
+    *,
+    emit_json: bool = False,
     progress_callback: Callable[[Dict[str, object]], None] | None = None,
 ) -> Dict[str, object]:
     started = time.perf_counter()
@@ -72,7 +76,7 @@ def build_search_index(
         files=len(repo_map.get("files", [])),
         directories=len(repo_map.get("directories", [])),
     )
-    symbols = load_json(parsed_root / repo_name / "symbols.json")
+    symbols = load_symbol_index(parsed_root, repo_name)
     emit(
         "loaded_symbols",
         parsed_files=len(symbols.get("files", [])),
@@ -90,16 +94,23 @@ def build_search_index(
     if sqlite_path.exists():
         sqlite_path.unlink()
     emit("writing_sqlite")
-    write_search_database(sqlite_path, documents)
-
-    documents_path = repo_output / "documents.jsonl"
-    emit("writing_documents_jsonl")
-    write_documents_jsonl(documents_path, documents)
-
     agent_cache = build_agent_cache(repo_name, documents)
-    agent_cache_path = repo_output / "agent_cache.json"
-    emit("writing_agent_cache", entries=agent_cache["summary"]["entries"])
-    write_json(agent_cache_path, agent_cache)
+    write_search_database(sqlite_path, documents, agent_cache)
+
+    documents_path: Path | None = None
+    temp_documents_path: Path | None = None
+    if emit_json:
+        documents_path = repo_output / "documents.jsonl"
+        emit("writing_documents_jsonl")
+        write_documents_jsonl(documents_path, documents)
+        emit("writing_agent_cache", entries=agent_cache["summary"]["entries"])
+        write_json(repo_output / "agent_cache.json", agent_cache)
+    else:
+        remove_file_if_exists(repo_output / "documents.jsonl")
+        remove_file_if_exists(repo_output / "agent_cache.json")
+        tempdir = Path(tempfile.mkdtemp(prefix=f"repo-analysis-search-{repo_name}-"))
+        temp_documents_path = tempdir / "documents.jsonl"
+        write_documents_jsonl(temp_documents_path, documents)
 
     bm25_artifact = {
         "available": False,
@@ -109,7 +120,7 @@ def build_search_index(
     if native_worker_available():
         emit("building_bm25")
         try:
-            bm25_artifact = build_bm25_index(documents_path, tantivy_dir)
+            bm25_artifact = build_bm25_index(documents_path or temp_documents_path, tantivy_dir)
             bm25_artifact["available"] = True
             bm25_artifact["built"] = True
             emit("bm25_built", built=True)
@@ -130,8 +141,8 @@ def build_search_index(
         "generated_at": timestamp_now(),
         "artifacts": {
             "sqlite": "search.sqlite3",
-            "documents_jsonl": "documents.jsonl",
-            "agent_cache": "agent_cache.json",
+            "documents_jsonl": "documents.jsonl" if emit_json else None,
+            "agent_cache": "agent_cache.json" if emit_json else None,
             "tantivy": "tantivy" if bm25_artifact.get("built") else None,
         },
         "bm25": bm25_artifact,
@@ -155,18 +166,26 @@ def build_search_index(
         repo_name,
         artifacts={
             "search_sqlite": "data/search/{repo}/search.sqlite3".format(repo=repo_name),
-            "search_documents_jsonl": "data/search/{repo}/documents.jsonl".format(repo=repo_name),
-            "search_agent_cache": "data/search/{repo}/agent_cache.json".format(repo=repo_name),
+            "search_documents_jsonl": "data/search/{repo}/documents.jsonl".format(repo=repo_name) if emit_json else None,
+            "search_agent_cache": "data/search/{repo}/agent_cache.json".format(repo=repo_name) if emit_json else None,
             "search_tantivy": "data/search/{repo}/tantivy".format(repo=repo_name) if bm25_artifact.get("built") else None,
         },
         features={
             "bm25_default": bool(bm25_artifact.get("built")),
+            "agent_cache_sqlite": True,
         },
         build={
             "bm25": bm25_artifact,
+            "search_json_exports": emit_json,
         },
     )
     emit("build_completed", documents=len(documents), bm25_built=bool(bm25_artifact.get("built")))
+    if temp_documents_path is not None:
+        try:
+            temp_documents_path.unlink()
+            temp_documents_path.parent.rmdir()
+        except OSError:
+            pass
     return payload
 
 
@@ -323,7 +342,42 @@ def load_search_manifest(search_root: Path, repo_name: str) -> Dict[str, object]
 
 
 def load_agent_cache(search_root: Path, repo_name: str) -> Dict[str, object]:
-    return load_json(search_root / repo_name / "agent_cache.json")
+    sqlite_path = search_root / repo_name / "search.sqlite3"
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.row_factory = sqlite3.Row
+        metadata_rows = dict(connection.execute("SELECT key, value FROM metadata").fetchall())
+        rows = connection.execute(
+            """
+            SELECT doc_id, kind, path, name, qualified_name, symbol_id, title, preview, metadata_json, search_text
+            FROM agent_cache_entries
+            ORDER BY kind, COALESCE(path, ''), COALESCE(qualified_name, ''), COALESCE(name, '')
+            """
+        ).fetchall()
+    entries = [
+        {
+            "doc_id": row["doc_id"],
+            "kind": row["kind"],
+            "path": row["path"],
+            "name": row["name"],
+            "qualified_name": row["qualified_name"],
+            "symbol_id": row["symbol_id"],
+            "title": row["title"],
+            "preview": row["preview"],
+            "metadata": json.loads(row["metadata_json"] or "{}"),
+            "search_text": row["search_text"],
+        }
+        for row in rows
+    ]
+    return {
+        "schema_version": AGENT_CACHE_SCHEMA_VERSION,
+        "repo": repo_name,
+        "generated_at": metadata_rows.get("generated_at"),
+        "summary": {
+            "entries": len(entries),
+            "kinds": dict(sorted(Counter(entry["kind"] for entry in entries).items())),
+        },
+        "entries": entries,
+    }
 
 
 def build_documents(
@@ -763,6 +817,13 @@ def write_json(path: Path, payload: Dict[str, object]) -> None:
         handle.write("\n")
 
 
+def remove_file_if_exists(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+
 def build_agent_cache(repo_name: str, documents: Sequence[Dict[str, object]]) -> Dict[str, object]:
     entries = []
     for document in documents:
@@ -898,7 +959,11 @@ def row_to_result(row: sqlite3.Row, *, score: float) -> Dict[str, object]:
     }
 
 
-def write_search_database(sqlite_path: Path, documents: Sequence[Dict[str, object]]) -> None:
+def write_search_database(
+    sqlite_path: Path,
+    documents: Sequence[Dict[str, object]],
+    agent_cache: Dict[str, object],
+) -> None:
     with sqlite3.connect(sqlite_path) as connection:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -935,6 +1000,25 @@ def write_search_database(sqlite_path: Path, documents: Sequence[Dict[str, objec
         connection.execute("CREATE INDEX idx_documents_kind ON documents(kind)")
         connection.execute("CREATE INDEX idx_documents_path ON documents(path)")
         connection.execute("CREATE INDEX idx_documents_symbol_id ON documents(symbol_id)")
+        connection.execute(
+            """
+            CREATE TABLE agent_cache_entries (
+                doc_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                path TEXT,
+                name TEXT,
+                qualified_name TEXT,
+                symbol_id TEXT,
+                title TEXT,
+                preview TEXT,
+                metadata_json TEXT NOT NULL,
+                search_text TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("CREATE INDEX idx_agent_cache_kind ON agent_cache_entries(kind)")
+        connection.execute("CREATE INDEX idx_agent_cache_path ON agent_cache_entries(path)")
+        connection.execute("CREATE INDEX idx_agent_cache_symbol_id ON agent_cache_entries(symbol_id)")
 
         connection.executemany(
             "INSERT INTO metadata(key, value) VALUES(?, ?)",
@@ -942,6 +1026,7 @@ def write_search_database(sqlite_path: Path, documents: Sequence[Dict[str, objec
                 ("schema_version", SCHEMA_VERSION),
                 ("generated_at", timestamp_now()),
                 ("documents", str(len(documents))),
+                ("agent_cache_entries", str(int(agent_cache.get("summary", {}).get("entries") or 0))),
             ],
         )
         connection.executemany(
@@ -981,6 +1066,29 @@ def write_search_database(sqlite_path: Path, documents: Sequence[Dict[str, objec
                     document["qualified_name"],
                 )
                 for document in documents
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO agent_cache_entries(
+                doc_id, kind, path, name, qualified_name, symbol_id, title, preview, metadata_json, search_text
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    entry["doc_id"],
+                    entry["kind"],
+                    entry["path"],
+                    entry["name"],
+                    entry["qualified_name"],
+                    entry["symbol_id"],
+                    entry["title"],
+                    entry["preview"],
+                    json.dumps(entry["metadata"], sort_keys=True),
+                    entry["search_text"],
+                )
+                for entry in agent_cache.get("entries", [])
             ],
         )
         connection.commit()

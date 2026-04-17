@@ -135,6 +135,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=100,
         help="Emit progress logs every N parsed files.",
     )
+    build_index.add_argument(
+        "--emit-json",
+        action="store_true",
+        help="Also write JSON export artifacts for parsed symbols and graph.",
+    )
 
     build_search = subparsers.add_parser(
         "build-search",
@@ -145,6 +150,11 @@ def build_parser() -> argparse.ArgumentParser:
     build_search.add_argument("--parsed-root", required=True)
     build_search.add_argument("--search-root", required=True)
     build_search.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
+    build_search.add_argument(
+        "--emit-json",
+        action="store_true",
+        help="Also write JSON export artifacts such as documents.jsonl and agent_cache.json.",
+    )
 
     build_summaries = subparsers.add_parser(
         "build-summaries",
@@ -155,6 +165,11 @@ def build_parser() -> argparse.ArgumentParser:
     build_summaries.add_argument("--graph-root", required=True)
     build_summaries.add_argument("--summary-root", required=True)
     build_summaries.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
+    build_summaries.add_argument(
+        "--emit-json",
+        action="store_true",
+        help="Also write JSON export artifacts for summary bundles.",
+    )
 
     build_embeddings = subparsers.add_parser(
         "build-embeddings",
@@ -623,18 +638,22 @@ def handle_build_index(args: argparse.Namespace) -> int:
                 f"graph_edges={graph_artifact.get('summary', {}).get('edges', 0)}"
             ),
         )
-        write_symbol_index(parsed_root, repo_name, symbol_index)
         write_symbol_database(parsed_root, repo_name, symbol_index)
         write_symbol_parquet_bundle(parsed_root, repo_name, symbol_index)
-        write_graph_artifact(graph_root, repo_name, graph_artifact)
+        if args.emit_json:
+            write_symbol_index(parsed_root, repo_name, symbol_index)
+            write_graph_artifact(graph_root, repo_name, graph_artifact)
+        else:
+            remove_file_if_exists(parsed_root / repo_name / "symbols.json")
+            remove_file_if_exists(graph_root / repo_name / "graph.json")
         graph_db_path = write_graph_database(graph_root, repo_name, graph_artifact)
         update_query_manifest(
             parsed_root,
             repo_name,
             artifacts={
-                "symbols_json": f"data/parsed/{repo_name}/symbols.json",
+                "symbols_json": f"data/parsed/{repo_name}/symbols.json" if args.emit_json else None,
                 "symbols_sqlite3": f"data/parsed/{repo_name}/symbols.sqlite3",
-                "graph_json": f"data/graph/{repo_name}/graph.json",
+                "graph_json": f"data/graph/{repo_name}/graph.json" if args.emit_json else None,
                 "graph_sqlite3": f"data/graph/{repo_name}/graph.sqlite3",
             },
             features={
@@ -649,6 +668,7 @@ def handle_build_index(args: argparse.Namespace) -> int:
                 "native_worker": native_worker,
                 "path_prefixes": list(path_prefixes),
                 "graph_database": graph_db_path.name,
+                "json_exports": args.emit_json,
             },
         )
 
@@ -688,6 +708,13 @@ def emit_build_progress(progress_path: Path, payload: Dict[str, object], *, log_
 
 def timestamp_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def remove_file_if_exists(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
 
 
 def handle_build_search(args: argparse.Namespace) -> int:
@@ -738,6 +765,7 @@ def handle_build_search(args: argparse.Namespace) -> int:
             raw_root,
             parsed_root,
             search_root,
+            emit_json=args.emit_json,
             progress_callback=progress_callback,
         )
         emit_build_progress(
@@ -796,7 +824,7 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
             graph_root,
             progress_callback=progress_callback,
         )
-        write_summary_artifacts(summary_root, repo_name, payload)
+        write_summary_artifacts(summary_root, repo_name, payload, emit_json=args.emit_json)
         emit_build_progress(
             progress_path,
             {
@@ -809,7 +837,7 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
                 f"elapsed_ms={round((time.perf_counter() - started) * 1000, 3):.1f}"
             ),
         )
-        sync_summary_state(parsed_root, graph_root, repo_name, payload)
+        sync_summary_state(parsed_root, graph_root, repo_name, payload, emit_json=args.emit_json)
         emit_build_progress(
             progress_path,
             {
@@ -826,11 +854,12 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
             parsed_root,
             repo_name,
             artifacts={
-                "summary_project": f"data/summaries/{repo_name}/project.json",
-                "summary_packages": f"data/summaries/{repo_name}/packages.json",
-                "summary_directories": f"data/summaries/{repo_name}/directories.json",
-                "summary_files": f"data/summaries/{repo_name}/files.json",
-                "summary_symbols": f"data/summaries/{repo_name}/symbols.json",
+                "summary_sqlite3": f"data/summaries/{repo_name}/summary.sqlite3",
+                "summary_project": f"data/summaries/{repo_name}/project.json" if args.emit_json else None,
+                "summary_packages": f"data/summaries/{repo_name}/packages.json" if args.emit_json else None,
+                "summary_directories": f"data/summaries/{repo_name}/directories.json" if args.emit_json else None,
+                "summary_files": f"data/summaries/{repo_name}/files.json" if args.emit_json else None,
+                "summary_symbols": f"data/summaries/{repo_name}/symbols.json" if args.emit_json else None,
             },
             features={
                 "summary_graph_nodes": True,
@@ -839,6 +868,7 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
             build={
                 "summary_schema_version": payload["schema_version"],
                 "summary_counts": payload["summary"],
+                "summary_json_exports": args.emit_json,
             },
         )
         emit_build_progress(
