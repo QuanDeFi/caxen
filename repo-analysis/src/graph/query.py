@@ -59,6 +59,9 @@ def execute_graph_query(
     request: Dict[str, object],
 ) -> Dict[str, object]:
     operation = str(request.get("operation") or "neighbors")
+    cached_response = execute_cached_graph_query(search_root, parsed_root, graph_root, repo_name, request)
+    if cached_response is not None:
+        return cached_response
     limit = max(int(request.get("limit") or 20), 1)
     depth = max(int(request.get("depth") or 1), 0)
     direction = str(request.get("direction") or EDGE_DIRECTIONS.get(operation, "both"))
@@ -144,6 +147,66 @@ def execute_graph_query(
         limit=limit,
     )
     return payload
+
+
+def execute_cached_graph_query(
+    search_root: Path,
+    parsed_root: Path,
+    graph_root: Path,
+    repo_name: str,
+    request: Dict[str, object],
+) -> Optional[Dict[str, object]]:
+    operation = str(request.get("operation") or "neighbors")
+    if operation != "symbol_summary":
+        return None
+
+    sqlite_path = graph_root / repo_name / "graph.sqlite3"
+    if not sqlite_path.exists():
+        return None
+
+    limit = max(int(request.get("limit") or 20), 1)
+    seeds = resolve_cached_seed_matches(search_root, repo_name, request.get("seed") or request.get("query"), limit=max(limit, 10))
+    if not seeds:
+        return {
+            "repo": repo_name,
+            "operation": operation,
+            "graph_backend": "sqlite",
+            "request": {
+                "direction": str(request.get("direction") or EDGE_DIRECTIONS.get(operation, "both")),
+                "edge_types": list(request.get("edge_types") or EDGE_DEFAULTS.get(operation, ())),
+                "depth": max(int(request.get("depth") or 1), 0),
+                "limit": limit,
+                "node_kinds": list(request.get("node_kinds") or ()),
+                "seed": request.get("seed") or request.get("query"),
+            },
+            "seeds": [],
+            "results": [],
+        }
+
+    with sqlite3.connect(sqlite_path) as connection:
+        connection.row_factory = sqlite3.Row
+        if not has_symbol_summary_cache(connection):
+            return None
+        seed_rows = load_nodes_by_id(connection, [seed["node_id"] for seed in seeds])
+        described_seeds = [describe_sqlite_node(seed_rows[seed["node_id"]]) for seed in seeds if seed["node_id"] in seed_rows]
+
+        payload = {
+            "repo": repo_name,
+            "operation": operation,
+            "graph_backend": "sqlite",
+            "request": {
+                "direction": str(request.get("direction") or EDGE_DIRECTIONS.get(operation, "both")),
+                "edge_types": list(request.get("edge_types") or EDGE_DEFAULTS.get(operation, ())),
+                "depth": max(int(request.get("depth") or 1), 0),
+                "limit": limit,
+                "node_kinds": list(request.get("node_kinds") or ()),
+                "seed": request.get("seed") or request.get("query"),
+            },
+            "seeds": described_seeds,
+        }
+
+        payload["results"] = build_cached_symbol_summaries(connection, seeds, limit=limit)
+        return payload
 
 
 def where_defined(
@@ -470,6 +533,13 @@ def load_graph_view_uncached(graph_root: Path, repo_name: str) -> Dict[str, obje
     return load_graph_json(graph_root / repo_name / "graph.json")
 
 
+def has_symbol_summary_cache(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='symbol_summary_cache'"
+    ).fetchone()
+    return row is not None
+
+
 def load_graph_json(path: Path) -> Dict[str, object]:
     payload = load_json(path)
     return graph_indexes(payload, backend="json")
@@ -585,10 +655,12 @@ def resolve_seed_matches(
             node = node_by_id.get(str(seed["node_id"]))
             return [node] if node else []
         if seed.get("qualified_name"):
-            matches = direct_symbol_matches(symbols_payload.get("symbols", []), str(seed["qualified_name"]).lower())
+            raw_query = str(seed["qualified_name"])
+            matches = direct_symbol_matches(symbols_payload.get("symbols", []), raw_query, raw_query.lower())
             return [node_by_id[item["symbol_id"]] for item in matches if item["symbol_id"] in node_by_id][:limit]
         if seed.get("name"):
-            matches = direct_symbol_matches(symbols_payload.get("symbols", []), str(seed["name"]).lower())
+            raw_query = str(seed["name"])
+            matches = direct_symbol_matches(symbols_payload.get("symbols", []), raw_query, raw_query.lower())
             return [node_by_id[item["symbol_id"]] for item in matches if item["symbol_id"] in node_by_id][:limit]
         if seed.get("path"):
             return resolve_path_nodes(node_by_id, str(seed["path"]), limit=limit)
@@ -623,6 +695,104 @@ def resolve_seed_matches(
         seen.add(node["node_id"])
         matches.append(node)
     return matches[:limit]
+
+
+def resolve_cached_seed_matches(
+    search_root: Path,
+    repo_name: str,
+    seed: object,
+    *,
+    limit: int,
+) -> List[Dict[str, object]]:
+    if seed is None:
+        return []
+    if isinstance(seed, dict):
+        if seed.get("symbol_id"):
+            return [{"node_id": str(seed["symbol_id"])}]
+        if seed.get("node_id"):
+            return [{"node_id": str(seed["node_id"])}]
+        if seed.get("qualified_name"):
+            return resolve_cached_search_matches(search_root, repo_name, str(seed["qualified_name"]), limit=limit)
+        if seed.get("name"):
+            return resolve_cached_search_matches(search_root, repo_name, str(seed["name"]), limit=limit)
+        if seed.get("path"):
+            return resolve_cached_path_matches(search_root, repo_name, str(seed["path"]), limit=limit)
+        return []
+    if not isinstance(seed, str):
+        return []
+    query = seed.strip()
+    if not query:
+        return []
+    if query.startswith("sym:"):
+        return [{"node_id": query}]
+    return resolve_cached_search_matches(search_root, repo_name, query, limit=limit)
+
+
+def resolve_cached_search_matches(
+    search_root: Path,
+    repo_name: str,
+    query: str,
+    *,
+    limit: int,
+) -> List[Dict[str, object]]:
+    normalized = query.lower()
+    results = search_documents(search_root, repo_name, query, limit=max(limit * 4, 40), kinds=("symbol",))
+    scored = []
+    seen = set()
+    for result in results:
+        symbol_id = str(result.get("symbol_id") or "")
+        if not symbol_id or symbol_id in seen:
+            continue
+        seen.add(symbol_id)
+        qualified_name = str(result.get("qualified_name") or "")
+        name = str(result.get("name") or "")
+        terminal = qualified_name.split("::")[-1] if qualified_name else ""
+        score = 0
+        if qualified_name == query:
+            score += 120
+        if name == query:
+            score += 100
+        if terminal == query:
+            score += 90
+        if qualified_name.lower() == normalized:
+            score += 80
+        if name.lower() == normalized:
+            score += 70
+        if terminal.lower() == normalized:
+            score += 60
+        score += int(float(result.get("score") or 0.0) * 10)
+        scored.append((score, symbol_id, qualified_name, name))
+    scored.sort(key=lambda item: (-item[0], item[2], item[3]))
+    return [{"node_id": item[1]} for item in scored[:limit]]
+
+
+def resolve_cached_path_matches(
+    search_root: Path,
+    repo_name: str,
+    path_query: str,
+    *,
+    limit: int,
+) -> List[Dict[str, object]]:
+    results = search_documents(search_root, repo_name, path_query, limit=max(limit * 4, 40), kinds=("symbol", "file"))
+    scored = []
+    seen = set()
+    for result in results:
+        node_id = str(result.get("symbol_id") or "")
+        if not node_id and str(result.get("kind") or "") == "file" and result.get("path"):
+            node_id = stable_file_id(repo_name, str(result["path"]))
+        if not node_id or node_id in seen:
+            continue
+        seen.add(node_id)
+        path = str(result.get("path") or "")
+        score = 0
+        if path == path_query:
+            score += 120
+        elif path.startswith(f"{path_query}/"):
+            score += 80
+        score += int(float(result.get("score") or 0.0) * 10)
+        scored.append((score, node_id, path))
+    scored.sort(key=lambda item: (-item[0], item[2]))
+    return [{"node_id": item[1]} for item in scored[:limit]]
 
 
 def resolve_symbol_matches(
@@ -1087,6 +1257,23 @@ def describe_node(node: Dict[str, object], symbol_by_id: Dict[str, Dict[str, obj
     return payload
 
 
+def describe_sqlite_node(row: sqlite3.Row) -> Dict[str, object]:
+    metadata = json.loads(row["metadata_json"] or "{}")
+    payload = {
+        "node_id": row["node_id"],
+        "kind": row["kind"],
+        "path": row["path"],
+        "name": row["name"],
+        "qualified_name": row["qualified_name"],
+        "symbol_id": row["node_id"] if str(row["node_id"]).startswith("sym:") else None,
+        "span": metadata.get("span"),
+        "container_qualified_name": metadata.get("container_qualified_name"),
+        "signature": metadata.get("signature"),
+        "visibility": metadata.get("visibility"),
+    }
+    return payload
+
+
 def describe_symbol(symbol: Dict[str, object]) -> Dict[str, object]:
     return {
         "symbol_id": symbol["symbol_id"],
@@ -1098,6 +1285,114 @@ def describe_symbol(symbol: Dict[str, object]) -> Dict[str, object]:
         "container_qualified_name": symbol.get("container_qualified_name"),
         "signature": symbol.get("signature"),
     }
+
+
+def load_nodes_by_id(connection: sqlite3.Connection, node_ids: Sequence[str]) -> Dict[str, sqlite3.Row]:
+    if not node_ids:
+        return {}
+    rows = connection.execute(
+        f"SELECT node_id, kind, repo, path, name, qualified_name, metadata_json FROM nodes WHERE node_id IN ({','.join('?' for _ in node_ids)})",
+        list(node_ids),
+    ).fetchall()
+    return {str(row["node_id"]): row for row in rows}
+
+
+def build_cached_symbol_summaries(
+    connection: sqlite3.Connection,
+    seeds: Sequence[Dict[str, object]],
+    *,
+    limit: int,
+) -> List[Dict[str, object]]:
+    seed_ids = [seed["node_id"] for seed in seeds[:limit]]
+    cache_rows = connection.execute(
+        f"""
+        SELECT node_id, incoming_counts_json, outgoing_counts_json, direct_calls_json, reads_json, writes_json, refs_json, statements_json
+        FROM symbol_summary_cache
+        WHERE node_id IN ({','.join('?' for _ in seed_ids)})
+        """,
+        seed_ids,
+    ).fetchall()
+    cache_by_id = {str(row["node_id"]): row for row in cache_rows}
+    referenced_ids: set[str] = set()
+    for row in cache_rows:
+        for column in ("direct_calls_json", "reads_json", "writes_json", "refs_json", "statements_json"):
+            referenced_ids.update(json.loads(row[column] or "[]"))
+    node_rows = load_nodes_by_id(connection, list(set(seed_ids) | referenced_ids))
+
+    results = []
+    for seed in seeds[:limit]:
+        row = cache_by_id.get(seed["node_id"])
+        seed_row = node_rows.get(seed["node_id"])
+        if not row or not seed_row:
+            continue
+        described_seed = describe_sqlite_node(seed_row)
+        direct_calls = hydrate_cached_node_list(node_rows, json.loads(row["direct_calls_json"] or "[]"))
+        reads = hydrate_cached_node_list(node_rows, json.loads(row["reads_json"] or "[]"))
+        writes = hydrate_cached_node_list(node_rows, json.loads(row["writes_json"] or "[]"))
+        refs = hydrate_cached_node_list(node_rows, json.loads(row["refs_json"] or "[]"))
+        statements = hydrate_cached_statements(node_rows, json.loads(row["statements_json"] or "[]"))
+        results.append(
+            {
+                **described_seed,
+                "incoming_edge_counts": json.loads(row["incoming_counts_json"] or "{}"),
+                "outgoing_edge_counts": json.loads(row["outgoing_counts_json"] or "{}"),
+                "direct_calls": direct_calls,
+                "reads": reads,
+                "writes": writes,
+                "references": refs,
+                "defining_statements": statements,
+                "summary": summarize_symbol(described_seed, direct_calls, reads, writes, refs, statements),
+            }
+        )
+    results.sort(
+        key=lambda item: (
+            kind_rank(str(item.get("kind") or "")),
+            str(item.get("path") or ""),
+            str(item.get("qualified_name") or item.get("name") or ""),
+        )
+    )
+    return results
+
+
+def hydrate_cached_node_list(
+    node_rows: Dict[str, sqlite3.Row],
+    node_ids: Sequence[str],
+) -> List[Dict[str, object]]:
+    results = []
+    for node_id in node_ids:
+        row = node_rows.get(node_id)
+        if not row:
+            continue
+        results.append(describe_sqlite_node(row))
+    return results
+
+
+def hydrate_cached_statements(
+    node_rows: Dict[str, sqlite3.Row],
+    statement_ids: Sequence[str],
+) -> List[Dict[str, object]]:
+    results = []
+    for node_id in statement_ids:
+        row = node_rows.get(node_id)
+        if not row:
+            continue
+        metadata = json.loads(row["metadata_json"] or "{}")
+        described = describe_sqlite_node(row)
+        described["statement_id"] = described["node_id"]
+        described["text"] = metadata.get("text")
+        described["container_symbol_id"] = metadata.get("container_symbol_id")
+        described["container_qualified_name"] = metadata.get("container_qualified_name")
+        described["line"] = int(str(described.get("name") or "0").split("@L")[-1]) if "@L" in str(described.get("name") or "") else 0
+        described["defines"] = []
+        described["reads"] = []
+        described["writes"] = []
+        described["refs"] = []
+        described["calls"] = []
+        described["control_predecessors"] = []
+        described["control_successors"] = []
+        results.append(described)
+    results.sort(key=lambda item: (str(item.get("path") or ""), int(item.get("line") or 0), str(item.get("statement_id") or "")))
+    return results
 
 
 def count_edge_targets(
