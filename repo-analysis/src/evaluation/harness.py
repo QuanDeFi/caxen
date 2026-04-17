@@ -111,16 +111,49 @@ def run_benchmarks(
     limit: int = 5,
     modes: Sequence[str] = DEFAULT_MODES,
     benchmarks: Optional[Sequence[Dict[str, object]]] = None,
+    progress_callback=None,
 ) -> Dict[str, object]:
+    started = time.perf_counter()
     benchmark_cases = list(benchmarks or DEFAULT_BENCHMARKS)
     selected_repos = set(repos or [item["repo"] for item in benchmark_cases])
     cases = [item for item in benchmark_cases if item["repo"] in selected_repos]
     selected_modes = tuple(modes or DEFAULT_MODES)
+    total_runs = len(cases) * len(selected_modes)
+
+    def emit(event: str, **extra: object) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                "event": event,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+                "cases": len(cases),
+                "modes": len(selected_modes),
+                "total_runs": total_runs,
+                **extra,
+            }
+        )
+
+    emit("run_started", repos=sorted(selected_repos))
 
     runs = []
+    completed_runs = 0
     for case in cases:
         for mode in selected_modes:
+            emit("case_started", repo=case["repo"], case_name=case["name"], mode=mode, completed_runs=completed_runs)
             runs.append(run_case(case, mode, search_root, graph_root, parsed_root, summary_root, limit))
+            completed_runs += 1
+            latest = runs[-1]
+            emit(
+                "case_completed",
+                repo=case["repo"],
+                case_name=case["name"],
+                mode=mode,
+                completed_runs=completed_runs,
+                exact_hit=latest["exact_hit"],
+                path_hit=latest["path_hit"],
+                latency_ms=latest["latency_ms"],
+            )
 
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -131,6 +164,7 @@ def run_benchmarks(
 
     eval_root.mkdir(parents=True, exist_ok=True)
     write_json(eval_root / "benchmarks.json", payload)
+    emit("run_completed", completed_runs=completed_runs)
     return payload
 
 

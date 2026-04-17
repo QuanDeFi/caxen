@@ -14,6 +14,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from agents.toolkit import (
     adjacent_symbols,
+    callees_of,
     callers_of,
     compare_repos,
     execute_graph_query,
@@ -682,7 +683,7 @@ def emit_build_progress(progress_path: Path, payload: Dict[str, object], *, log_
     progress_path.parent.mkdir(parents=True, exist_ok=True)
     progress_path.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
     if log_message:
-        print(log_message, flush=True)
+        print(log_message, flush=True, file=sys.stderr)
 
 
 def timestamp_now() -> str:
@@ -699,8 +700,60 @@ def handle_build_search(args: argparse.Namespace) -> int:
     search_root.mkdir(parents=True, exist_ok=True)
     for repo_name in repo_names:
         repo_root = workspace_root / repo_name
-        payload = build_search_index(repo_name, repo_root, raw_root, parsed_root, search_root)
-        print(f"Wrote search artifacts for {repo_name} to {search_root / repo_name} ({payload['summary']['documents']} documents)")
+        progress_path = search_root / repo_name / "build_progress.json"
+        started = time.perf_counter()
+        emit_build_progress(
+            progress_path,
+            {
+                "event": "build_started",
+                "repo": repo_name,
+                "elapsed_ms": 0.0,
+            },
+            log_message=f"[build-search] repo={repo_name} status=started",
+        )
+
+        def progress_callback(event: Dict[str, object]) -> None:
+            stage = str(event.get("event") or "")
+            message = (
+                f"[build-search] repo={repo_name} stage={stage} "
+                f"elapsed_ms={float(event.get('elapsed_ms') or 0.0):.1f}"
+            )
+            if event.get("documents") is not None:
+                message += f" documents={int(event.get('documents') or 0)}"
+            if event.get("files") is not None:
+                message += f" files={int(event.get('files') or 0)}"
+            if event.get("symbols") is not None:
+                message += f" symbols={int(event.get('symbols') or 0)}"
+            if event.get("statements") is not None:
+                message += f" statements={int(event.get('statements') or 0)}"
+            if event.get("built") is not None:
+                message += f" built={str(bool(event.get('built'))).lower()}"
+            if event.get("reason"):
+                message += f" reason={event.get('reason')}"
+            emit_build_progress(progress_path, event, log_message=message)
+
+        payload = build_search_index(
+            repo_name,
+            repo_root,
+            raw_root,
+            parsed_root,
+            search_root,
+            progress_callback=progress_callback,
+        )
+        emit_build_progress(
+            progress_path,
+            {
+                "event": "repo_completed",
+                "repo": repo_name,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+                "documents": payload["summary"]["documents"],
+            },
+            log_message=(
+                f"[build-search] repo={repo_name} status=completed "
+                f"elapsed_ms={round((time.perf_counter() - started) * 1000, 3):.1f} "
+                f"documents={payload['summary']['documents']}"
+            ),
+        )
     return 0
 
 
@@ -713,9 +766,62 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
 
     summary_root.mkdir(parents=True, exist_ok=True)
     for repo_name in repo_names:
-        payload = build_summary_artifacts(repo_name, raw_root, parsed_root, graph_root)
+        progress_path = summary_root / repo_name / "build_progress.json"
+        started = time.perf_counter()
+        emit_build_progress(
+            progress_path,
+            {
+                "event": "build_started",
+                "repo": repo_name,
+                "elapsed_ms": 0.0,
+            },
+            log_message=f"[build-summaries] repo={repo_name} status=started",
+        )
+
+        def progress_callback(event: Dict[str, object]) -> None:
+            stage = str(event.get("event") or "")
+            message = (
+                f"[build-summaries] repo={repo_name} stage={stage} "
+                f"elapsed_ms={float(event.get('elapsed_ms') or 0.0):.1f}"
+            )
+            for key in ("files", "directories", "nodes", "edges", "symbols", "statements", "packages"):
+                if event.get(key) is not None:
+                    message += f" {key}={int(event.get(key) or 0)}"
+            emit_build_progress(progress_path, event, log_message=message)
+
+        payload = build_summary_artifacts(
+            repo_name,
+            raw_root,
+            parsed_root,
+            graph_root,
+            progress_callback=progress_callback,
+        )
         write_summary_artifacts(summary_root, repo_name, payload)
+        emit_build_progress(
+            progress_path,
+            {
+                "event": "syncing_summary_state",
+                "repo": repo_name,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            },
+            log_message=(
+                f"[build-summaries] repo={repo_name} stage=syncing_summary_state "
+                f"elapsed_ms={round((time.perf_counter() - started) * 1000, 3):.1f}"
+            ),
+        )
         sync_summary_state(parsed_root, graph_root, repo_name, payload)
+        emit_build_progress(
+            progress_path,
+            {
+                "event": "updating_query_manifest",
+                "repo": repo_name,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            },
+            log_message=(
+                f"[build-summaries] repo={repo_name} stage=updating_query_manifest "
+                f"elapsed_ms={round((time.perf_counter() - started) * 1000, 3):.1f}"
+            ),
+        )
         update_query_manifest(
             parsed_root,
             repo_name,
@@ -735,7 +841,23 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
                 "summary_counts": payload["summary"],
             },
         )
-        print(f"Wrote summaries for {repo_name} to {summary_root / repo_name}")
+        emit_build_progress(
+            progress_path,
+            {
+                "event": "repo_completed",
+                "repo": repo_name,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+                **payload["summary"],
+            },
+            log_message=(
+                f"[build-summaries] repo={repo_name} status=completed "
+                f"elapsed_ms={round((time.perf_counter() - started) * 1000, 3):.1f} "
+                f"packages={payload['summary']['packages']} "
+                f"directories={payload['summary']['directories']} "
+                f"files={payload['summary']['files']} "
+                f"symbols={payload['summary']['symbols']}"
+            ),
+        )
     return 0
 
 
@@ -749,15 +871,64 @@ def handle_build_embeddings(args: argparse.Namespace) -> int:
 
 
 def handle_run_benchmarks(args: argparse.Namespace) -> int:
+    eval_root = Path(args.eval_root).resolve()
+    progress_path = eval_root / "benchmarks_progress.json"
+    started = time.perf_counter()
+
+    emit_build_progress(
+        progress_path,
+        {
+            "event": "run_started",
+            "elapsed_ms": 0.0,
+        },
+        log_message="[run-benchmarks] status=started",
+    )
+
+    def progress_callback(event: Dict[str, object]) -> None:
+        event_name = str(event.get("event") or "")
+        message = (
+            f"[run-benchmarks] event={event_name} "
+            f"elapsed_ms={float(event.get('elapsed_ms') or 0.0):.1f}"
+        )
+        if event.get("case_name"):
+            message += f" case={event.get('case_name')}"
+        if event.get("repo"):
+            message += f" repo={event.get('repo')}"
+        if event.get("mode"):
+            message += f" mode={event.get('mode')}"
+        if event.get("completed_runs") is not None and event.get("total_runs") is not None:
+            message += f" progress={int(event.get('completed_runs') or 0)}/{int(event.get('total_runs') or 0)}"
+        if event.get("latency_ms") is not None:
+            message += f" case_ms={float(event.get('latency_ms') or 0.0):.1f}"
+        if event.get("exact_hit") is not None:
+            message += f" exact_hit={str(bool(event.get('exact_hit'))).lower()}"
+        if event.get("path_hit") is not None:
+            message += f" path_hit={str(bool(event.get('path_hit'))).lower()}"
+        emit_build_progress(progress_path, event, log_message=message)
+
     payload = run_benchmarks(
         Path(args.search_root).resolve(),
         Path(args.graph_root).resolve(),
         Path(args.parsed_root).resolve(),
-        Path(args.eval_root).resolve(),
+        eval_root,
         summary_root=Path(args.summary_root).resolve() if args.summary_root else None,
         repos=tuple(args.repo or ()),
         limit=args.limit,
         modes=tuple(args.mode or ()),
+        progress_callback=progress_callback,
+    )
+    emit_build_progress(
+        progress_path,
+        {
+            "event": "run_completed",
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            "runs": payload["summary"]["runs"],
+        },
+        log_message=(
+            f"[run-benchmarks] status=completed "
+            f"elapsed_ms={round((time.perf_counter() - started) * 1000, 3):.1f} "
+            f"runs={payload['summary']['runs']}"
+        ),
     )
     print_json(payload)
     return 0

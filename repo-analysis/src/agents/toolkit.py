@@ -26,7 +26,14 @@ from retrieval.planner import (
     prepare_answer_bundle as build_answer_bundle,
     retrieve_iterative as build_iterative_bundle,
 )
-from search.indexer import find_files, list_documents, lookup_symbol_documents, search_documents, search_documents_scoped
+from search.indexer import (
+    find_files,
+    list_documents,
+    load_agent_cache,
+    lookup_symbol_documents,
+    search_documents,
+    search_documents_scoped,
+)
 from summaries.builder import load_summary_artifacts
 
 
@@ -124,6 +131,12 @@ def compare_repos(
 ) -> Dict[str, object]:
     comparisons = []
     for repo_name in repos:
+        summaries = load_summary_artifacts(summary_root, repo_name)
+        cached = compare_repo_from_agent_cache(search_root, repo_name, query, summaries, limit=limit)
+        if cached is not None:
+            comparisons.append(cached)
+            continue
+
         bundle = prepare_answer_bundle(
             search_root,
             summary_root,
@@ -139,7 +152,10 @@ def compare_repos(
                 "repo": repo_name,
                 "focus": repo_bundle["focus"],
                 "top_context": repo_bundle["selected_context"],
-                "bundle_summary": repo_bundle["bundle_summary"],
+                "bundle_summary": {
+                    **repo_bundle["bundle_summary"],
+                    "source": "answer_bundle_fallback",
+                },
             }
         )
     return {"query": query, "comparisons": comparisons}
@@ -671,14 +687,156 @@ def load_json(path: Path) -> Dict[str, object]:
         return json.load(handle)
 
 
+def compare_repo_from_agent_cache(
+    search_root: Path,
+    repo_name: str,
+    query: str,
+    summaries: Dict[str, object],
+    *,
+    limit: int,
+) -> Optional[Dict[str, object]]:
+    try:
+        cache = load_agent_cache(search_root, repo_name)
+    except FileNotFoundError:
+        return None
+
+    entries = list(cache.get("entries", []))
+    if not entries:
+        return None
+
+    top_context = query_agent_cache(entries, query, limit=limit)
+    return {
+        "repo": repo_name,
+        "focus": str(summaries.get("project", {}).get("focus") or ""),
+        "top_context": top_context,
+        "bundle_summary": {
+            "selected_context": len(top_context),
+            "graph_neighborhoods": 0,
+            "statement_slices": 0,
+            "evidence_items": len(top_context),
+            "source": "agent_cache",
+            "cache_entries": int(cache.get("summary", {}).get("entries") or 0),
+        },
+    }
+
+
+def query_agent_cache(entries: Sequence[Dict[str, object]], query: str, *, limit: int) -> List[Dict[str, object]]:
+    query_tokens = normalize_query_tokens(query)
+    scored = []
+    for entry in entries:
+        score = score_agent_cache_entry(entry, query, query_tokens)
+        if score <= 0:
+            continue
+        scored.append((score, entry))
+
+    scored.sort(
+        key=lambda item: (
+            -item[0],
+            kind_compare_rank(str(item[1].get("kind") or "")),
+            str(item[1].get("path") or ""),
+            str(item[1].get("qualified_name") or item[1].get("name") or ""),
+        )
+    )
+
+    results = []
+    seen = set()
+    for score, entry in scored:
+        dedupe_key = (
+            str(entry.get("symbol_id") or ""),
+            str(entry.get("path") or ""),
+            str(entry.get("qualified_name") or entry.get("name") or ""),
+            str(entry.get("kind") or ""),
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        result = dict(entry)
+        result["score"] = round(float(score), 3)
+        result.pop("search_text", None)
+        results.append(result)
+        if len(results) >= limit:
+            break
+    return results
+
+
+def score_agent_cache_entry(entry: Dict[str, object], raw_query: str, query_tokens: Sequence[str]) -> float:
+    search_text = str(entry.get("search_text") or "")
+    name = str(entry.get("name") or "")
+    qualified_name = str(entry.get("qualified_name") or "")
+    path = str(entry.get("path") or "")
+    tags = [str(item) for item in entry.get("metadata", {}).get("tags", []) or ()]
+
+    score = 0.0
+    if raw_query == qualified_name:
+        score += 120.0
+    if raw_query == name:
+        score += 100.0
+    lowered_query = raw_query.lower()
+    if lowered_query == qualified_name.lower():
+        score += 90.0
+    if lowered_query == name.lower():
+        score += 75.0
+    if lowered_query and lowered_query in path.lower():
+        score += 30.0
+
+    token_hits = 0
+    for token in query_tokens:
+        if token in search_text:
+            score += 8.0
+            token_hits += 1
+        if token in (name.lower(), qualified_name.lower()):
+            score += 12.0
+        if token in path.lower():
+            score += 6.0
+        if token in tags:
+            score += 6.0
+
+    if token_hits == len(query_tokens) and query_tokens:
+        score += 20.0
+
+    visibility = str(entry.get("metadata", {}).get("visibility") or "")
+    if visibility.startswith("pub") or visibility == "public":
+        score += 5.0
+    return score
+
+
+def normalize_query_tokens(query: str) -> List[str]:
+    tokens = []
+    for raw_token in query.replace("::", " ").replace("/", " ").replace("-", " ").replace(".", " ").split():
+        normalized = "".join(char for char in raw_token.lower() if char.isalnum() or char == "_")
+        if normalized:
+            tokens.append(normalized)
+    return tokens
+
+
+def kind_compare_rank(kind: str) -> int:
+    ranking = {
+        "repo": 0,
+        "package": 1,
+        "directory": 2,
+        "file": 3,
+        "symbol": 4,
+        "type_body": 5,
+        "function_body": 6,
+        "doc": 7,
+    }
+    return ranking.get(kind, 99)
+
+
 def resolve_symbol_query(search_root: Path, parsed_root: Path, repo_name: str, symbol_query: str) -> Optional[Dict[str, object]]:
+    symbols = load_json(parsed_root / repo_name / "symbols.json").get("symbols", [])
+    if symbol_query.startswith("sym:"):
+        for item in symbols:
+            if item["symbol_id"] == symbol_query:
+                return item
+        return None
+
     matches = graph_where_defined(search_root, parsed_root, repo_name, symbol_query, limit=1)["matches"]
     if not matches:
         return None
     symbol_id = matches[0]["symbol_id"]
     if not symbol_id:
         return None
-    symbols = load_json(parsed_root / repo_name / "symbols.json").get("symbols", [])
     for item in symbols:
         if item["symbol_id"] == symbol_id:
             return item

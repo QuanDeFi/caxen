@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import time
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
-from typing import Dict, Iterable, List, Tuple
+from typing import Callable, Dict, Iterable, List, Tuple
 
 from graph.store import write_graph_database
 from symbols.indexer import stable_id, timestamp_now
@@ -18,11 +19,44 @@ def build_summary_artifacts(
     raw_root: Path,
     parsed_root: Path,
     graph_root: Path,
+    progress_callback: Callable[[Dict[str, object]], None] | None = None,
 ) -> Dict[str, object]:
+    started = time.perf_counter()
+
+    def emit(event: str, **extra: object) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                "event": event,
+                "repo": repo_name,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+                **extra,
+            }
+        )
+
+    emit("build_started")
     manifest = load_json(raw_root / repo_name / "manifest.json")
+    emit("loaded_manifest")
     repo_map = load_json(raw_root / repo_name / "repo_map.json")
+    emit(
+        "loaded_repo_map",
+        files=len(repo_map.get("files", [])),
+        directories=len(repo_map.get("directories", [])),
+    )
     symbols = load_json(parsed_root / repo_name / "symbols.json")
+    emit(
+        "loaded_symbols",
+        files=len(symbols.get("files", [])),
+        symbols=len(symbols.get("symbols", [])),
+        statements=len(symbols.get("statements", [])),
+    )
     graph = load_json(graph_root / repo_name / "graph.json")
+    emit(
+        "loaded_graph",
+        nodes=len(graph.get("nodes", [])),
+        edges=len(graph.get("edges", [])),
+    )
 
     symbol_records = list(symbols.get("symbols", []))
     symbols_by_path: Dict[str, List[Dict[str, object]]] = defaultdict(list)
@@ -30,13 +64,18 @@ def build_summary_artifacts(
         symbols_by_path[symbol["path"]].append(symbol)
 
     incoming_counts, outgoing_counts = edge_counts(graph)
+    emit("building_project_summary")
     project_summary = build_project_summary(repo_name, manifest, symbols, graph)
+    emit("building_package_summaries")
     package_summaries = build_package_summaries(symbols)
+    emit("building_directory_summaries")
     directory_summaries = build_directory_summaries(repo_map, symbols)
+    emit("building_file_summaries")
     file_summaries = build_file_summaries(symbols, symbols_by_path)
+    emit("building_symbol_summaries")
     symbol_summaries = build_symbol_summaries(symbol_records, incoming_counts, outgoing_counts)
 
-    return {
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "repo": repo_name,
         "generated_at": timestamp_now(),
@@ -52,6 +91,14 @@ def build_summary_artifacts(
             "symbols": len(symbol_summaries),
         },
     }
+    emit(
+        "build_completed",
+        packages=len(package_summaries),
+        directories=len(directory_summaries),
+        files=len(file_summaries),
+        symbols=len(symbol_summaries),
+    )
+    return payload
 
 
 def write_summary_artifacts(output_root: Path, repo_name: str, payload: Dict[str, object]) -> None:

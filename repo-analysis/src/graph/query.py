@@ -634,11 +634,15 @@ def resolve_symbol_matches(
     limit: int = 10,
 ) -> List[Dict[str, object]]:
     normalized = symbol_query.lower()
-    direct_matches = direct_symbol_matches(symbols_payload.get("symbols", []), normalized)
+    symbol_by_id = {symbol["symbol_id"]: symbol for symbol in symbols_payload.get("symbols", [])}
+    direct_symbol_id_match = symbol_by_id.get(symbol_query)
+    if direct_symbol_id_match:
+        return [direct_symbol_id_match]
+
+    direct_matches = direct_symbol_matches(symbols_payload.get("symbols", []), symbol_query, normalized)
     if direct_matches:
         return direct_matches[:limit]
 
-    symbol_by_id = {symbol["symbol_id"]: symbol for symbol in symbols_payload.get("symbols", [])}
     search_results = search_documents(search_root, repo_name, symbol_query, limit=max(limit * 4, 40), kinds=("symbol",))
     matches = []
     seen = set()
@@ -675,7 +679,11 @@ def resolve_symbol_matches(
     return matches[:limit]
 
 
-def direct_symbol_matches(symbols: Sequence[Dict[str, object]], normalized_query: str) -> List[Dict[str, object]]:
+def direct_symbol_matches(
+    symbols: Sequence[Dict[str, object]],
+    raw_query: str,
+    normalized_query: str,
+) -> List[Dict[str, object]]:
     matches = []
     for symbol in symbols:
         candidates = {
@@ -686,7 +694,46 @@ def direct_symbol_matches(symbols: Sequence[Dict[str, object]], normalized_query
         if normalized_query not in candidates:
             continue
         matches.append(symbol)
-    return sorted(matches, key=lambda item: (str(item["path"]), str(item["qualified_name"])))
+    return sorted(
+        matches,
+        key=lambda item: (
+            exact_symbol_match_rank(item, raw_query, normalized_query),
+            visibility_rank(str(item.get("visibility") or "")),
+            kind_rank(str(item.get("kind") or "")),
+            str(item.get("path") or ""),
+            str(item.get("qualified_name") or ""),
+        ),
+    )
+
+
+def exact_symbol_match_rank(symbol: Dict[str, object], raw_query: str, normalized_query: str) -> int:
+    qualified_name_raw = str(symbol.get("qualified_name") or "")
+    name_raw = str(symbol.get("name") or "")
+    terminal_raw = qualified_name_raw.split("::")[-1] if qualified_name_raw else ""
+    qualified_name = qualified_name_raw.lower()
+    name = name_raw.lower()
+    terminal = terminal_raw.lower()
+    if qualified_name_raw == raw_query:
+        return 0
+    if name_raw == raw_query:
+        return 1
+    if terminal_raw == raw_query:
+        return 2
+    if qualified_name == normalized_query:
+        return 3
+    if name == normalized_query:
+        return 4
+    if terminal == normalized_query:
+        return 5
+    return 6
+
+
+def visibility_rank(visibility: str) -> int:
+    if visibility.startswith("pub"):
+        return 0
+    if visibility == "public":
+        return 0
+    return 1
 
 
 def resolve_path_nodes(node_by_id: Dict[str, Dict[str, object]], path_query: str, *, limit: int) -> List[Dict[str, object]]:

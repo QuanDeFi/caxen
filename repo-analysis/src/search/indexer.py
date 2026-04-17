@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from common.native_tool import build_bm25_index, native_worker_available, query_bm25_index
 from common.query_manifest import update_query_manifest
@@ -12,6 +13,7 @@ from symbols.indexer import stable_id, timestamp_now
 
 
 SCHEMA_VERSION = "0.3.0"
+AGENT_CACHE_SCHEMA_VERSION = "0.1.0"
 TEXT_EXTENSIONS = {
     ".c",
     ".cc",
@@ -45,22 +47,59 @@ def build_search_index(
     raw_root: Path,
     parsed_root: Path,
     output_root: Path,
+    progress_callback: Callable[[Dict[str, object]], None] | None = None,
 ) -> Dict[str, object]:
-    manifest = load_json(raw_root / repo_name / "manifest.json")
-    repo_map = load_json(raw_root / repo_name / "repo_map.json")
-    symbols = load_json(parsed_root / repo_name / "symbols.json")
+    started = time.perf_counter()
 
+    def emit(event: str, **extra: object) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                "event": event,
+                "repo": repo_name,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+                **extra,
+            }
+        )
+
+    emit("build_started")
+    manifest = load_json(raw_root / repo_name / "manifest.json")
+    emit("loaded_manifest")
+    repo_map = load_json(raw_root / repo_name / "repo_map.json")
+    emit(
+        "loaded_repo_map",
+        files=len(repo_map.get("files", [])),
+        directories=len(repo_map.get("directories", [])),
+    )
+    symbols = load_json(parsed_root / repo_name / "symbols.json")
+    emit(
+        "loaded_symbols",
+        parsed_files=len(symbols.get("files", [])),
+        symbols=len(symbols.get("symbols", [])),
+        statements=len(symbols.get("statements", [])),
+    )
+
+    emit("building_documents")
     documents = list(build_documents(repo_name, repo_root, manifest, repo_map, symbols))
     repo_output = output_root / repo_name
     repo_output.mkdir(parents=True, exist_ok=True)
+    emit("documents_built", documents=len(documents))
 
     sqlite_path = repo_output / "search.sqlite3"
     if sqlite_path.exists():
         sqlite_path.unlink()
+    emit("writing_sqlite")
     write_search_database(sqlite_path, documents)
 
     documents_path = repo_output / "documents.jsonl"
+    emit("writing_documents_jsonl")
     write_documents_jsonl(documents_path, documents)
+
+    agent_cache = build_agent_cache(repo_name, documents)
+    agent_cache_path = repo_output / "agent_cache.json"
+    emit("writing_agent_cache", entries=agent_cache["summary"]["entries"])
+    write_json(agent_cache_path, agent_cache)
 
     bm25_artifact = {
         "available": False,
@@ -68,16 +107,21 @@ def build_search_index(
     }
     tantivy_dir = repo_output / "tantivy"
     if native_worker_available():
+        emit("building_bm25")
         try:
             bm25_artifact = build_bm25_index(documents_path, tantivy_dir)
             bm25_artifact["available"] = True
             bm25_artifact["built"] = True
+            emit("bm25_built", built=True)
         except Exception as exc:  # pragma: no cover - defensive fallback
             bm25_artifact = {
                 "available": True,
                 "built": False,
                 "reason": str(exc),
             }
+            emit("bm25_built", built=False, reason=str(exc))
+    else:
+        emit("bm25_skipped", reason="native_worker_unavailable")
 
     counts = Counter(document["kind"] for document in documents)
     payload = {
@@ -87,6 +131,7 @@ def build_search_index(
         "artifacts": {
             "sqlite": "search.sqlite3",
             "documents_jsonl": "documents.jsonl",
+            "agent_cache": "agent_cache.json",
             "tantivy": "tantivy" if bm25_artifact.get("built") else None,
         },
         "bm25": bm25_artifact,
@@ -104,12 +149,14 @@ def build_search_index(
     with (repo_output / "search_manifest.json").open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=False)
         handle.write("\n")
+    emit("writing_query_manifest")
     update_query_manifest(
         parsed_root,
         repo_name,
         artifacts={
             "search_sqlite": "data/search/{repo}/search.sqlite3".format(repo=repo_name),
             "search_documents_jsonl": "data/search/{repo}/documents.jsonl".format(repo=repo_name),
+            "search_agent_cache": "data/search/{repo}/agent_cache.json".format(repo=repo_name),
             "search_tantivy": "data/search/{repo}/tantivy".format(repo=repo_name) if bm25_artifact.get("built") else None,
         },
         features={
@@ -119,6 +166,7 @@ def build_search_index(
             "bm25": bm25_artifact,
         },
     )
+    emit("build_completed", documents=len(documents), bm25_built=bool(bm25_artifact.get("built")))
     return payload
 
 
@@ -272,6 +320,10 @@ def lookup_symbol_documents(
 
 def load_search_manifest(search_root: Path, repo_name: str) -> Dict[str, object]:
     return load_json(search_root / repo_name / "search_manifest.json")
+
+
+def load_agent_cache(search_root: Path, repo_name: str) -> Dict[str, object]:
+    return load_json(search_root / repo_name / "agent_cache.json")
 
 
 def build_documents(
@@ -703,6 +755,80 @@ def summarize_preview(value: str, limit: int = 180) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: limit - 3].rstrip() + "..."
+
+
+def write_json(path: Path, payload: Dict[str, object]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=False)
+        handle.write("\n")
+
+
+def build_agent_cache(repo_name: str, documents: Sequence[Dict[str, object]]) -> Dict[str, object]:
+    entries = []
+    for document in documents:
+        kind = str(document.get("kind") or "")
+        metadata = dict(document.get("metadata") or {})
+        if kind not in {"repo", "package", "directory", "file", "symbol", "function_body", "type_body", "doc"}:
+            continue
+        if kind in {"symbol", "function_body", "type_body", "doc"} and not include_agent_symbol(document):
+            continue
+        entries.append(build_agent_cache_entry(document, metadata))
+
+    return {
+        "schema_version": AGENT_CACHE_SCHEMA_VERSION,
+        "repo": repo_name,
+        "generated_at": timestamp_now(),
+        "summary": {
+            "entries": len(entries),
+            "kinds": dict(sorted(Counter(entry["kind"] for entry in entries).items())),
+        },
+        "entries": entries,
+    }
+
+
+def include_agent_symbol(document: Dict[str, object]) -> bool:
+    metadata = dict(document.get("metadata") or {})
+    symbol_kind = str(metadata.get("kind") or document.get("kind") or "")
+    visibility = str(metadata.get("visibility") or "")
+    if symbol_kind in {"local", "field", "variant"}:
+        return False
+    if symbol_kind == "method" and not visibility.startswith("pub") and visibility != "public":
+        return False
+    return True
+
+
+def build_agent_cache_entry(document: Dict[str, object], metadata: Dict[str, object]) -> Dict[str, object]:
+    text_parts = [
+        str(document.get("kind") or ""),
+        str(document.get("path") or ""),
+        str(document.get("name") or ""),
+        str(document.get("qualified_name") or ""),
+        str(document.get("title") or ""),
+        str(document.get("preview") or ""),
+        str(metadata.get("module_path") or ""),
+        str(metadata.get("package_name") or ""),
+        str(metadata.get("crate") or ""),
+        " ".join(str(item) for item in metadata.get("tags", []) or ()),
+    ]
+    return {
+        "doc_id": document.get("doc_id"),
+        "kind": document.get("kind"),
+        "path": document.get("path"),
+        "name": document.get("name"),
+        "qualified_name": document.get("qualified_name"),
+        "symbol_id": document.get("symbol_id"),
+        "title": document.get("title"),
+        "preview": document.get("preview"),
+        "metadata": {
+            "kind": metadata.get("kind"),
+            "crate": metadata.get("crate"),
+            "package_name": metadata.get("package_name"),
+            "module_path": metadata.get("module_path"),
+            "tags": list(metadata.get("tags", []) or ()),
+            "visibility": metadata.get("visibility"),
+        },
+        "search_text": " ".join(part for part in text_parts if part).lower(),
+    }
 
 
 def write_documents_jsonl(path: Path, documents: Sequence[Dict[str, object]]) -> None:
