@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import sqlite3
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -14,6 +16,7 @@ from symbols.indexer import timestamp_now
 
 
 SCHEMA_VERSION = "0.4.0"
+EVAL_CACHE_SCHEMA_VERSION = "0.1.0"
 DEFAULT_MODES = (
     "lexical_only",
     "lexical_graph",
@@ -184,33 +187,20 @@ def export_benchmark_prompts(
     cases = [item for item in benchmark_cases if item["repo"] in selected_repos]
     export_root = eval_root / "prompt_exports"
     export_root.mkdir(parents=True, exist_ok=True)
+    cache_path = ensure_eval_cache_database(eval_root)
 
     prompt_exports = []
     for case in cases:
-        bundle = prepare_answer_bundle(
+        cached_case = load_or_build_cached_case(
+            cache_path,
             search_root,
-            summary_root,
             graph_root,
             parsed_root,
-            case["query"],
-            repo_name=case["repo"],
+            summary_root,
+            case,
             limit=limit,
         )
-        prompt_payload = {
-            "name": case["name"],
-            "repo": case["repo"],
-            "task_type": case["task_type"],
-            "query": case["query"],
-            "expected_path": case["expected_path"],
-            "expected_name": case["expected_name"],
-            "expected_terms": case.get("expected_terms", []),
-            "prompt": build_prompt_text(case, bundle),
-            "answer_bundle": bundle,
-            "provenance_requirements": {
-                "must_cite_path": case["expected_path"],
-                "should_cite_symbol": case["expected_name"],
-            },
-        }
+        prompt_payload = cached_case["prompt_payload"]
         write_json(export_root / f"{case['name']}.json", prompt_payload)
         prompt_exports.append(
             {
@@ -247,18 +237,19 @@ def score_answer_bundles(
     benchmark_cases = list(benchmarks or DEFAULT_BENCHMARKS)
     selected_repos = set(repos or [item["repo"] for item in benchmark_cases])
     cases = [item for item in benchmark_cases if item["repo"] in selected_repos]
+    cache_path = ensure_eval_cache_database(eval_root)
     scores = []
     for case in cases:
-        bundle = prepare_answer_bundle(
+        cached_case = load_or_build_cached_case(
+            cache_path,
             search_root,
-            summary_root,
             graph_root,
             parsed_root,
-            case["query"],
-            repo_name=case["repo"],
+            summary_root,
+            case,
             limit=limit,
         )
-        scores.append(score_bundle(case, bundle))
+        scores.append(cached_case["bundle_score"])
     payload = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": timestamp_now(),
@@ -514,6 +505,212 @@ def summarize_external_answer_scores(scores: Sequence[Dict[str, object]]) -> Dic
         "avg_score": average(item["score"] for item in scores),
         "path_hits": sum(1 for item in scores if item["path_credit"] >= 1.0),
         "name_hits": sum(1 for item in scores if item["name_credit"] >= 1.0),
+    }
+
+
+def ensure_eval_cache_database(eval_root: Path) -> Path:
+    eval_root.mkdir(parents=True, exist_ok=True)
+    path = eval_root / "eval.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS metadata(
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS benchmark_case_cache(
+                case_name TEXT PRIMARY KEY,
+                repo TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                query TEXT NOT NULL,
+                limit_value INTEGER NOT NULL,
+                artifact_fingerprint TEXT NOT NULL,
+                cache_fingerprint TEXT NOT NULL,
+                bundle_json TEXT NOT NULL,
+                prompt_payload_json TEXT NOT NULL,
+                bundle_score_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO metadata(key, value)
+            VALUES(?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            ("schema_version", EVAL_CACHE_SCHEMA_VERSION),
+        )
+    return path
+
+
+def load_or_build_cached_case(
+    cache_path: Path,
+    search_root: Path,
+    graph_root: Path,
+    parsed_root: Path,
+    summary_root: Path,
+    case: Dict[str, object],
+    *,
+    limit: int,
+) -> Dict[str, object]:
+    repo_name = str(case["repo"])
+    artifact_fingerprint = compute_repo_artifact_fingerprint(
+        repo_name,
+        search_root=search_root,
+        graph_root=graph_root,
+        parsed_root=parsed_root,
+        summary_root=summary_root,
+    )
+    cache_fingerprint = compute_case_cache_fingerprint(case, artifact_fingerprint, limit=limit)
+
+    with sqlite3.connect(cache_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT bundle_json, prompt_payload_json, bundle_score_json
+            FROM benchmark_case_cache
+            WHERE case_name = ? AND cache_fingerprint = ?
+            """,
+            (str(case["name"]), cache_fingerprint),
+        ).fetchone()
+        if row is not None:
+            return {
+                "bundle": json.loads(row["bundle_json"]),
+                "prompt_payload": json.loads(row["prompt_payload_json"]),
+                "bundle_score": json.loads(row["bundle_score_json"]),
+                "cache": "hit",
+            }
+
+        bundle = prepare_answer_bundle(
+            search_root,
+            summary_root,
+            graph_root,
+            parsed_root,
+            str(case["query"]),
+            repo_name=repo_name,
+            limit=limit,
+        )
+        prompt_payload = build_prompt_payload(case, bundle)
+        bundle_score = score_bundle(case, bundle)
+        connection.execute(
+            """
+            INSERT INTO benchmark_case_cache(
+                case_name,
+                repo,
+                task_type,
+                query,
+                limit_value,
+                artifact_fingerprint,
+                cache_fingerprint,
+                bundle_json,
+                prompt_payload_json,
+                bundle_score_json,
+                updated_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(case_name) DO UPDATE SET
+                repo=excluded.repo,
+                task_type=excluded.task_type,
+                query=excluded.query,
+                limit_value=excluded.limit_value,
+                artifact_fingerprint=excluded.artifact_fingerprint,
+                cache_fingerprint=excluded.cache_fingerprint,
+                bundle_json=excluded.bundle_json,
+                prompt_payload_json=excluded.prompt_payload_json,
+                bundle_score_json=excluded.bundle_score_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                str(case["name"]),
+                repo_name,
+                str(case["task_type"]),
+                str(case["query"]),
+                int(limit),
+                artifact_fingerprint,
+                cache_fingerprint,
+                json.dumps(bundle, sort_keys=False),
+                json.dumps(prompt_payload, sort_keys=False),
+                json.dumps(bundle_score, sort_keys=False),
+                timestamp_now(),
+            ),
+        )
+        return {
+            "bundle": bundle,
+            "prompt_payload": prompt_payload,
+            "bundle_score": bundle_score,
+            "cache": "miss",
+        }
+
+
+def compute_case_cache_fingerprint(case: Dict[str, object], artifact_fingerprint: str, *, limit: int) -> str:
+    payload = {
+        "schema_version": EVAL_CACHE_SCHEMA_VERSION,
+        "artifact_fingerprint": artifact_fingerprint,
+        "limit": int(limit),
+        "case": {
+            "name": str(case["name"]),
+            "repo": str(case["repo"]),
+            "task_type": str(case["task_type"]),
+            "query": str(case["query"]),
+            "expected_path": str(case["expected_path"]),
+            "expected_name": str(case["expected_name"]),
+            "expected_terms": [str(term) for term in case.get("expected_terms", [])],
+        },
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def compute_repo_artifact_fingerprint(
+    repo_name: str,
+    *,
+    search_root: Path,
+    graph_root: Path,
+    parsed_root: Path,
+    summary_root: Path,
+) -> str:
+    tracked_paths = [
+        parsed_root / repo_name / "query_manifest.json",
+        parsed_root / repo_name / "symbols.sqlite3",
+        graph_root / repo_name / "graph.sqlite3",
+        search_root / repo_name / "search.sqlite3",
+        search_root / repo_name / "search_manifest.json",
+        summary_root / repo_name / "summary.sqlite3",
+        summary_root / repo_name / "summary_manifest.json",
+    ]
+    snapshot = []
+    for path in tracked_paths:
+        if path.exists():
+            stat = path.stat()
+            snapshot.append(
+                {
+                    "path": str(path),
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                }
+            )
+    return hashlib.sha1(json.dumps(snapshot, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def build_prompt_payload(case: Dict[str, object], bundle: Dict[str, object]) -> Dict[str, object]:
+    return {
+        "name": case["name"],
+        "repo": case["repo"],
+        "task_type": case["task_type"],
+        "query": case["query"],
+        "expected_path": case["expected_path"],
+        "expected_name": case["expected_name"],
+        "expected_terms": case.get("expected_terms", []),
+        "prompt": build_prompt_text(case, bundle),
+        "answer_bundle": bundle,
+        "provenance_requirements": {
+            "must_cite_path": case["expected_path"],
+            "should_cite_symbol": case["expected_name"],
+        },
     }
 
 

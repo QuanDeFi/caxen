@@ -26,6 +26,7 @@ done
 "$SCRIPT_DIR/build_search.sh" "${REPO_ARGS[@]}"
 "$SCRIPT_DIR/build_embeddings.sh" "${REPO_ARGS[@]}"
 "$SCRIPT_DIR/export_summaries.sh" "${REPO_ARGS[@]}"
+"$SCRIPT_DIR/precompute_eval_cache.sh" "${REPO_ARGS[@]}"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 

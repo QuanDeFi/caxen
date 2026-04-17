@@ -3,6 +3,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -472,6 +473,13 @@ class SearchAndSummaryTest(unittest.TestCase):
             )
             self.assertEqual(prompts["summary"]["exports"], 1)
             self.assertTrue((eval_root / "prompt_exports" / "demo_answer_bundle.json").exists())
+            self.assertTrue((eval_root / "eval.sqlite3").exists())
+
+            with sqlite3.connect(eval_root / "eval.sqlite3") as connection:
+                rows = connection.execute(
+                    "SELECT count(*) FROM benchmark_case_cache"
+                ).fetchone()[0]
+                self.assertEqual(rows, 1)
 
             bundle_scores = score_answer_bundles(
                 paths["search_root"],
@@ -484,6 +492,34 @@ class SearchAndSummaryTest(unittest.TestCase):
                 benchmarks=benchmark,
             )
             self.assertGreater(bundle_scores["scores"][0]["score"], 0.5)
+
+            with mock.patch(
+                "evaluation.harness.prepare_answer_bundle",
+                side_effect=AssertionError("cache should satisfy prompt and score requests"),
+            ):
+                cached_prompts = export_benchmark_prompts(
+                    paths["search_root"],
+                    paths["graph_root"],
+                    paths["parsed_root"],
+                    paths["summary_root"],
+                    eval_root,
+                    repos=("demo",),
+                    limit=5,
+                    benchmarks=benchmark,
+                )
+                self.assertEqual(cached_prompts["summary"]["exports"], 1)
+
+                cached_scores = score_answer_bundles(
+                    paths["search_root"],
+                    paths["graph_root"],
+                    paths["parsed_root"],
+                    paths["summary_root"],
+                    eval_root,
+                    repos=("demo",),
+                    limit=5,
+                    benchmarks=benchmark,
+                )
+                self.assertGreater(cached_scores["scores"][0]["score"], 0.5)
 
             answers_path = eval_root / "answers.json"
             answers_path.write_text(

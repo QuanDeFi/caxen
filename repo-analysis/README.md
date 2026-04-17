@@ -13,6 +13,7 @@ From the workspace root:
 ./repo-analysis/scripts/build_index.sh
 ./repo-analysis/scripts/build_search.sh
 ./repo-analysis/scripts/export_summaries.sh
+./repo-analysis/scripts/precompute_eval_cache.sh
 ./repo-analysis/scripts/run_benchmarks.sh
 ```
 
@@ -27,11 +28,19 @@ Optional:
 - `data/raw/<repo>/`: raw inventory
 - `data/parsed/<repo>/`: `symbols.sqlite3`, parquet status, query manifest
 - `data/graph/<repo>/`: `graph.sqlite3`
-- `data/search/<repo>/`: `search.sqlite3`, BM25/Tantivy, and optional embeddings
+- `data/search/<repo>/`: `search.sqlite3` with lexical docs and agent cache, BM25/Tantivy, and optional embeddings
 - `data/summaries/<repo>/`: `summary.sqlite3`
-- `data/eval/`: benchmark and scoring output
+- `data/eval/`: `eval.sqlite3`, prompt exports, benchmark and scoring output
 
 Default runtime is DB-first. JSON exports are optional with `--emit-json` on `build-index`, `build-search`, and `build-summaries`.
+
+If you want JSON exports too:
+
+```bash
+python3 repo-analysis/src/cli/main.py build-index ... --emit-json
+python3 repo-analysis/src/cli/main.py build-search ... --emit-json
+python3 repo-analysis/src/cli/main.py build-summaries ... --emit-json
+```
 
 ## CLI
 
@@ -48,6 +57,7 @@ Commands:
 - `build-search`
 - `build-summaries`
 - `build-embeddings`
+- `precompute_eval_cache.sh`
 - `run-benchmarks`
 - `repo-overview`
 - `find-symbol`
@@ -109,6 +119,7 @@ Prefer these artifacts:
 - `data/parsed/<repo>/symbols.sqlite3`
 - `data/graph/<repo>/graph.sqlite3`
 - `data/search/<repo>/search.sqlite3`
+- `data/eval/eval.sqlite3`
 - `data/search/<repo>/tantivy/`
 
 Treat `prepare-answer-bundle` as the default handoff artifact for an external LLM. It is the compact, provenance-carrying context package.

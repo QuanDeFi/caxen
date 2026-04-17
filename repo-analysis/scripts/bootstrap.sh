@@ -6,9 +6,11 @@ cd "$SCRIPT_DIR/.."
 
 echo "Bootstrapping repo-analysis workspace..."
 mkdir -p data/{raw,parsed,graph,search,summaries,eval}
+mkdir -p data/eval/prompt_exports
 for d in raw parsed graph search summaries eval; do
   touch "data/$d/.gitkeep"
 done
+touch "data/eval/prompt_exports/.gitkeep"
 
 if command -v python3 >/dev/null 2>&1; then
   echo "python3: $(python3 --version 2>&1)"
