@@ -58,7 +58,7 @@ from graph.builder import build_graph_artifact, write_graph_artifact
 from graph.store import write_graph_database
 from search.indexer import build_search_index
 from summaries.builder import build_summary_artifacts, sync_summary_state, write_summary_artifacts
-from symbols.indexer import build_symbol_index, write_symbol_index
+from symbols.indexer import build_symbol_index, current_rss_mb, write_symbol_index
 from symbols.persistence import write_symbol_database, write_symbol_parquet_bundle
 
 
@@ -548,6 +548,14 @@ def handle_build_index(args: argparse.Namespace) -> int:
                         f"rss_mb={float(event.get('rss_mb') or 0.0):.1f} "
                         f"backend_failures={json.dumps(event.get('backend_failures', {}), sort_keys=True)}"
                     )
+            elif event_name == "stage_progress":
+                should_log = True
+                log_message = (
+                    f"[build-index] repo={repo_name} stage={event.get('stage')} "
+                    f"elapsed_ms={float(event.get('elapsed_ms') or 0.0):.1f} "
+                    f"rss_mb={float(event.get('rss_mb') or 0.0):.1f} "
+                    f"contexts={int(event.get('contexts') or 0)}"
+                )
             emit_build_progress(repo_progress_path, event, log_message=log_message if should_log else None)
 
         native_worker = probe_native_worker()
@@ -559,6 +567,24 @@ def handle_build_index(args: argparse.Namespace) -> int:
                 path_prefixes=path_prefixes,
                 progress_callback=progress_callback,
                 cache_root=parsed_root / repo_name,
+            )
+            emit_build_progress(
+                repo_progress_path,
+                {
+                    "event": "stage_progress",
+                    "repo": repo_name,
+                    "stage": "building_graph_artifact",
+                    "elapsed_ms": round((time.perf_counter() - progress_started) * 1000, 3),
+                    "rss_mb": current_rss_mb(),
+                    "symbols": symbol_index.get("summary", {}).get("symbols", 0),
+                    "references": symbol_index.get("summary", {}).get("references", 0),
+                    "statements": symbol_index.get("summary", {}).get("statements", 0),
+                },
+                log_message=(
+                    f"[build-index] repo={repo_name} stage=building_graph_artifact "
+                    f"elapsed_ms={round((time.perf_counter() - progress_started) * 1000, 3):.1f} "
+                    f"rss_mb={current_rss_mb():.1f}"
+                ),
             )
             graph_artifact = build_graph_artifact(symbol_index)
         except Exception as exc:
@@ -578,6 +604,24 @@ def handle_build_index(args: argparse.Namespace) -> int:
             )
             raise
 
+        emit_build_progress(
+            repo_progress_path,
+            {
+                "event": "stage_progress",
+                "repo": repo_name,
+                "stage": "writing_artifacts",
+                "elapsed_ms": round((time.perf_counter() - progress_started) * 1000, 3),
+                "rss_mb": current_rss_mb(),
+                "graph_nodes": graph_artifact.get("summary", {}).get("nodes", 0),
+                "graph_edges": graph_artifact.get("summary", {}).get("edges", 0),
+            },
+            log_message=(
+                f"[build-index] repo={repo_name} stage=writing_artifacts "
+                f"elapsed_ms={round((time.perf_counter() - progress_started) * 1000, 3):.1f} "
+                f"rss_mb={current_rss_mb():.1f} "
+                f"graph_edges={graph_artifact.get('summary', {}).get('edges', 0)}"
+            ),
+        )
         write_symbol_index(parsed_root, repo_name, symbol_index)
         write_symbol_database(parsed_root, repo_name, symbol_index)
         write_symbol_parquet_bundle(parsed_root, repo_name, symbol_index)

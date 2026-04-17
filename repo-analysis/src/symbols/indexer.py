@@ -181,6 +181,21 @@ def build_symbol_index(
     backend_failures: DefaultDict[str, int] = defaultdict(int)
     slowest_files: List[Dict[str, object]] = []
 
+    def emit_stage_progress(stage: str, **extra: object) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                "event": "stage_progress",
+                "repo": repo_name,
+                "stage": stage,
+                "elapsed_ms": round((time.perf_counter() - run_started) * 1000, 3),
+                "rss_mb": current_rss_mb(),
+                "contexts": len(contexts),
+                **extra,
+            }
+        )
+
     if progress_callback is not None:
         progress_callback(
             {
@@ -235,6 +250,7 @@ def build_symbol_index(
                 }
             )
 
+    emit_stage_progress("building_symbol_records")
     file_records: List[Dict[str, object]] = []
     symbol_records: List[Dict[str, object]] = []
     context_by_path = {context.parsed.path: context for context in contexts}
@@ -260,14 +276,23 @@ def build_symbol_index(
         for symbol in context.parsed.symbols:
             symbol_records.append(symbol_to_record(repo_name, context, symbol))
 
+    emit_stage_progress("building_resolution_index", symbols=len(symbol_records))
     resolution_index = build_resolution_index(symbol_records)
+    emit_stage_progress("building_import_records")
     import_records = build_import_records(repo_name, contexts, resolution_index)
+    emit_stage_progress("resolving_impls", imports=len(import_records))
     resolve_impl_symbols(symbol_records, context_by_path, resolution_index)
+    emit_stage_progress("resolving_trait_inheritance")
     resolve_trait_inheritance(symbol_records, context_by_path, resolution_index)
+    emit_stage_progress("building_reference_records")
     reference_records = build_reference_records(repo_name, contexts, resolution_index)
+    emit_stage_progress("building_statement_records", references=len(reference_records))
     statement_records = build_statement_records(repo_name, contexts, symbol_records, resolution_index)
+    emit_stage_progress("enriching_symbol_semantics", statements=len(statement_records))
     enrich_symbol_semantics(symbol_records, reference_records, statement_records, resolution_index)
+    emit_stage_progress("enriching_symbol_artifact_metadata")
     enrich_symbol_artifact_metadata(symbol_records, statement_records)
+    emit_stage_progress("checking_duplicate_symbol_ids")
     duplicate_symbol_ids = find_duplicate_ids(symbol_records, "symbol_id")
     if duplicate_symbol_ids:
         raise ValueError(
@@ -275,6 +300,7 @@ def build_symbol_index(
             + ", ".join(sorted(duplicate_symbol_ids[:10]))
             + (" ..." if len(duplicate_symbol_ids) > 10 else "")
         )
+    emit_stage_progress("aggregating_backend_probes")
     compiler_backends = {
         "rustc_ast_probe": aggregate_rustc_probes([context.compiler_probe for context in contexts]),
         "tree_sitter_rust": aggregate_tree_sitter_probes(
@@ -285,6 +311,7 @@ def build_symbol_index(
         ),
     }
 
+    emit_stage_progress("rolling_up_summary_counts")
     kind_counts = rollup_counts(item["kind"] for item in symbol_records)
     reference_kind_counts = rollup_counts(item["kind"] for item in reference_records)
     statement_kind_counts = rollup_counts(item["kind"] for item in statement_records)
