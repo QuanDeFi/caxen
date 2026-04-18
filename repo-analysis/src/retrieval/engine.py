@@ -4,6 +4,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from common.telemetry import trace_operation
 from graph.query import load_graph_view_uncached
 from embeddings.indexer import query_embedding_index
 from rerank.fusion import rerank_candidates
@@ -55,92 +56,93 @@ def retrieve_context(
     selective_retrieval: bool = True,
     max_graph_fanout: int = 32,
 ) -> Dict[str, object]:
-    tokens = tokenize(query)
-    query_profile = classify_query(tokens, query)
-    effective_kinds = tuple(kinds) if kinds else default_query_kinds(query_profile)
-    lexical_results = search_documents(search_root, repo_name, query, limit=max(limit * 2, 10), kinds=effective_kinds)
-    gate = retrieval_gate(tokens, lexical_results, selective_retrieval)
-    effective_use_graph = use_graph and gate["use_graph"]
-    effective_use_embeddings = use_embeddings and gate["use_embeddings"]
-    embedding_results = (
-        query_embedding_index(search_root, repo_name, query, limit=max(limit, 5)) if effective_use_embeddings else []
-    )
-    graph = load_graph_view_uncached(graph_root, repo_name)["payload"]
-    symbols = load_symbol_index(parsed_root, repo_name)
-    symbol_by_id = {item["symbol_id"]: item for item in symbols.get("symbols", [])}
-    symbols_by_path = defaultdict(list)
-    for symbol in symbols.get("symbols", []):
-        symbols_by_path[symbol["path"]].append(symbol)
-
-    node_by_id, outgoing, incoming = graph_indexes(graph)
-    candidates: Dict[Tuple[str, str], Dict[str, object]] = {}
-
-    for result in lexical_results:
-        add_candidate(
-            candidates,
-            {
-                **result,
-                "reasons": ["lexical"],
-            },
+    with trace_operation("retrieve_context"):
+        tokens = tokenize(query)
+        query_profile = classify_query(tokens, query)
+        effective_kinds = tuple(kinds) if kinds else default_query_kinds(query_profile)
+        lexical_results = search_documents(search_root, repo_name, query, limit=max(limit * 2, 10), kinds=effective_kinds)
+        gate = retrieval_gate(tokens, lexical_results, selective_retrieval)
+        effective_use_graph = use_graph and gate["use_graph"]
+        effective_use_embeddings = use_embeddings and gate["use_embeddings"]
+        embedding_results = (
+            query_embedding_index(search_root, repo_name, query, limit=max(limit, 5)) if effective_use_embeddings else []
         )
-        if result["kind"] == "file" and result.get("path"):
-            for localized in localize_file_symbols(tokens, symbols_by_path[result["path"]], base_score=float(result["score"]) * 0.5):
-                add_candidate(candidates, localized)
+        graph = load_graph_view_uncached(graph_root, repo_name)["payload"]
+        symbols = load_symbol_index(parsed_root, repo_name)
+        symbol_by_id = {item["symbol_id"]: item for item in symbols.get("symbols", [])}
+        symbols_by_path = defaultdict(list)
+        for symbol in symbols.get("symbols", []):
+            symbols_by_path[symbol["path"]].append(symbol)
 
-    for result in embedding_results:
-        add_candidate(
-            candidates,
-            {
-                **result,
-                "reasons": ["embedding"],
-            },
+        node_by_id, outgoing, incoming = graph_indexes(graph)
+        candidates: Dict[Tuple[str, str], Dict[str, object]] = {}
+
+        for result in lexical_results:
+            add_candidate(
+                candidates,
+                {
+                    **result,
+                    "reasons": ["lexical"],
+                },
+            )
+            if result["kind"] == "file" and result.get("path"):
+                for localized in localize_file_symbols(tokens, symbols_by_path[result["path"]], base_score=float(result["score"]) * 0.5):
+                    add_candidate(candidates, localized)
+
+        for result in embedding_results:
+            add_candidate(
+                candidates,
+                {
+                    **result,
+                    "reasons": ["embedding"],
+                },
+            )
+
+        seed_nodes = []
+        for result in lexical_results[:limit]:
+            node_id = result_to_node_id(repo_name, result)
+            if node_id:
+                seed_nodes.append((node_id, float(result["score"])))
+
+        expanded = (
+            expand_graph_candidates(repo_name, node_by_id, outgoing, incoming, seed_nodes, depth, max_fanout=max_graph_fanout)
+            if effective_use_graph
+            else []
         )
+        for candidate in expanded:
+            symbol = symbol_by_id.get(candidate.get("symbol_id"))
+            if symbol:
+                candidate.setdefault("preview", symbol.get("signature") or symbol["qualified_name"])
+            add_candidate(candidates, candidate)
 
-    seed_nodes = []
-    for result in lexical_results[:limit]:
-        node_id = result_to_node_id(repo_name, result)
-        if node_id:
-            seed_nodes.append((node_id, float(result["score"])))
+        if use_summaries and summary_root is not None:
+            apply_summary_bonus(candidates, summary_root, repo_name, tokens)
 
-    expanded = (
-        expand_graph_candidates(repo_name, node_by_id, outgoing, incoming, seed_nodes, depth, max_fanout=max_graph_fanout)
-        if effective_use_graph
-        else []
-    )
-    for candidate in expanded:
-        symbol = symbol_by_id.get(candidate.get("symbol_id"))
-        if symbol:
-            candidate.setdefault("preview", symbol.get("signature") or symbol["qualified_name"])
-        add_candidate(candidates, candidate)
-
-    if use_summaries and summary_root is not None:
-        apply_summary_bonus(candidates, summary_root, repo_name, tokens)
-
-    ranked_candidates = list(candidates.values())
-    ranked = (
-        rerank_candidates(ranked_candidates, tokens, query_profile=query_profile)[:limit]
-        if use_rerank
-        else sort_candidates(ranked_candidates)[:limit]
-    )
-    return {
-        "repo": repo_name,
-        "query": query,
-        "lexical_results": lexical_results[:limit],
-        "embedding_results": embedding_results[:limit],
-        "selected_context": ranked,
-        "summary": {
-            "lexical_results": len(lexical_results),
-            "embedding_results": len(embedding_results),
-            "expanded_candidates": len(expanded),
-            "selected": len(ranked),
-            "graph_enabled": effective_use_graph,
-            "embeddings_enabled": effective_use_embeddings,
-            "rerank_enabled": use_rerank,
-            "summaries_enabled": bool(use_summaries and summary_root is not None),
-            "retrieval_gate": gate,
-            "query_profile": query_profile,
-        },
-    }
+        ranked_candidates = list(candidates.values())
+        ranked = (
+            rerank_candidates(ranked_candidates, tokens, query_profile=query_profile)[:limit]
+            if use_rerank
+            else sort_candidates(ranked_candidates)[:limit]
+        )
+        return {
+            "repo": repo_name,
+            "query": query,
+            "lexical_results": lexical_results[:limit],
+            "embedding_results": embedding_results[:limit],
+            "selected_context": ranked,
+            "summary": {
+                "lexical_results": len(lexical_results),
+                "embedding_results": len(embedding_results),
+                "expanded_candidates": len(expanded),
+                "selected": len(ranked),
+                "graph_enabled": effective_use_graph,
+                "embeddings_enabled": effective_use_embeddings,
+                "rerank_enabled": use_rerank,
+                "summaries_enabled": bool(use_summaries and summary_root is not None),
+                "retrieval_gate": gate,
+                "query_profile": query_profile,
+            },
+        }
 
 
 def graph_indexes(graph: Dict[str, object]) -> Tuple[Dict[str, Dict[str, object]], Dict[str, List[Dict[str, object]]], Dict[str, List[Dict[str, object]]]]:

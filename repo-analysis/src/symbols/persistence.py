@@ -6,6 +6,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from common.telemetry import increment_counter, trace_operation
+
 
 def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, object]) -> None:
     repo_output = output_root / repo_name
@@ -659,7 +661,9 @@ def write_json(path: Path, payload: Dict[str, object]) -> None:
 
 
 def load_symbol_index(parsed_root: Path, repo_name: str) -> Dict[str, object]:
-    return _load_symbol_index_cached(str(parsed_root.resolve()), repo_name)
+    increment_counter("full_symbol_payload_loads")
+    with trace_operation("load_symbol_index"):
+        return _load_symbol_index_cached(str(parsed_root.resolve()), repo_name)
 
 
 @lru_cache(maxsize=8)

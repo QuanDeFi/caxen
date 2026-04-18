@@ -10,6 +10,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from common.native_tool import build_bm25_index, native_worker_available, query_bm25_index
 from common.query_manifest import update_query_manifest
+from common.telemetry import trace_operation
 from symbols.indexer import stable_id, timestamp_now
 from symbols.persistence import load_symbol_index
 
@@ -197,26 +198,27 @@ def search_documents(
     limit: int = 10,
     kinds: Sequence[str] = (),
 ) -> List[Dict[str, object]]:
-    sqlite_path = search_root / repo_name / "search.sqlite3"
-    tantivy_dir = search_root / repo_name / "tantivy"
-    tokens = tokenize(query)
-    if not tokens or (not sqlite_path.exists() and not tantivy_dir.exists()):
-        return []
+    with trace_operation("search_documents"):
+        sqlite_path = search_root / repo_name / "search.sqlite3"
+        tantivy_dir = search_root / repo_name / "tantivy"
+        tokens = tokenize(query)
+        if not tokens or (not sqlite_path.exists() and not tantivy_dir.exists()):
+            return []
 
-    if tantivy_dir.exists():
-        try:
-            results = query_bm25_index(tantivy_dir, query, limit=limit, kinds=kinds)
-            if results:
-                return results
-        except Exception:
-            pass
+        if tantivy_dir.exists():
+            try:
+                results = query_bm25_index(tantivy_dir, query, limit=limit, kinds=kinds)
+                if results:
+                    return results
+            except Exception:
+                pass
 
-    with sqlite3.connect(sqlite_path) as connection:
-        connection.row_factory = sqlite3.Row
-        results = query_documents(connection, build_and_query(tokens), limit, kinds)
-        if not results and len(tokens) > 1:
-            results = query_documents(connection, build_or_query(tokens), limit, kinds)
-        return results
+        with sqlite3.connect(sqlite_path) as connection:
+            connection.row_factory = sqlite3.Row
+            results = query_documents(connection, build_and_query(tokens), limit, kinds)
+            if not results and len(tokens) > 1:
+                results = query_documents(connection, build_or_query(tokens), limit, kinds)
+            return results
 
 
 def search_documents_scoped(

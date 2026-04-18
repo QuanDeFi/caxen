@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from common.telemetry import snapshot_telemetry, trace_operation
 from graph.query import (
     adjacent_symbols as graph_adjacent_symbols,
     callers_of as graph_callers_of,
@@ -255,13 +256,14 @@ def get_symbol_signature(
     repo_name: str,
     symbol_query: str,
 ) -> Dict[str, object]:
-    symbol = resolve_symbol_query(search_root, parsed_root, repo_name, symbol_query)
-    return {
-        "repo": repo_name,
-        "query": symbol_query,
-        "symbol": symbol,
-        "signature": symbol.get("signature") if symbol else None,
-    }
+    with trace_operation("get_symbol_signature"):
+        symbol = resolve_symbol_query(search_root, parsed_root, repo_name, symbol_query)
+        return {
+            "repo": repo_name,
+            "query": symbol_query,
+            "symbol": symbol,
+            "signature": symbol.get("signature") if symbol else None,
+        }
 
 
 def get_symbol_body(
@@ -270,23 +272,28 @@ def get_symbol_body(
     repo_name: str,
     symbol_query: str,
 ) -> Dict[str, object]:
-    symbol = resolve_symbol_query(search_root, parsed_root, repo_name, symbol_query)
-    if not symbol:
-        return {"repo": repo_name, "query": symbol_query, "symbol": None, "body": None}
+    with trace_operation("get_symbol_body"):
+        symbol = resolve_symbol_query(search_root, parsed_root, repo_name, symbol_query)
+        if not symbol:
+            return {"repo": repo_name, "query": symbol_query, "symbol": None, "body": None}
 
-    documents = lookup_symbol_documents(
-        search_root,
-        repo_name,
-        symbol["symbol_id"],
-        kinds=("function_body", "type_body"),
-        limit=4,
-    )
-    return {
-        "repo": repo_name,
-        "query": symbol_query,
-        "symbol": describe_symbol_row(symbol),
-        "body": documents[0] if documents else None,
-    }
+        documents = lookup_symbol_documents(
+            search_root,
+            repo_name,
+            symbol["symbol_id"],
+            kinds=("function_body", "type_body"),
+            limit=4,
+        )
+        return {
+            "repo": repo_name,
+            "query": symbol_query,
+            "symbol": describe_symbol_row(symbol),
+            "body": documents[0] if documents else None,
+        }
+
+
+def telemetry_snapshot() -> Dict[str, object]:
+    return snapshot_telemetry()
 
 
 def get_enclosing_context(

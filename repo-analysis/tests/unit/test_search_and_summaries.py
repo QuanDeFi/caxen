@@ -33,6 +33,7 @@ from agents.toolkit import (
     summarize_path,
     trace_calls,
 )
+from common.telemetry import snapshot_telemetry
 from common.query_manifest import load_query_manifest
 from embeddings.indexer import build_embedding_index, query_embedding_index
 from evaluation.harness import export_benchmark_prompts, run_benchmarks, score_answer_bundles, score_external_answers
@@ -217,6 +218,28 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertIn("search_sqlite", query_manifest["artifacts"])
             self.assertTrue(all(item.get("summary_id") for item in symbols["symbols"]))
             self.assertTrue(all(item.get("normalized_body_hash") for item in symbols["symbols"]))
+
+    def test_telemetry_tracks_full_payload_hydration_and_hot_path_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = seed_demo_workspace(Path(tmpdir))
+
+            retrieve_context(
+                paths["search_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                "demo",
+                "helper callers",
+                limit=4,
+            )
+
+            telemetry = snapshot_telemetry()
+            counters = telemetry.get("counters", {})
+            timings = telemetry.get("timings", {})
+
+            self.assertGreaterEqual(int(counters.get("full_symbol_payload_loads", 0)), 1)
+            self.assertGreaterEqual(int(counters.get("full_graph_payload_loads", 0)), 1)
+            self.assertIn("retrieve_context", timings)
+            self.assertIn("search_documents", timings)
 
             with sqlite3.connect(paths["parsed_root"] / "demo" / "symbols.sqlite3") as connection:
                 tables = {

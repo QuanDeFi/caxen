@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from common.telemetry import increment_counter, trace_operation
 from search.indexer import search_documents
 from symbols.indexer import stable_id
 from symbols.persistence import load_symbol_index
@@ -258,13 +259,14 @@ def where_defined(
     *,
     limit: int = 10,
 ) -> Dict[str, object]:
-    symbols = load_symbols_payload(parsed_root, repo_name)
-    matches = resolve_symbol_matches(search_root, symbols, repo_name, symbol_query, limit=limit)
-    return {
-        "repo": repo_name,
-        "query": symbol_query,
-        "matches": [describe_symbol(symbol) for symbol in matches],
-    }
+    with trace_operation("where_defined"):
+        symbols = load_symbols_payload(parsed_root, repo_name)
+        matches = resolve_symbol_matches(search_root, symbols, repo_name, symbol_query, limit=limit)
+        return {
+            "repo": repo_name,
+            "query": symbol_query,
+            "matches": [describe_symbol(symbol) for symbol in matches],
+        }
 
 
 def who_imports(
@@ -329,15 +331,16 @@ def callers_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return _neighbors_wrapper(
-        search_root,
-        parsed_root,
-        graph_root,
-        repo_name,
-        symbol_query,
-        operation="callers_of",
-        limit=limit,
-    )
+    with trace_operation("callers_of"):
+        return _neighbors_wrapper(
+            search_root,
+            parsed_root,
+            graph_root,
+            repo_name,
+            symbol_query,
+            operation="callers_of",
+            limit=limit,
+        )
 
 
 def callees_of(
@@ -349,15 +352,16 @@ def callees_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return _neighbors_wrapper(
-        search_root,
-        parsed_root,
-        graph_root,
-        repo_name,
-        symbol_query,
-        operation="callees_of",
-        limit=limit,
-    )
+    with trace_operation("callees_of"):
+        return _neighbors_wrapper(
+            search_root,
+            parsed_root,
+            graph_root,
+            repo_name,
+            symbol_query,
+            operation="callees_of",
+            limit=limit,
+        )
 
 
 def reads_of(
@@ -470,24 +474,25 @@ def statement_slice(
     limit: int = 20,
     window: int = 8,
 ) -> Dict[str, object]:
-    response = execute_graph_query(
-        search_root,
-        parsed_root,
-        graph_root,
-        repo_name,
-        {
-            "operation": "statement_slice",
-            "seed": symbol_query,
-            "limit": limit,
-            "window": window,
-        },
-    )
-    return {
-        "repo": repo_name,
-        "query": symbol_query,
-        "matches": response["seeds"],
-        "statements": response["results"],
-    }
+    with trace_operation("statement_slice"):
+        response = execute_graph_query(
+            search_root,
+            parsed_root,
+            graph_root,
+            repo_name,
+            {
+                "operation": "statement_slice",
+                "seed": symbol_query,
+                "limit": limit,
+                "window": window,
+            },
+        )
+        return {
+            "repo": repo_name,
+            "query": symbol_query,
+            "matches": response["seeds"],
+            "statements": response["results"],
+        }
 
 
 def path_between(
@@ -502,28 +507,29 @@ def path_between(
     edge_types: Sequence[str] = (),
     direction: str = "both",
 ) -> Dict[str, object]:
-    response = execute_graph_query(
-        search_root,
-        parsed_root,
-        graph_root,
-        repo_name,
-        {
-            "operation": "path_between",
-            "seed": source_query,
-            "target": target_query,
-            "limit": limit,
-            "edge_types": list(edge_types),
-            "direction": direction,
-        },
-    )
-    return {
-        "repo": repo_name,
-        "source_query": source_query,
-        "target_query": target_query,
-        "matches": response["seeds"],
-        "targets": response.get("targets", []),
-        "paths": response["results"],
-    }
+    with trace_operation("path_between"):
+        response = execute_graph_query(
+            search_root,
+            parsed_root,
+            graph_root,
+            repo_name,
+            {
+                "operation": "path_between",
+                "seed": source_query,
+                "target": target_query,
+                "limit": limit,
+                "edge_types": list(edge_types),
+                "direction": direction,
+            },
+        )
+        return {
+            "repo": repo_name,
+            "source_query": source_query,
+            "target_query": target_query,
+            "matches": response["seeds"],
+            "targets": response.get("targets", []),
+            "paths": response["results"],
+        }
 
 
 def symbol_summary(
@@ -568,10 +574,12 @@ def _load_graph_view_cached(graph_root: str, repo_name: str) -> Dict[str, object
 
 
 def load_graph_view_uncached(graph_root: Path, repo_name: str) -> Dict[str, object]:
-    sqlite_path = graph_root / repo_name / "graph.sqlite3"
-    if sqlite_path.exists():
-        return load_graph_sqlite(sqlite_path)
-    return load_graph_json(graph_root / repo_name / "graph.json")
+    increment_counter("full_graph_payload_loads")
+    with trace_operation("load_graph_view_uncached"):
+        sqlite_path = graph_root / repo_name / "graph.sqlite3"
+        if sqlite_path.exists():
+            return load_graph_sqlite(sqlite_path)
+        return load_graph_json(graph_root / repo_name / "graph.json")
 
 
 def has_symbol_summary_cache(connection: sqlite3.Connection) -> bool:
