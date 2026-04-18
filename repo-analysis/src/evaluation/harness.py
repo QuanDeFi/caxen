@@ -782,11 +782,9 @@ def compute_repo_artifact_fingerprint(
     summary_root: Path,
 ) -> str:
     tracked_paths = [
-        parsed_root / repo_name / "query_manifest.json",
-        parsed_root / repo_name / "metadata.lmdb",
-        graph_root / repo_name / "graph.sqlite3",
         search_root / repo_name / "search_manifest.json",
-        summary_root / repo_name / "summary_manifest.json",
+        parsed_root / repo_name / "query_manifest.json",
+        graph_root / repo_name / "graph_manifest.json",
     ]
     snapshot = []
     for path in tracked_paths:

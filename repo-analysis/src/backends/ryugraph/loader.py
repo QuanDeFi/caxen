@@ -141,6 +141,8 @@ def load_ryugraph_database(
         )
         connection.commit()
 
+    write_graph_manifest(repo_output, payload, emit_json=emit_json)
+
     if emit_json:
         target_json = repo_output / "graph.json"
         target_json.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
@@ -154,6 +156,27 @@ def load_ryugraph_database(
         except FileNotFoundError:
             pass
     return target
+
+
+def write_graph_manifest(repo_output: Path, payload: Dict[str, object], *, emit_json: bool) -> None:
+    manifest = {
+        "schema_version": str(payload.get("schema_version") or ""),
+        "repo": str(payload.get("repo") or ""),
+        "generated_at": str(payload.get("generated_at") or ""),
+        "graph_backend": "sqlite_graph",
+        "artifacts": {
+            "graph_sqlite3": "graph.sqlite3",
+            "graph_json": "graph.json" if emit_json else None,
+        },
+        "summary": payload.get("summary", {}),
+        "features": {
+            "symbol_summary_cache": True,
+            "neighbor_cache": True,
+            "json_exports": bool(emit_json),
+        },
+    }
+    target = repo_output / "graph_manifest.json"
+    target.write_text(json.dumps(manifest, indent=2, sort_keys=False) + "\n", encoding="utf-8")
 
 
 def flatten_node_row(row: Dict[str, object]) -> Dict[str, object]:
