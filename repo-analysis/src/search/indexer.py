@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -207,11 +208,14 @@ def search_documents(
 
         if tantivy_dir.exists():
             try:
-                results = query_bm25_index(tantivy_dir, query, limit=limit, kinds=kinds)
+                results = query_bm25_index(tantivy_dir, " ".join(tokens), limit=limit, kinds=kinds)
                 if results:
                     return results
             except Exception:
                 pass
+
+        if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") != "1":
+            return []
 
         with sqlite3.connect(sqlite_path) as connection:
             connection.row_factory = sqlite3.Row

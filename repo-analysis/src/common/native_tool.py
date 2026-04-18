@@ -142,18 +142,24 @@ def query_bm25_index(
     *,
     limit: int = 10,
     kinds: Sequence[str] = (),
+    path_prefix: str | None = None,
+    symbol_id: str | None = None,
 ) -> list[Dict[str, object]]:
     args = [
         "query-bm25",
         "--index-dir",
         str(index_dir),
-        "--query",
-        query,
         "--limit",
         str(limit),
     ]
+    if query:
+        args.extend(["--query", query])
     for kind in kinds:
         args.extend(["--kind", kind])
+    if path_prefix:
+        args.extend(["--path-prefix", path_prefix])
+    if symbol_id:
+        args.extend(["--symbol-id", symbol_id])
     payload = run_native_json(args, timeout=120)
     return list(payload.get("results", []))
 

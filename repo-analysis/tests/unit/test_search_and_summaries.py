@@ -208,6 +208,27 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertTrue(any(item["name"] == "helper" for item in symbol_hits))
             self.assertTrue((paths["search_root"] / "demo" / "tantivy").exists())
 
+    def test_tantivy_hot_path_works_without_search_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = seed_demo_workspace(Path(tmpdir))
+            sqlite_path = paths["search_root"] / "demo" / "search.sqlite3"
+            tantivy_dir = paths["search_root"] / "demo" / "tantivy"
+            if not tantivy_dir.exists():
+                self.skipTest("native Tantivy index unavailable in this environment")
+            sqlite_path.unlink()
+
+            symbol_lookup = find_symbol(paths["search_root"], "demo", "helper", limit=5)
+            self.assertTrue(any(item["name"] == "helper" for item in symbol_lookup["results"]))
+
+            file_lookup = find_file(paths["search_root"], "demo", "src/lib.rs", limit=5)
+            self.assertTrue(any(item["path"] == "src/lib.rs" for item in file_lookup["results"]))
+
+            lexical = search_lexical(paths["search_root"], "demo", "answer helper", limit=5, kinds=("symbol",))
+            self.assertGreater(len(lexical["results"]), 0)
+
+            body = get_symbol_body(paths["search_root"], paths["parsed_root"], "demo", "answer")
+            self.assertEqual(body["body"]["kind"], "function_body")
+
     def test_parser_probe_and_embedding_sidecar_are_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = seed_demo_workspace(Path(tmpdir))
@@ -242,7 +263,7 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertEqual(int(counters.get("full_symbol_payload_loads", 0)), 0)
             self.assertEqual(int(counters.get("full_graph_payload_loads", 0)), 0)
             self.assertIn("retrieve_context", timings)
-            self.assertIn("search_documents", timings)
+            self.assertIn("retrieve_context.lexical_search", timings)
 
     def test_lexical_toolkit_commands_do_not_trigger_full_payload_hydration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

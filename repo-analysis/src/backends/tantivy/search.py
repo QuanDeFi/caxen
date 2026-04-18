@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
-from search.indexer import lookup_symbol_documents, search_documents, search_documents_scoped
+from common.native_tool import query_bm25_index
+from search.indexer import lookup_symbol_documents, search_documents, search_documents_scoped, tokenize
 
 
 class TantivySearchBackend:
-    """Search adapter that prefers Tantivy/BM25 via `search_documents`."""
+    """Tantivy-native search adapter for the interactive hot path."""
 
     def __init__(self, search_root: Path, repo_name: str) -> None:
         self.search_root = search_root
@@ -21,22 +23,35 @@ class TantivySearchBackend:
         kinds: Sequence[str] = (),
         path_prefix: Optional[str] = None,
     ) -> List[Dict[str, object]]:
-        if path_prefix:
-            return search_documents_scoped(
+        normalized_query = " ".join(tokenize(query))
+        tantivy_dir = self.search_root / self.repo_name / "tantivy"
+        if tantivy_dir.exists():
+            results = query_bm25_index(
+                tantivy_dir,
+                normalized_query,
+                limit=max(limit * 3, limit),
+                kinds=kinds,
+                path_prefix=path_prefix,
+            )
+            return results[:limit]
+        if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") == "1":
+            if path_prefix:
+                return search_documents_scoped(
+                    self.search_root,
+                    self.repo_name,
+                    query,
+                    limit=limit,
+                    kinds=kinds,
+                    path_prefix=path_prefix,
+                )
+            return search_documents(
                 self.search_root,
                 self.repo_name,
                 query,
                 limit=limit,
                 kinds=kinds,
-                path_prefix=path_prefix,
             )
-        return search_documents(
-            self.search_root,
-            self.repo_name,
-            query,
-            limit=limit,
-            kinds=kinds,
-        )
+        return []
 
     def find_file(self, path_pattern: str, *, limit: int) -> List[Dict[str, object]]:
         docs = self.search(
@@ -61,22 +76,29 @@ class TantivySearchBackend:
         return [item for _, item in ranked[:limit]]
 
     def lookup_symbol_docs(self, symbol_id: str, *, kinds: Sequence[str] = (), limit: int = 20) -> List[Dict[str, object]]:
-        docs = self.search(
-            symbol_id,
-            limit=max(limit * 8, 40),
-            kinds=kinds,
-        )
-        exact = [item for item in docs if str(item.get("symbol_id") or "") == symbol_id]
-        if exact:
-            return exact[:limit]
-        fallback = lookup_symbol_documents(
-            self.search_root,
-            self.repo_name,
-            symbol_id,
-            kinds=kinds,
-            limit=limit,
-        )
-        return fallback if fallback else docs[:limit]
+        tantivy_dir = self.search_root / self.repo_name / "tantivy"
+        if tantivy_dir.exists():
+            docs = query_bm25_index(
+                tantivy_dir,
+                "",
+                limit=max(limit * 4, 20),
+                kinds=kinds,
+                symbol_id=symbol_id,
+            )
+            exact = [item for item in docs if str(item.get("symbol_id") or "") == symbol_id]
+            if exact:
+                return exact[:limit]
+        if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") == "1":
+            fallback = lookup_symbol_documents(
+                self.search_root,
+                self.repo_name,
+                symbol_id,
+                kinds=kinds,
+                limit=limit,
+            )
+            if fallback:
+                return fallback
+        return []
 
     def compare_repo_candidates(self, query: str, *, limit: int) -> List[Dict[str, object]]:
         return self.search(

@@ -8,9 +8,9 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
-use tantivy::schema::{Document, Field, Schema, STORED, STRING, TEXT};
-use tantivy::{doc, Index};
+use tantivy::query::{AllQuery, QueryParser, TermQuery};
+use tantivy::schema::{Document, Field, IndexRecordOption, Schema, STORED, STRING, TEXT};
+use tantivy::{doc, Index, Term};
 use tree_sitter::{Node, Parser as TsParser};
 
 #[derive(Parser)]
@@ -37,11 +37,15 @@ enum Commands {
         #[arg(long)]
         index_dir: PathBuf,
         #[arg(long)]
-        query: String,
+        query: Option<String>,
         #[arg(long, default_value_t = 10)]
         limit: usize,
         #[arg(long)]
         kind: Vec<String>,
+        #[arg(long)]
+        path_prefix: Option<String>,
+        #[arg(long)]
+        symbol_id: Option<String>,
     },
 }
 
@@ -129,7 +133,16 @@ fn main() -> Result<()> {
             query,
             limit,
             kind,
-        } => query_bm25(&index_dir, &query, limit, &kind),
+            path_prefix,
+            symbol_id,
+        } => query_bm25(
+            &index_dir,
+            query.as_deref(),
+            limit,
+            &kind,
+            path_prefix.as_deref(),
+            symbol_id.as_deref(),
+        ),
     }
 }
 
@@ -198,26 +211,43 @@ fn build_bm25(documents_path: &Path, output_dir: &Path) -> Result<()> {
     }))
 }
 
-fn query_bm25(index_dir: &Path, query: &str, limit: usize, kinds: &[String]) -> Result<()> {
+fn query_bm25(
+    index_dir: &Path,
+    query: Option<&str>,
+    limit: usize,
+    kinds: &[String],
+    path_prefix: Option<&str>,
+    symbol_id: Option<&str>,
+) -> Result<()> {
     let index = Index::open_in_dir(index_dir)?;
     let schema = index.schema();
     let fields = build_fields(&schema);
     let reader = index.reader()?;
     let searcher = reader.searcher();
-    let query_parser = QueryParser::for_index(
-        &index,
-        vec![
-            fields.searchable,
-            fields.title,
-            fields.path,
-            fields.name,
-            fields.qualified_name,
-        ],
-    );
-    let compiled_query = query_parser.parse_query(query)?;
+    let compiled_query: Box<dyn tantivy::query::Query> = if let Some(symbol_id) = symbol_id.filter(|value| !value.is_empty()) {
+        Box::new(TermQuery::new(
+            Term::from_field_text(fields.symbol_id, symbol_id),
+            IndexRecordOption::Basic,
+        ))
+    } else if let Some(query_text) = query.map(str::trim).filter(|value| !value.is_empty()) {
+        let query_parser = QueryParser::for_index(
+            &index,
+            vec![
+                fields.searchable,
+                fields.title,
+                fields.path,
+                fields.name,
+                fields.qualified_name,
+            ],
+        );
+        query_parser.parse_query(query_text)?
+    } else {
+        Box::new(AllQuery)
+    };
     let top_docs = searcher.search(&compiled_query, &TopDocs::with_limit(limit.saturating_mul(8).max(20)))?;
 
     let allowed_kinds: Vec<&str> = kinds.iter().map(|value| value.as_str()).collect();
+    let normalized_prefix = path_prefix.map(|value| value.trim_end_matches('/').to_string());
     let mut results = Vec::new();
     for (score, address) in top_docs {
         let document: Document = searcher.doc(address)?;
@@ -225,12 +255,18 @@ fn query_bm25(index_dir: &Path, query: &str, limit: usize, kinds: &[String]) -> 
         if !allowed_kinds.is_empty() && !allowed_kinds.iter().any(|value| *value == kind) {
             continue;
         }
+        let path_value = get_first_text(&document, fields.path);
+        if let Some(prefix) = normalized_prefix.as_deref() {
+            if path_value.is_empty() || !path_value.starts_with(prefix) {
+                continue;
+            }
+        }
         let metadata_json = get_first_text(&document, fields.metadata_json);
         results.push(json!({
             "doc_id": get_first_text(&document, fields.doc_id),
             "kind": kind,
             "repo": get_first_text(&document, fields.repo),
-            "path": null_if_empty(get_first_text(&document, fields.path)),
+            "path": null_if_empty(path_value),
             "name": null_if_empty(get_first_text(&document, fields.name)),
             "qualified_name": null_if_empty(get_first_text(&document, fields.qualified_name)),
             "symbol_id": null_if_empty(get_first_text(&document, fields.symbol_id)),
