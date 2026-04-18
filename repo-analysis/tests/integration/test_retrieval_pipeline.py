@@ -635,7 +635,7 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             )
             prompt_payload = json.loads(prompt_exports.stdout)
             self.assertGreaterEqual(prompt_payload["summary"]["exports"], 1)
-            self.assertTrue((eval_root / "eval.sqlite3").exists())
+            self.assertTrue((eval_root / "eval.lmdb").exists())
 
             bundle_scores = subprocess.run(
                 [

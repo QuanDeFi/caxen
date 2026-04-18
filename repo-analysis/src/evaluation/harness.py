@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import sqlite3
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -685,41 +684,8 @@ def summarize_external_answer_scores(scores: Sequence[Dict[str, object]]) -> Dic
 
 def ensure_eval_cache_database(eval_root: Path) -> Path:
     eval_root.mkdir(parents=True, exist_ok=True)
-    path = eval_root / "eval.sqlite3"
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS metadata(
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS benchmark_case_cache(
-                case_name TEXT PRIMARY KEY,
-                repo TEXT NOT NULL,
-                task_type TEXT NOT NULL,
-                query TEXT NOT NULL,
-                limit_value INTEGER NOT NULL,
-                artifact_fingerprint TEXT NOT NULL,
-                cache_fingerprint TEXT NOT NULL,
-                bundle_json TEXT NOT NULL,
-                prompt_payload_json TEXT NOT NULL,
-                bundle_score_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO metadata(key, value)
-            VALUES(?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value
-            """,
-            ("schema_version", EVAL_CACHE_SCHEMA_VERSION),
-        )
+    path = eval_root / "eval.lmdb"
+    path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -817,25 +783,41 @@ def compute_repo_artifact_fingerprint(
 ) -> str:
     tracked_paths = [
         parsed_root / repo_name / "query_manifest.json",
-        parsed_root / repo_name / "symbols.sqlite3",
+        parsed_root / repo_name / "metadata.lmdb",
         graph_root / repo_name / "graph.sqlite3",
-        search_root / repo_name / "search.sqlite3",
         search_root / repo_name / "search_manifest.json",
-        summary_root / repo_name / "summary.sqlite3",
         summary_root / repo_name / "summary_manifest.json",
     ]
     snapshot = []
     for path in tracked_paths:
         if path.exists():
-            stat = path.stat()
-            snapshot.append(
+            snapshot.extend(snapshot_artifact(path))
+    return hashlib.sha1(json.dumps(snapshot, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def snapshot_artifact(path: Path) -> List[Dict[str, object]]:
+    if path.is_dir():
+        rows: List[Dict[str, object]] = []
+        for child in sorted(path.rglob("*")):
+            if not child.is_file():
+                continue
+            stat = child.stat()
+            rows.append(
                 {
-                    "path": str(path),
+                    "path": str(child),
                     "size": stat.st_size,
                     "mtime_ns": stat.st_mtime_ns,
                 }
             )
-    return hashlib.sha1(json.dumps(snapshot, sort_keys=True).encode("utf-8")).hexdigest()
+        return rows
+    stat = path.stat()
+    return [
+        {
+            "path": str(path),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+    ]
 
 
 def build_prompt_payload(case: Dict[str, object], bundle: Dict[str, object]) -> Dict[str, object]:

@@ -33,6 +33,7 @@ from agents.toolkit import (
     statement_slice,
     summarize_path,
     trace_calls,
+    where_defined,
 )
 from backends.metadata_store import get_metadata_store
 from common.telemetry import reset_telemetry, snapshot_telemetry
@@ -273,6 +274,29 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertEqual(summary["qualified_name"], "demo_crate::helper")
             summaries_by_symbol = metadata_store.get_summary_by_symbol(symbol_ids[0])
             self.assertEqual(len(summaries_by_symbol), 1)
+
+    def test_exact_lookup_commands_use_lmdb_without_sqlite_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = seed_demo_workspace(Path(tmpdir))
+            (paths["parsed_root"] / "demo" / "symbols.sqlite3").unlink()
+            (paths["summary_root"] / "demo" / "summary.sqlite3").unlink()
+
+            where = where_defined(paths["search_root"], paths["parsed_root"], "demo", "demo_crate::helper", limit=5)
+            self.assertEqual(where["matches"][0]["qualified_name"], "demo_crate::helper")
+
+            signature = get_symbol_signature(paths["search_root"], paths["parsed_root"], "demo", "demo_crate::helper")
+            self.assertEqual(signature["signature"], "pub fn helper() -> u64 {")
+
+            context = get_enclosing_context(
+                paths["search_root"],
+                paths["summary_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                "demo",
+                "demo_crate::helper",
+            )
+            self.assertIsNotNone(context["context"]["path_summary"])
+            self.assertEqual(context["context"]["path_summary"]["path"], "src/lib.rs")
 
     def test_telemetry_tracks_full_payload_hydration_and_hot_path_timing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -703,7 +727,6 @@ class SearchAndSummaryTest(unittest.TestCase):
             )
             self.assertEqual(prompts["summary"]["exports"], 1)
             self.assertTrue((eval_root / "prompt_exports" / "demo_answer_bundle.json").exists())
-            self.assertTrue((eval_root / "eval.sqlite3").exists())
             self.assertTrue((eval_root / "eval.lmdb").exists())
 
             metadata_store = get_metadata_store(

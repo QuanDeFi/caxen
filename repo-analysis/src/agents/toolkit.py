@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from backends.metadata_store import get_metadata_store
@@ -30,19 +30,19 @@ from retrieval.planner import (
     retrieve_iterative as build_iterative_bundle,
 )
 from search.indexer import list_documents
-from summaries.builder import load_summary_artifacts
-from symbols.persistence import load_symbol_by_id
+from symbols.indexer import stable_id
 
 
 DEFAULT_REPOS = ("carbon", "yellowstone-vixen")
 
 
 def repo_overview(summary_root: Path, repo_name: str) -> Dict[str, object]:
-    summaries = load_summary_artifacts(summary_root, repo_name)
+    metadata_store = metadata_store_from_summary_root(summary_root, repo_name)
+    project_summary = metadata_store.get_summary_by_id(stable_id("sum", repo_name, "project")) or {}
     return {
         "repo": repo_name,
-        "project": summaries["project"],
-        "summary_counts": summaries["manifest"]["summary"],
+        "project": project_summary,
+        "summary_counts": {},
     }
 
 
@@ -124,8 +124,9 @@ def compare_repos(
 ) -> Dict[str, object]:
     comparisons = []
     for repo_name in repos:
-        summaries = load_summary_artifacts(summary_root, repo_name)
-        cached = compare_repo_from_agent_cache(search_root, repo_name, query, summaries, limit=limit)
+        metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name, summary_root=str(summary_root.resolve()))
+        project_summary = metadata_store.get_summary_by_id(stable_id("sum", repo_name, "project")) or {}
+        cached = compare_repo_from_agent_cache(search_root, repo_name, query, project_summary, limit=limit)
         if cached is not None:
             comparisons.append(cached)
             continue
@@ -183,18 +184,21 @@ def find_runtime_handlers(search_root: Path, repo_name: str, *, limit: int = 10)
 
 
 def summarize_path(summary_root: Path, repo_name: str, path: str) -> Dict[str, object]:
-    summaries = load_summary_artifacts(summary_root, repo_name)
-    for file_summary in summaries["files"]:
-        if file_summary["path"] == path:
-            return {"repo": repo_name, "path": path, "kind": "file", "summary": file_summary}
-    for directory_summary in summaries["directories"]:
-        if directory_summary["path"] == path:
-            return {"repo": repo_name, "path": path, "kind": "directory", "summary": directory_summary}
+    metadata_store = metadata_store_from_summary_root(summary_root, repo_name)
+    path_summaries = metadata_store.get_summary_by_path(path)
+    if path_summaries:
+        exact_kind = "file" if PurePosixPath(path).suffix else "directory"
+        return {"repo": repo_name, "path": path, "kind": exact_kind, "summary": path_summaries[0]}
+
     matching_prefix = None
-    for directory_summary in summaries["directories"]:
-        if path.startswith(f"{directory_summary['path']}/") or path == directory_summary["path"]:
-            if matching_prefix is None or len(directory_summary["path"]) > len(matching_prefix["path"]):
-                matching_prefix = directory_summary
+    prefixes = parent_paths(path)
+    for prefix in prefixes:
+        prefix_summaries = metadata_store.get_summary_by_path(prefix)
+        for summary in prefix_summaries:
+            if str(summary.get("scope") or "") != "directory":
+                continue
+            if matching_prefix is None or len(str(summary.get("path") or "")) > len(str(matching_prefix.get("path") or "")):
+                matching_prefix = summary
     return {
         "repo": repo_name,
         "path": path,
@@ -215,14 +219,9 @@ def get_summary(
     summary_by_id = metadata_store.get_summary_by_id(node_id)
     if summary_by_id is not None:
         return {"repo": repo_name, "node_id": node_id, "summary": summary_by_id}
-
-    summaries = load_summary_artifacts(summary_root, repo_name)
     if node_id == stable_repo_id(repo_name):
-        return {"repo": repo_name, "node_id": node_id, "summary": summaries["project"]}
-    for collection_name in ("packages", "directories", "files", "symbols"):
-        for item in summaries.get(collection_name, []):
-            if item.get("summary_id") == node_id:
-                return {"repo": repo_name, "node_id": node_id, "summary": item}
+        project_summary = metadata_store.get_summary_by_id(stable_id("sum", repo_name, "project"))
+        return {"repo": repo_name, "node_id": node_id, "summary": project_summary}
 
     graph_response = execute_graph_request(
         search_root,
@@ -233,16 +232,6 @@ def get_summary(
     )
     if graph_response.get("results"):
         return {"repo": repo_name, "node_id": node_id, "summary": graph_response["results"][0]}
-
-    for file_summary in summaries["files"]:
-        if stable_file_id(repo_name, file_summary["path"]) == node_id:
-            return {"repo": repo_name, "node_id": node_id, "summary": file_summary}
-    for directory_summary in summaries["directories"]:
-        if stable_directory_id(repo_name, directory_summary["path"]) == node_id:
-            return {"repo": repo_name, "node_id": node_id, "summary": directory_summary}
-    for package_summary in summaries.get("packages", []):
-        if stable_package_id(repo_name, str(package_summary.get("package_name") or "")) == node_id:
-            return {"repo": repo_name, "node_id": node_id, "summary": package_summary}
     return {"repo": repo_name, "node_id": node_id, "summary": None}
 
 
@@ -311,7 +300,7 @@ def get_enclosing_context(
         "context": {
             "symbol": describe_symbol_row(symbol),
             "container": describe_symbol_row(container) if container else None,
-            "path_summary": path_summary[0] if path_summary else summarize_path(summary_root, repo_name, symbol["path"]),
+            "path_summary": path_summary[0] if path_summary else None,
             "statement_slice": graph_statement_slice(
                 search_root,
                 parsed_root,
@@ -708,7 +697,7 @@ def compare_repo_from_agent_cache(
     search_root: Path,
     repo_name: str,
     query: str,
-    summaries: Dict[str, object],
+    project_summary: Dict[str, object],
     *,
     limit: int,
 ) -> Optional[Dict[str, object]]:
@@ -718,7 +707,7 @@ def compare_repo_from_agent_cache(
         return None
     return {
         "repo": repo_name,
-        "focus": str(summaries.get("project", {}).get("focus") or ""),
+        "focus": str(project_summary.get("focus") or ""),
         "top_context": top_context,
         "bundle_summary": {
             "selected_context": len(top_context),
@@ -837,8 +826,7 @@ def kind_compare_rank(kind: str) -> int:
 def resolve_symbol_query(search_root: Path, parsed_root: Path, repo_name: str, symbol_query: str) -> Optional[Dict[str, object]]:
     metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name)
     if symbol_query.startswith("sym:"):
-        symbol = metadata_store.get_symbol(symbol_query)
-        return symbol if symbol is not None else load_symbol_by_id(parsed_root, repo_name, symbol_query)
+        return metadata_store.get_symbol(symbol_query)
 
     qname_matches = metadata_store.resolve_qname(symbol_query)
     if qname_matches:
@@ -854,7 +842,7 @@ def resolve_symbol_query(search_root: Path, parsed_root: Path, repo_name: str, s
     symbol_id = matches[0]["symbol_id"]
     if not symbol_id:
         return None
-    return load_symbol_by_id(parsed_root, repo_name, symbol_id)
+    return metadata_store.get_symbol(symbol_id)
 
 
 def describe_symbol_row(symbol: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
@@ -896,3 +884,16 @@ def stable_package_id(repo_name: str, package_name: str) -> str:
     from symbols.indexer import stable_id
 
     return stable_id("pkg", repo_name, package_name)
+
+
+def metadata_store_from_summary_root(summary_root: Path, repo_name: str):
+    parsed_root = summary_root.parent / "parsed"
+    return get_metadata_store(str(parsed_root.resolve()), repo_name, summary_root=str(summary_root.resolve()))
+
+
+def parent_paths(path: str) -> List[str]:
+    raw = str(path or "").strip("/")
+    if not raw:
+        return ["."]
+    parts = raw.split("/")
+    return ["/".join(parts[:index]) for index in range(len(parts), 0, -1)]

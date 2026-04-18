@@ -8,7 +8,7 @@ from backends.metadata_store import get_metadata_store
 from common.telemetry import trace_operation
 from retrieval.engine import classify_query, retrieve_context
 from search.indexer import tokenize
-from summaries.builder import load_summary_artifacts
+from symbols.indexer import stable_id
 
 
 DEFAULT_REPOS = ("carbon", "yellowstone-vixen")
@@ -104,7 +104,7 @@ def prepare_answer_bundle(
                 use_summaries=True,
                 selective_retrieval=True,
             )
-            summaries = load_summary_artifacts(summary_root, current_repo)
+            project_summary = metadata_store.get_summary_by_id(stable_id("sum", current_repo, "project")) or {}
             selected_context = context["selected_context"]
             symbol_candidates = [item for item in selected_context if item.get("symbol_id")]
             file_candidates = [item for item in selected_context if item.get("path")]
@@ -172,8 +172,8 @@ def prepare_answer_bundle(
                 {
                     "repo": current_repo,
                     "intent": repo_plan["intent"],
-                    "focus": summaries["project"]["focus"],
-                    "project_summary": summaries["project"]["summary"],
+                    "focus": str(project_summary.get("focus") or ""),
+                    "project_summary": str(project_summary.get("summary") or ""),
                     "retrieval_recipe": repo_plan["retrieval_recipe"],
                     "selected_context": selected_context,
                     "top_symbols": compact_candidates(symbol_candidates, limit=5),
@@ -181,7 +181,7 @@ def prepare_answer_bundle(
                     "graph_neighborhoods": graph_neighborhoods,
                     "statement_slices": statement_slices,
                     "relevant_summaries": select_relevant_summaries_from_store(
-                        summaries["project"],
+                        project_summary,
                         metadata_store,
                         selected_context,
                     ),
