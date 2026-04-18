@@ -6,7 +6,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from backends.search_backend import get_search_backend
 from common.telemetry import trace_operation
-from graph.query import load_graph_view_uncached
+from graph.query import load_graph_view
 from embeddings.indexer import query_embedding_index
 from rerank.fusion import rerank_candidates
 from search.indexer import tokenize
@@ -69,7 +69,7 @@ def retrieve_context(
         embedding_results = (
             query_embedding_index(search_root, repo_name, query, limit=max(limit, 5)) if effective_use_embeddings else []
         )
-        graph = load_graph_view_uncached(graph_root, repo_name)["payload"]
+        graph = load_graph_view(graph_root, repo_name)["payload"]
         symbols = load_symbol_index(parsed_root, repo_name)
         symbol_by_id = {item["symbol_id"]: item for item in symbols.get("symbols", [])}
         symbols_by_path = defaultdict(list)
