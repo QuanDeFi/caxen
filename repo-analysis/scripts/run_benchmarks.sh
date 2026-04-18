@@ -7,6 +7,13 @@ ALL_ARGS=("$@")
 REPO_ARGS=()
 INDEX_ARGS=()
 
+for arg in "${ALL_ARGS[@]}"; do
+  if [[ "$arg" == "--help" || "$arg" == "-h" ]]; then
+    PYTHON_BIN="${PYTHON_BIN:-python3}"
+    exec "$PYTHON_BIN" "$SCRIPT_DIR/../src/cli/main.py" run-benchmarks --help
+  fi
+done
+
 for ((i = 0; i < ${#ALL_ARGS[@]}; i++)); do
   case "${ALL_ARGS[$i]}" in
     --repo)
