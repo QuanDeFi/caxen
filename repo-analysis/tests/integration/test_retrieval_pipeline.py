@@ -115,7 +115,7 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
                 text=True,
             )
 
-            self.assertTrue((search_root / "yellowstone-vixen" / "search.sqlite3").exists())
+            self.assertTrue((search_root / "yellowstone-vixen" / "documents.jsonl").exists())
             self.assertTrue((search_root / "yellowstone-vixen" / "tantivy").exists())
             self.assertTrue((search_root / "yellowstone-vixen" / "embedding_index.json").exists())
             self.assertTrue((summary_root / "yellowstone-vixen" / "summary.sqlite3").exists())

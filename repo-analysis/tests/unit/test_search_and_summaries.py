@@ -34,6 +34,7 @@ from agents.toolkit import (
     summarize_path,
     trace_calls,
 )
+from backends.metadata_store import get_metadata_store
 from common.telemetry import reset_telemetry, snapshot_telemetry
 from common.query_manifest import load_query_manifest
 from embeddings.indexer import build_embedding_index, query_embedding_index
@@ -215,7 +216,8 @@ class SearchAndSummaryTest(unittest.TestCase):
             tantivy_dir = paths["search_root"] / "demo" / "tantivy"
             if not tantivy_dir.exists():
                 self.skipTest("native Tantivy index unavailable in this environment")
-            sqlite_path.unlink()
+            if sqlite_path.exists():
+                sqlite_path.unlink()
 
             symbol_lookup = find_symbol(paths["search_root"], "demo", "helper", limit=5)
             self.assertTrue(any(item["name"] == "helper" for item in symbol_lookup["results"]))
@@ -238,9 +240,39 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertIn("parser_backends", symbols)
             self.assertTrue(symbols["parser_backends"]["rustc_ast_probe"]["available"])
             self.assertGreater(symbols["summary"]["statements"], 0)
-            self.assertIn("search_sqlite", query_manifest["artifacts"])
+            self.assertIn("search_documents_jsonl", query_manifest["artifacts"])
             self.assertTrue(all(item.get("summary_id") for item in symbols["symbols"]))
             self.assertTrue(all(item.get("normalized_body_hash") for item in symbols["symbols"]))
+            self.assertTrue((paths["parsed_root"] / "demo" / "metadata.lmdb").exists())
+
+    def test_lmdb_metadata_store_serves_symbol_body_and_summary_without_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = seed_demo_workspace(Path(tmpdir))
+            metadata_store = get_metadata_store(
+                str(paths["parsed_root"].resolve()),
+                "demo",
+                summary_root=str(paths["summary_root"].resolve()),
+                eval_root=str((Path(tmpdir) / "eval").resolve()),
+            )
+
+            symbol_ids = metadata_store.resolve_qname("demo_crate::helper")
+            self.assertEqual(len(symbol_ids), 1)
+            helper = metadata_store.get_symbol(symbol_ids[0])
+            self.assertEqual(helper["qualified_name"], "demo_crate::helper")
+
+            body = metadata_store.get_symbol_body(symbol_ids[0])
+            self.assertEqual(body["qualified_name"], "demo_crate::helper")
+            self.assertTrue(any("7" in statement["text"] for statement in body["statements"]))
+
+            summary_id = str(helper["summary_id"])
+            (paths["parsed_root"] / "demo" / "symbols.sqlite3").unlink()
+            (paths["summary_root"] / "demo" / "summary.sqlite3").unlink()
+
+            summary = metadata_store.get_summary_by_id(summary_id)
+            self.assertIsNotNone(summary)
+            self.assertEqual(summary["qualified_name"], "demo_crate::helper")
+            summaries_by_symbol = metadata_store.get_summary_by_symbol(symbol_ids[0])
+            self.assertEqual(len(summaries_by_symbol), 1)
 
     def test_telemetry_tracks_full_payload_hydration_and_hot_path_timing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -672,12 +704,16 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertEqual(prompts["summary"]["exports"], 1)
             self.assertTrue((eval_root / "prompt_exports" / "demo_answer_bundle.json").exists())
             self.assertTrue((eval_root / "eval.sqlite3").exists())
+            self.assertTrue((eval_root / "eval.lmdb").exists())
 
-            with sqlite3.connect(eval_root / "eval.sqlite3") as connection:
-                rows = connection.execute(
-                    "SELECT count(*) FROM benchmark_case_cache"
-                ).fetchone()[0]
-                self.assertEqual(rows, 1)
+            metadata_store = get_metadata_store(
+                str(paths["parsed_root"].resolve()),
+                "demo",
+                summary_root=str(paths["summary_root"].resolve()),
+                eval_root=str(eval_root.resolve()),
+            )
+            cached_case = metadata_store.get_eval_case("demo_answer_bundle", "")
+            self.assertIsNotNone(cached_case)
 
             bundle_scores = score_answer_bundles(
                 paths["search_root"],

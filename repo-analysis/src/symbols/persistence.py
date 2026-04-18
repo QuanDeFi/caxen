@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
+
+import lmdb
 
 from common.telemetry import increment_counter, trace_operation
 
@@ -334,6 +337,150 @@ def write_symbol_database(output_root: Path, repo_name: str, payload: Dict[str, 
     _load_symbol_index_cached.cache_clear()
 
 
+def write_lmdb_metadata_bundle(
+    output_root: Path,
+    repo_name: str,
+    payload: Dict[str, object],
+    *,
+    summaries_payload: Dict[str, object] | None = None,
+) -> None:
+    repo_output = output_root / repo_name
+    repo_output.mkdir(parents=True, exist_ok=True)
+    target = repo_output / "metadata.lmdb"
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+
+    files_by_path = {str(row["path"]): dict(row) for row in payload.get("files", [])}
+    symbols_by_id = {str(row["symbol_id"]): dict(row) for row in payload.get("symbols", [])}
+    statements_by_symbol: Dict[str, List[Dict[str, object]]] = {}
+    for row in payload.get("statements", []):
+        symbol_id = str(row.get("container_symbol_id") or "")
+        if not symbol_id:
+            continue
+        statements_by_symbol.setdefault(symbol_id, []).append(
+            {
+                "statement_id": row["statement_id"],
+                "text": row["text"],
+                "line": int(row["span"]["start_line"]),
+            }
+        )
+    for rows in statements_by_symbol.values():
+        rows.sort(key=lambda item: (int(item["line"]), str(item["statement_id"])))
+
+    symbol_ids_by_qname: Dict[str, List[str]] = {}
+    symbol_ids_by_name: Dict[str, List[str]] = {}
+    for row in payload.get("symbols", []):
+        symbol_id = str(row["symbol_id"])
+        qname = str(row.get("qualified_name") or "")
+        name = str(row.get("name") or "")
+        if qname:
+            symbol_ids_by_qname.setdefault(qname, []).append(symbol_id)
+        if name:
+            symbol_ids_by_name.setdefault(name, []).append(symbol_id)
+    for ids in symbol_ids_by_qname.values():
+        ids.sort()
+    for ids in symbol_ids_by_name.values():
+        ids.sort()
+
+    summaries_by_id: Dict[str, Dict[str, object]] = {}
+    summaries_by_path: Dict[str, List[Dict[str, object]]] = {}
+    summaries_by_symbol: Dict[str, List[Dict[str, object]]] = {}
+    if summaries_payload is not None:
+        for key in ("project",):
+            item = summaries_payload.get(key)
+            if isinstance(item, dict) and item:
+                summary_id = str(item.get("summary_id") or "")
+                if summary_id:
+                    summaries_by_id[summary_id] = dict(item)
+        for collection_name in ("packages", "directories", "files", "symbols"):
+            for item in summaries_payload.get(collection_name, []):
+                summary_id = str(item.get("summary_id") or "")
+                if not summary_id:
+                    continue
+                record = dict(item)
+                summaries_by_id[summary_id] = record
+                path = str(record.get("path") or "")
+                symbol_id = str(record.get("symbol_id") or "")
+                if path:
+                    summaries_by_path.setdefault(path, []).append(record)
+                if symbol_id:
+                    summaries_by_symbol.setdefault(symbol_id, []).append(record)
+        for rows in summaries_by_path.values():
+            rows.sort(key=lambda item: str(item.get("summary_id") or ""))
+        for rows in summaries_by_symbol.values():
+            rows.sort(key=lambda item: str(item.get("summary_id") or ""))
+
+    env = lmdb.open(
+        str(target),
+        map_size=1 << 30,
+        subdir=True,
+        create=True,
+        max_dbs=16,
+        lock=True,
+        writemap=False,
+        metasync=True,
+        sync=True,
+    )
+    dbs = {
+        "symbol_by_id": env.open_db(b"symbol_by_id"),
+        "symbol_ids_by_qname": env.open_db(b"symbol_ids_by_qname"),
+        "symbol_ids_by_name": env.open_db(b"symbol_ids_by_name"),
+        "file_by_path": env.open_db(b"file_by_path"),
+        "body_by_symbol_id": env.open_db(b"body_by_symbol_id"),
+        "summary_by_id": env.open_db(b"summary_by_id"),
+        "summary_by_path": env.open_db(b"summary_by_path"),
+        "summary_by_symbol_id": env.open_db(b"summary_by_symbol_id"),
+        "metadata": env.open_db(b"metadata"),
+    }
+    try:
+        with env.begin(write=True) as txn:
+            for key, value in (
+                ("schema_version", str(payload["schema_version"])),
+                ("repo", str(payload["repo"])),
+                ("generated_at", str(payload["generated_at"])),
+                ("parser", str(payload["parser"])),
+                ("summary", payload.get("summary", {})),
+                ("primary_parser_backends", payload.get("primary_parser_backends", [])),
+                ("parser_backends", payload.get("parser_backends", {})),
+            ):
+                txn.put(encode_key(key), encode_value(value), db=dbs["metadata"])
+
+            for path, row in sorted(files_by_path.items()):
+                txn.put(encode_key(path), encode_value(row), db=dbs["file_by_path"])
+
+            for symbol_id, row in sorted(symbols_by_id.items()):
+                txn.put(encode_key(symbol_id), encode_value(row), db=dbs["symbol_by_id"])
+                txn.put(
+                    encode_key(symbol_id),
+                    encode_value(
+                        {
+                            "symbol_id": symbol_id,
+                            "path": row.get("path"),
+                            "qualified_name": row.get("qualified_name"),
+                            "signature": row.get("signature"),
+                            "statements": statements_by_symbol.get(symbol_id, []),
+                        }
+                    ),
+                    db=dbs["body_by_symbol_id"],
+                )
+
+            for qname, symbol_ids in sorted(symbol_ids_by_qname.items()):
+                txn.put(encode_key(qname), encode_value(symbol_ids), db=dbs["symbol_ids_by_qname"])
+            for name, symbol_ids in sorted(symbol_ids_by_name.items()):
+                txn.put(encode_key(name), encode_value(symbol_ids), db=dbs["symbol_ids_by_name"])
+
+            for summary_id, row in sorted(summaries_by_id.items()):
+                txn.put(encode_key(summary_id), encode_value(row), db=dbs["summary_by_id"])
+            for path, rows in sorted(summaries_by_path.items()):
+                txn.put(encode_key(path), encode_value(rows), db=dbs["summary_by_path"])
+            for symbol_id, rows in sorted(summaries_by_symbol.items()):
+                txn.put(encode_key(symbol_id), encode_value(rows), db=dbs["summary_by_symbol_id"])
+    finally:
+        env.sync()
+        env.close()
+
+
 def write_symbol_parquet_bundle(output_root: Path, repo_name: str, payload: Dict[str, object]) -> None:
     repo_output = output_root / repo_name
     repo_output.mkdir(parents=True, exist_ok=True)
@@ -658,6 +805,14 @@ def write_json(path: Path, payload: Dict[str, object]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=False)
         handle.write("\n")
+
+
+def encode_key(value: str) -> bytes:
+    return value.encode("utf-8")
+
+
+def encode_value(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True).encode("utf-8")
 
 
 def load_symbol_index(parsed_root: Path, repo_name: str) -> Dict[str, object]:

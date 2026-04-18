@@ -12,6 +12,7 @@ from symbols.indexer import stable_id, timestamp_now
 from symbols.persistence import (
     load_summary_bundle_database,
     load_symbol_index,
+    write_lmdb_metadata_bundle,
     write_summary_bundle_database,
     write_summary_database,
 )
@@ -367,6 +368,8 @@ def sync_summary_state(
     emit_json: bool = False,
 ) -> None:
     write_summary_database(parsed_root, repo_name, payload)
+    symbol_payload = load_symbol_index(parsed_root, repo_name)
+    write_lmdb_metadata_bundle(parsed_root, repo_name, symbol_payload, summaries_payload=payload)
     augment_graph_with_summaries(graph_root, repo_name, payload, emit_json=emit_json)
 
 

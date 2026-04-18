@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import tempfile
 import time
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
@@ -53,6 +52,7 @@ def build_search_index(
     output_root: Path,
     *,
     emit_json: bool = False,
+    emit_sqlite: bool = False,
     progress_callback: Callable[[Dict[str, object]], None] | None = None,
 ) -> Dict[str, object]:
     started = time.perf_counter()
@@ -92,27 +92,24 @@ def build_search_index(
     repo_output.mkdir(parents=True, exist_ok=True)
     emit("documents_built", documents=len(documents))
 
-    sqlite_path = repo_output / "search.sqlite3"
-    if sqlite_path.exists():
-        sqlite_path.unlink()
-    emit("writing_sqlite")
     agent_cache = build_agent_cache(repo_name, documents)
-    write_search_database(sqlite_path, documents, agent_cache)
+    sqlite_path = repo_output / "search.sqlite3"
+    if emit_sqlite:
+        if sqlite_path.exists():
+            sqlite_path.unlink()
+        emit("writing_sqlite")
+        write_search_database(sqlite_path, documents, agent_cache)
+    else:
+        remove_file_if_exists(sqlite_path)
 
-    documents_path: Path | None = None
-    temp_documents_path: Path | None = None
+    documents_path = repo_output / "documents.jsonl"
+    emit("writing_documents_jsonl")
+    write_documents_jsonl(documents_path, documents)
     if emit_json:
-        documents_path = repo_output / "documents.jsonl"
-        emit("writing_documents_jsonl")
-        write_documents_jsonl(documents_path, documents)
         emit("writing_agent_cache", entries=agent_cache["summary"]["entries"])
         write_json(repo_output / "agent_cache.json", agent_cache)
     else:
-        remove_file_if_exists(repo_output / "documents.jsonl")
         remove_file_if_exists(repo_output / "agent_cache.json")
-        tempdir = Path(tempfile.mkdtemp(prefix=f"repo-analysis-search-{repo_name}-"))
-        temp_documents_path = tempdir / "documents.jsonl"
-        write_documents_jsonl(temp_documents_path, documents)
 
     bm25_artifact = {
         "available": False,
@@ -122,7 +119,7 @@ def build_search_index(
     if native_worker_available():
         emit("building_bm25")
         try:
-            bm25_artifact = build_bm25_index(documents_path or temp_documents_path, tantivy_dir)
+            bm25_artifact = build_bm25_index(documents_path, tantivy_dir)
             bm25_artifact["available"] = True
             bm25_artifact["built"] = True
             emit("bm25_built", built=True)
@@ -142,8 +139,8 @@ def build_search_index(
         "repo": repo_name,
         "generated_at": timestamp_now(),
         "artifacts": {
-            "sqlite": "search.sqlite3",
-            "documents_jsonl": "documents.jsonl" if emit_json else None,
+            "sqlite": "search.sqlite3" if emit_sqlite else None,
+            "documents_jsonl": "documents.jsonl",
             "agent_cache": "agent_cache.json" if emit_json else None,
             "tantivy": "tantivy" if bm25_artifact.get("built") else None,
         },
@@ -167,8 +164,8 @@ def build_search_index(
         parsed_root,
         repo_name,
         artifacts={
-            "search_sqlite": "data/search/{repo}/search.sqlite3".format(repo=repo_name),
-            "search_documents_jsonl": "data/search/{repo}/documents.jsonl".format(repo=repo_name) if emit_json else None,
+            "search_sqlite": "data/search/{repo}/search.sqlite3".format(repo=repo_name) if emit_sqlite else None,
+            "search_documents_jsonl": "data/search/{repo}/documents.jsonl".format(repo=repo_name),
             "search_agent_cache": "data/search/{repo}/agent_cache.json".format(repo=repo_name) if emit_json else None,
             "search_tantivy": "data/search/{repo}/tantivy".format(repo=repo_name) if bm25_artifact.get("built") else None,
         },
@@ -179,15 +176,10 @@ def build_search_index(
         build={
             "bm25": bm25_artifact,
             "search_json_exports": emit_json,
+            "search_sqlite_compat": emit_sqlite,
         },
     )
     emit("build_completed", documents=len(documents), bm25_built=bool(bm25_artifact.get("built")))
-    if temp_documents_path is not None:
-        try:
-            temp_documents_path.unlink()
-            temp_documents_path.parent.rmdir()
-        except OSError:
-            pass
     return payload
 
 

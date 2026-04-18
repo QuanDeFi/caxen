@@ -37,11 +37,12 @@ def build_embedding_index(
     provider: str | None = None,
     model: str | None = None,
 ) -> Dict[str, object]:
-    sqlite_path = search_root / repo_name / "search.sqlite3"
-    if not sqlite_path.exists():
-        raise FileNotFoundError(f"Missing search index for {repo_name}: {sqlite_path}")
-
-    documents = load_search_documents(sqlite_path)
+    repo_search_root = search_root / repo_name
+    documents_path = repo_search_root / "documents.jsonl"
+    sqlite_path = repo_search_root / "search.sqlite3"
+    documents = load_search_documents(documents_path, sqlite_path=sqlite_path)
+    if not documents:
+        raise FileNotFoundError(f"Missing search documents for {repo_name}: {documents_path}")
     provider_config = resolve_embedding_provider(provider, model)
     provider_name = str(provider_config["provider"])
     model_name = str(provider_config["model"])
@@ -256,7 +257,33 @@ def query_embedding_index(search_root: Path, repo_name: str, query: str, *, limi
     )[:limit]
 
 
-def load_search_documents(sqlite_path: Path) -> List[Dict[str, object]]:
+def load_search_documents(documents_path: Path, *, sqlite_path: Path | None = None) -> List[Dict[str, object]]:
+    if documents_path.exists():
+        documents: List[Dict[str, object]] = []
+        with documents_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                raw = line.strip()
+                if not raw:
+                    continue
+                payload = json.loads(raw)
+                documents.append(
+                    {
+                        "doc_id": payload["doc_id"],
+                        "kind": payload["kind"],
+                        "path": payload.get("path"),
+                        "name": payload.get("name"),
+                        "qualified_name": payload.get("qualified_name"),
+                        "symbol_id": payload.get("symbol_id"),
+                        "title": payload.get("title"),
+                        "preview": payload.get("preview"),
+                        "content": payload.get("content") or "",
+                    }
+                )
+        return documents
+
+    if sqlite_path is None or not sqlite_path.exists():
+        return []
+
     with sqlite3.connect(sqlite_path) as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute(

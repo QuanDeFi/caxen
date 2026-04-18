@@ -60,7 +60,7 @@ from graph.store import write_graph_database
 from search.indexer import build_search_index
 from summaries.builder import build_summary_artifacts, sync_summary_state, write_summary_artifacts
 from symbols.indexer import build_symbol_index, current_rss_mb, write_symbol_index
-from symbols.persistence import write_symbol_database, write_symbol_parquet_bundle
+from symbols.persistence import write_lmdb_metadata_bundle, write_symbol_database, write_symbol_parquet_bundle
 
 
 ADAPTERS = {
@@ -153,7 +153,12 @@ def build_parser() -> argparse.ArgumentParser:
     build_search.add_argument(
         "--emit-json",
         action="store_true",
-        help="Also write JSON export artifacts such as documents.jsonl and agent_cache.json.",
+        help="Also write optional JSON export artifacts such as agent_cache.json.",
+    )
+    build_search.add_argument(
+        "--emit-sqlite",
+        action="store_true",
+        help="Also write search.sqlite3 as a compatibility/debug artifact.",
     )
 
     build_summaries = subparsers.add_parser(
@@ -648,6 +653,7 @@ def handle_build_index(args: argparse.Namespace) -> int:
             ),
         )
         write_symbol_database(parsed_root, repo_name, symbol_index)
+        write_lmdb_metadata_bundle(parsed_root, repo_name, symbol_index)
         write_symbol_parquet_bundle(parsed_root, repo_name, symbol_index)
         if args.emit_json:
             write_symbol_index(parsed_root, repo_name, symbol_index)
@@ -662,6 +668,7 @@ def handle_build_index(args: argparse.Namespace) -> int:
             artifacts={
                 "symbols_json": f"data/parsed/{repo_name}/symbols.json" if args.emit_json else None,
                 "symbols_sqlite3": f"data/parsed/{repo_name}/symbols.sqlite3",
+                "metadata_lmdb": f"data/parsed/{repo_name}/metadata.lmdb",
                 "graph_json": f"data/graph/{repo_name}/graph.json" if args.emit_json else None,
                 "graph_sqlite3": f"data/graph/{repo_name}/graph.sqlite3",
             },
@@ -775,6 +782,7 @@ def handle_build_search(args: argparse.Namespace) -> int:
             parsed_root,
             search_root,
             emit_json=args.emit_json,
+            emit_sqlite=args.emit_sqlite,
             progress_callback=progress_callback,
         )
         emit_build_progress(
