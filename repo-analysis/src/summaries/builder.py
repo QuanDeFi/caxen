@@ -10,11 +10,9 @@ from graph.query import load_graph_view_uncached
 from graph.store import write_graph_database
 from symbols.indexer import stable_id, timestamp_now
 from symbols.persistence import (
-    load_summary_bundle_database,
+    load_summary_bundle_from_metadata,
     load_symbol_index,
-    write_lmdb_metadata_bundle,
-    write_summary_bundle_database,
-    write_summary_database,
+    write_metadata_bundle,
 )
 
 
@@ -115,13 +113,24 @@ def write_summary_artifacts(
 ) -> None:
     repo_output = output_root / repo_name
     repo_output.mkdir(parents=True, exist_ok=True)
-    write_summary_bundle_database(output_root, repo_name, payload)
-    for filename in ("project.json", "packages.json", "directories.json", "files.json", "symbols.json", "summary_manifest.json"):
+    for filename in (
+        "summary.sqlite3",
+        "project.json",
+        "packages.json",
+        "directories.json",
+        "files.json",
+        "symbols.json",
+        "summary_manifest.json",
+    ):
         remove_file_if_exists(repo_output / filename)
 
 
 def load_summary_artifacts(summary_root: Path, repo_name: str) -> Dict[str, object]:
-    return load_summary_bundle_database(summary_root, repo_name)
+    parsed_root = summary_root.parent / "parsed"
+    payload = load_summary_bundle_from_metadata(parsed_root, repo_name)
+    if payload is None:
+        raise FileNotFoundError(f"Missing summary metadata for repo '{repo_name}' under {parsed_root / repo_name}")
+    return payload
 
 
 def build_project_summary(
@@ -342,10 +351,17 @@ def sync_summary_state(
     graph_root: Path,
     repo_name: str,
     payload: Dict[str, object],
+    *,
+    artifact_metadata: Dict[str, object] | None = None,
 ) -> None:
-    write_summary_database(parsed_root, repo_name, payload)
     symbol_payload = load_symbol_index(parsed_root, repo_name)
-    write_lmdb_metadata_bundle(parsed_root, repo_name, symbol_payload, summaries_payload=payload)
+    write_metadata_bundle(
+        parsed_root,
+        repo_name,
+        symbol_payload,
+        summaries_payload=payload,
+        artifact_metadata=artifact_metadata,
+    )
     augment_graph_with_summaries(graph_root, repo_name, payload)
 
 

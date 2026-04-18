@@ -11,6 +11,9 @@ class GraphBackend(Protocol):
     def execute(self, request: Dict[str, object]) -> Optional[Dict[str, object]]:
         ...
 
+    def artifact_fingerprint(self) -> str:
+        ...
+
 
 @lru_cache(maxsize=16)
 def get_graph_backend(graph_root: str, repo_name: str) -> GraphBackend:

@@ -52,7 +52,6 @@ from adapters.carbon.adapter import inventory as inventory_carbon
 from adapters.yellowstone_vixen.adapter import inventory as inventory_yellowstone_vixen
 from common.inventory import write_inventory
 from common.native_tool import probe_native_worker
-from common.query_manifest import update_query_manifest
 from embeddings.indexer import build_embedding_index, query_embedding_index
 from evaluation.harness import benchmark_interactive_commands, export_benchmark_prompts, run_benchmarks, score_answer_bundles
 from graph.builder import build_graph_artifact
@@ -60,7 +59,7 @@ from graph.store import write_graph_database
 from search.indexer import build_search_index
 from summaries.builder import build_summary_artifacts, sync_summary_state, write_summary_artifacts
 from symbols.indexer import build_symbol_index, current_rss_mb
-from symbols.persistence import write_lmdb_metadata_bundle, write_symbol_database, write_symbol_parquet_bundle
+from symbols.persistence import update_lmdb_artifact_metadata, write_metadata_bundle
 
 
 ADAPTERS = {
@@ -630,35 +629,43 @@ def handle_build_index(args: argparse.Namespace) -> int:
                 f"graph_edges={graph_artifact.get('summary', {}).get('edges', 0)}"
             ),
         )
-        write_symbol_database(parsed_root, repo_name, symbol_index)
-        write_lmdb_metadata_bundle(parsed_root, repo_name, symbol_index)
-        write_symbol_parquet_bundle(parsed_root, repo_name, symbol_index)
-        remove_file_if_exists(parsed_root / repo_name / "symbols.json")
-        remove_file_if_exists(graph_root / repo_name / "graph.json")
-        graph_db_path = write_graph_database(graph_root, repo_name, graph_artifact)
-        update_query_manifest(
+        write_metadata_bundle(
             parsed_root,
             repo_name,
-            artifacts={
-                "symbols_json": None,
-                "symbols_sqlite3": f"data/parsed/{repo_name}/symbols.sqlite3",
-                "metadata_lmdb": f"data/parsed/{repo_name}/metadata.lmdb",
-                "graph_json": None,
-                "graph_db": f"data/graph/{repo_name}/graph.db",
+            symbol_index,
+            artifact_metadata={
+                "parsed_build": {
+                    "schema_version": symbol_index.get("schema_version"),
+                    "repo": repo_name,
+                    "generated_at": symbol_index.get("generated_at"),
+                    "parser": symbol_index.get("parser"),
+                    "primary_parser_backends": symbol_index.get("primary_parser_backends", []),
+                    "parser_backends": symbol_index.get("parser_backends", {}),
+                    "source_roots": symbol_index.get("source_roots", []),
+                    "path_prefixes": list(path_prefixes),
+                    "summary": symbol_index.get("summary", {}),
+                }
             },
-            features={
-                "graph_sqlite": True,
-                "iterative_retrieval": True,
-                "answer_bundle": True,
-            },
-            build={
-                "parser": symbol_index["parser"],
-                "primary_parser_backends": symbol_index.get("primary_parser_backends", []),
-                "parser_backends": symbol_index.get("parser_backends", {}),
-                "native_worker": native_worker,
-                "path_prefixes": list(path_prefixes),
-                "graph_database": graph_db_path.name,
-                "json_exports": False,
+        )
+        remove_file_if_exists(parsed_root / repo_name / "symbols.json")
+        remove_file_if_exists(parsed_root / repo_name / "symbols.sqlite3")
+        remove_file_if_exists(parsed_root / repo_name / "parquet_status.json")
+        remove_file_if_exists(parsed_root / repo_name / "query_manifest.json")
+        remove_file_if_exists(graph_root / repo_name / "graph.json")
+        graph_db_path = write_graph_database(graph_root, repo_name, graph_artifact)
+        update_lmdb_artifact_metadata(
+            parsed_root,
+            repo_name,
+            {
+                "graph_build": {
+                    "schema_version": graph_artifact.get("schema_version"),
+                    "repo": repo_name,
+                    "generated_at": graph_artifact.get("generated_at"),
+                    "graph_backend": "ryugraph",
+                    "graph_database": graph_db_path.name,
+                    "summary": graph_artifact.get("summary", {}),
+                    "native_worker": native_worker,
+                }
             },
         )
 
@@ -826,40 +833,35 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
                 f"elapsed_ms={round((time.perf_counter() - started) * 1000, 3):.1f}"
             ),
         )
-        sync_summary_state(parsed_root, graph_root, repo_name, payload)
         emit_build_progress(
             progress_path,
             {
-                "event": "updating_query_manifest",
+                "event": "persisting_summary_metadata",
                 "repo": repo_name,
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             },
             log_message=(
-                f"[build-summaries] repo={repo_name} stage=updating_query_manifest "
+                f"[build-summaries] repo={repo_name} stage=persisting_summary_metadata "
                 f"elapsed_ms={round((time.perf_counter() - started) * 1000, 3):.1f}"
             ),
         )
-        update_query_manifest(
+        sync_summary_state(
             parsed_root,
+            graph_root,
             repo_name,
-            artifacts={
-                "summary_sqlite3": f"data/summaries/{repo_name}/summary.sqlite3",
-                "summary_project": None,
-                "summary_packages": None,
-                "summary_directories": None,
-                "summary_files": None,
-                "summary_symbols": None,
-            },
-            features={
-                "summary_graph_nodes": True,
-                "summary_sqlite_table": True,
-            },
-            build={
-                "summary_schema_version": payload["schema_version"],
-                "summary_counts": payload["summary"],
-                "summary_json_exports": False,
+            payload,
+            artifact_metadata={
+                "summary_build": {
+                    "schema_version": payload.get("schema_version"),
+                    "repo": repo_name,
+                    "generated_at": payload.get("manifest", {}).get("generated_at"),
+                    "summary": payload.get("summary", {}),
+                    "summary_graph_nodes": True,
+                    "summary_json_exports": False,
+                }
             },
         )
+        remove_file_if_exists(parsed_root / repo_name / "query_manifest.json")
         emit_build_progress(
             progress_path,
             {

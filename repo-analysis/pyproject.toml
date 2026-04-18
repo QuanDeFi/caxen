@@ -3,7 +3,7 @@ name = "repo-analysis"
 version = "0.1.0"
 description = "Parser-first repository analysis toolkit for Carbon and Yellowstone Vixen"
 requires-python = ">=3.10"
-dependencies = ["lmdb>=1.4"]
+dependencies = ["lmdb>=1.4", "ryugraph>=25.9.2"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/integration"]

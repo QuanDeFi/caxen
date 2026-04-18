@@ -1,5 +1,4 @@
 import json
-import sqlite3
 import sys
 import tempfile
 import unittest
@@ -37,7 +36,6 @@ from agents.toolkit import (
 )
 from backends.metadata_store import get_metadata_store
 from common.telemetry import reset_telemetry, snapshot_telemetry
-from common.query_manifest import load_query_manifest
 from embeddings.indexer import build_embedding_index, query_embedding_index
 from evaluation.harness import export_benchmark_prompts, run_benchmarks, score_answer_bundles, score_external_answers
 from evaluation.harness import benchmark_interactive_commands
@@ -49,7 +47,7 @@ from rerank.fusion import rerank_candidates
 from search.indexer import build_search_index, search_documents
 from summaries.builder import build_summary_artifacts, load_summary_artifacts, sync_summary_state, write_summary_artifacts
 from symbols.indexer import build_symbol_index
-from symbols.persistence import load_symbol_index, write_symbol_database
+from symbols.persistence import load_symbol_index, write_metadata_bundle
 
 
 def seed_demo_workspace(root: Path) -> dict[str, Path]:
@@ -141,14 +139,41 @@ def seed_demo_workspace(root: Path) -> dict[str, Path]:
     )
 
     symbol_index = build_symbol_index("demo", repo_root, raw_root, path_prefixes=("src/lib.rs",))
-    write_symbol_database(parsed_root, "demo", symbol_index)
+    write_metadata_bundle(
+        parsed_root,
+        "demo",
+        symbol_index,
+        artifact_metadata={
+            "parsed_build": {
+                "schema_version": symbol_index.get("schema_version"),
+                "repo": "demo",
+                "generated_at": symbol_index.get("generated_at"),
+                "parser": symbol_index.get("parser"),
+                "summary": symbol_index.get("summary", {}),
+            }
+        },
+    )
     graph = build_graph_artifact(symbol_index)
     write_graph_database(graph_root, "demo", graph)
     build_search_index("demo", repo_root, raw_root, parsed_root, search_root)
     build_embedding_index(search_root, "demo")
     summary_artifacts = build_summary_artifacts("demo", raw_root, parsed_root, graph_root)
     write_summary_artifacts(summary_root, "demo", summary_artifacts)
-    sync_summary_state(parsed_root, graph_root, "demo", summary_artifacts)
+    sync_summary_state(
+        parsed_root,
+        graph_root,
+        "demo",
+        summary_artifacts,
+        artifact_metadata={
+            "summary_build": {
+                "schema_version": summary_artifacts.get("schema_version"),
+                "repo": "demo",
+                "generated_at": summary_artifacts.get("manifest", {}).get("generated_at"),
+                "summary": summary_artifacts.get("summary", {}),
+                "summary_graph_nodes": True,
+            }
+        },
+    )
 
     return {
         "repo_root": repo_root,
@@ -233,12 +258,14 @@ class SearchAndSummaryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = seed_demo_workspace(Path(tmpdir))
             symbols = load_symbol_index(paths["parsed_root"], "demo")
-            query_manifest = load_query_manifest(paths["parsed_root"], "demo")
+            metadata_store = get_metadata_store(str(paths["parsed_root"].resolve()), "demo")
+            search_build = metadata_store.get_artifact_metadata("search_build") or {}
 
             self.assertIn("parser_backends", symbols)
             self.assertTrue(symbols["parser_backends"]["rustc_ast_probe"]["available"])
             self.assertGreater(symbols["summary"]["statements"], 0)
-            self.assertIn("search_documents_jsonl", query_manifest["artifacts"])
+            self.assertEqual(search_build.get("search_backend"), "tantivy")
+            self.assertIsNotNone(search_build.get("search_root"))
             self.assertTrue(all(item.get("summary_id") for item in symbols["symbols"]))
             self.assertTrue(all(item.get("normalized_body_hash") for item in symbols["symbols"]))
             self.assertTrue((paths["parsed_root"] / "demo" / "metadata.lmdb").exists())
@@ -263,8 +290,12 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertTrue(any("7" in statement["text"] for statement in body["statements"]))
 
             summary_id = str(helper["summary_id"])
-            (paths["parsed_root"] / "demo" / "symbols.sqlite3").unlink()
-            (paths["summary_root"] / "demo" / "summary.sqlite3").unlink()
+            symbols_sqlite = paths["parsed_root"] / "demo" / "symbols.sqlite3"
+            if symbols_sqlite.exists():
+                symbols_sqlite.unlink()
+            summary_sqlite = paths["summary_root"] / "demo" / "summary.sqlite3"
+            if summary_sqlite.exists():
+                summary_sqlite.unlink()
 
             summary = metadata_store.get_summary_by_id(summary_id)
             self.assertIsNotNone(summary)
@@ -275,8 +306,12 @@ class SearchAndSummaryTest(unittest.TestCase):
     def test_exact_lookup_commands_use_lmdb_without_sqlite_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = seed_demo_workspace(Path(tmpdir))
-            (paths["parsed_root"] / "demo" / "symbols.sqlite3").unlink()
-            (paths["summary_root"] / "demo" / "summary.sqlite3").unlink()
+            symbols_sqlite = paths["parsed_root"] / "demo" / "symbols.sqlite3"
+            if symbols_sqlite.exists():
+                symbols_sqlite.unlink()
+            summary_sqlite = paths["summary_root"] / "demo" / "summary.sqlite3"
+            if summary_sqlite.exists():
+                summary_sqlite.unlink()
 
             where = where_defined(paths["search_root"], paths["parsed_root"], "demo", "demo_crate::helper", limit=5)
             self.assertEqual(where["matches"][0]["qualified_name"], "demo_crate::helper")
@@ -333,16 +368,12 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertEqual(int(counters.get("full_symbol_payload_loads", 0)), 0)
             self.assertEqual(int(counters.get("full_graph_payload_loads", 0)), 0)
 
-            with sqlite3.connect(paths["parsed_root"] / "demo" / "symbols.sqlite3") as connection:
-                tables = {
-                    row[0]
-                    for row in connection.execute(
-                        "SELECT name FROM sqlite_master WHERE type = 'table'"
-                    ).fetchall()
-                }
-                self.assertIn("tests", tables)
-                self.assertIn("summaries", tables)
-                self.assertIn("index_runs", tables)
+            metadata_store = get_metadata_store(str(paths["parsed_root"].resolve()), "demo")
+            parsed_build = metadata_store.get_artifact_metadata("parsed_build") or {}
+            summary_build = metadata_store.get_artifact_metadata("summary_build") or {}
+            self.assertEqual(parsed_build.get("repo"), "demo")
+            self.assertEqual(summary_build.get("repo"), "demo")
+            self.assertTrue(summary_build.get("summary_graph_nodes"))
 
             embedding_results = query_embedding_index(paths["search_root"], "demo", "helper answer", limit=5)
             self.assertGreater(len(embedding_results), 0)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from functools import lru_cache
@@ -28,6 +29,31 @@ class LmdbMetadataStore:
 
     def get_symbol(self, symbol_id: str) -> Optional[Dict[str, object]]:
         return self._get_json("symbol_by_id", symbol_id)
+
+    def get_file(self, path: str) -> Optional[Dict[str, object]]:
+        value = self._get_json("file_by_path", path)
+        return value if isinstance(value, dict) else None
+
+    def find_files_by_prefix(self, path_prefix: str, *, limit: int) -> List[Dict[str, object]]:
+        if not path_prefix:
+            return []
+        env = self._metadata_env()
+        db = env.open_db(b"file_by_path")
+        prefix = encode_key(path_prefix)
+        results: List[Dict[str, object]] = []
+        with env.begin(db=db, write=False) as txn:
+            with txn.cursor() as cursor:
+                if not cursor.set_range(prefix):
+                    return []
+                for raw_key, raw_value in cursor:
+                    if not raw_key.startswith(prefix):
+                        break
+                    value = decode_json(raw_value)
+                    if isinstance(value, dict):
+                        results.append(value)
+                    if len(results) >= limit:
+                        break
+        return results
 
     def get_symbols(self, symbol_ids: Sequence[str]) -> Dict[str, Dict[str, object]]:
         env = self._metadata_env()
@@ -65,6 +91,10 @@ class LmdbMetadataStore:
     def get_summary_by_symbol(self, symbol_id: str) -> List[Dict[str, object]]:
         value = self._get_json("summary_by_symbol_id", symbol_id)
         return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    def get_artifact_metadata(self, key: str) -> Optional[Dict[str, object]]:
+        value = self._get_json("artifact_metadata", key)
+        return value if isinstance(value, dict) else None
 
     def get_eval_case(self, case_name: str, fingerprint: str) -> Optional[Dict[str, object]]:
         env = self._eval_env()
@@ -108,6 +138,28 @@ class LmdbMetadataStore:
             txn.put(encode_key(f"case:{case_name}:{cache_fingerprint}"), encode_value(payload))
             txn.put(encode_key(f"latest:{case_name}"), encode_value(payload))
 
+    def artifact_fingerprint(self) -> str:
+        env = self._eval_or_metadata_env_for_fingerprint()
+        if env is None:
+            return hashlib.sha1(b"[]").hexdigest()
+        db = env.open_db(b"artifact_metadata")
+        rows: List[Dict[str, object]] = []
+        with env.begin(db=db, write=False) as txn:
+            with txn.cursor() as cursor:
+                for raw_key, raw_value in cursor:
+                    rows.append(
+                        {
+                            "key": raw_key.decode("utf-8"),
+                            "value": decode_json(raw_value),
+                        }
+                    )
+        if rows:
+            return hashlib.sha1(json.dumps(rows, sort_keys=True).encode("utf-8")).hexdigest()
+        snapshot = []
+        if self.metadata_path.exists():
+            snapshot.extend(snapshot_artifact(self.metadata_path))
+        return hashlib.sha1(json.dumps(snapshot, sort_keys=True).encode("utf-8")).hexdigest()
+
     def _get_json(self, db_name: str, key: str) -> object | None:
         if not key:
             return None
@@ -118,6 +170,11 @@ class LmdbMetadataStore:
 
     def _metadata_env(self) -> lmdb.Environment:
         return open_lmdb_env(str(self.metadata_path), readonly=True)
+
+    def _eval_or_metadata_env_for_fingerprint(self) -> lmdb.Environment | None:
+        if self.metadata_path.exists():
+            return open_lmdb_env(str(self.metadata_path), readonly=True)
+        return None
 
     def _eval_env(self) -> lmdb.Environment | None:
         if self.eval_path is None or not self.eval_path.exists():
@@ -157,3 +214,28 @@ def decode_json(raw: bytes | None) -> object | None:
     if raw is None:
         return None
     return json.loads(raw.decode("utf-8"))
+
+
+def snapshot_artifact(path: Path) -> List[Dict[str, object]]:
+    if path.is_dir():
+        rows: List[Dict[str, object]] = []
+        for child in sorted(path.rglob("*")):
+            if not child.is_file():
+                continue
+            stat = child.stat()
+            rows.append(
+                {
+                    "path": str(child),
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                }
+            )
+        return rows
+    stat = path.stat()
+    return [
+        {
+            "path": str(path),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
+    ]

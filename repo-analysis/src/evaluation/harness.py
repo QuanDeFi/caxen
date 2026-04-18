@@ -19,12 +19,13 @@ from agents.toolkit import (
     statement_slice,
     where_defined,
 )
-from common.telemetry import reset_telemetry, snapshot_telemetry
+from backends.graph_backend import get_graph_backend
 from backends.metadata_store import get_metadata_store
+from backends.search_backend import get_search_backend
+from common.telemetry import reset_telemetry, snapshot_telemetry
 from embeddings.indexer import query_embedding_index
 from retrieval.engine import retrieve_context
 from retrieval.planner import prepare_answer_bundle
-from search.indexer import search_documents
 from symbols.indexer import timestamp_now
 
 
@@ -476,7 +477,8 @@ def run_case(
 ) -> Dict[str, object]:
     started = time.perf_counter()
     if mode == "lexical_only":
-        selected = search_documents(search_root, case["repo"], case["query"], limit=limit, kinds=("symbol", "file"))
+        search_backend = get_search_backend(str(search_root.resolve()), str(case["repo"]))
+        selected = search_backend.search(str(case["query"]), limit=limit, kinds=("symbol", "file"))
         context_summary = {"mode": "lexical_only"}
     elif mode == "embedding_only":
         selected = query_embedding_index(search_root, case["repo"], case["query"], limit=limit)
@@ -781,41 +783,19 @@ def compute_repo_artifact_fingerprint(
     parsed_root: Path,
     summary_root: Path,
 ) -> str:
-    tracked_paths = [
-        search_root / repo_name / "search_manifest.json",
-        parsed_root / repo_name / "query_manifest.json",
-        graph_root / repo_name / "graph_manifest.json",
-    ]
-    snapshot = []
-    for path in tracked_paths:
-        if path.exists():
-            snapshot.extend(snapshot_artifact(path))
+    search_backend = get_search_backend(str(search_root.resolve()), repo_name)
+    graph_backend = get_graph_backend(str(graph_root.resolve()), repo_name)
+    metadata_store = get_metadata_store(
+        str(parsed_root.resolve()),
+        repo_name,
+        summary_root=str(summary_root.resolve()),
+    )
+    snapshot = {
+        "search": search_backend.artifact_fingerprint(),
+        "graph": graph_backend.artifact_fingerprint(),
+        "metadata": metadata_store.artifact_fingerprint(),
+    }
     return hashlib.sha1(json.dumps(snapshot, sort_keys=True).encode("utf-8")).hexdigest()
-
-
-def snapshot_artifact(path: Path) -> List[Dict[str, object]]:
-    if path.is_dir():
-        rows: List[Dict[str, object]] = []
-        for child in sorted(path.rglob("*")):
-            if not child.is_file():
-                continue
-            stat = child.stat()
-            rows.append(
-                {
-                    "path": str(child),
-                    "size": stat.st_size,
-                    "mtime_ns": stat.st_mtime_ns,
-                }
-            )
-        return rows
-    stat = path.stat()
-    return [
-        {
-            "path": str(path),
-            "size": stat.st_size,
-            "mtime_ns": stat.st_mtime_ns,
-        }
-    ]
 
 
 def build_prompt_payload(case: Dict[str, object], bundle: Dict[str, object]) -> Dict[str, object]:

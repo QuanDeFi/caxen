@@ -8,6 +8,12 @@ from backends.lmdb.store import LmdbMetadataStore
 
 
 class MetadataStore(Protocol):
+    def get_file(self, path: str) -> Optional[Dict[str, object]]:
+        ...
+
+    def find_files_by_prefix(self, path_prefix: str, *, limit: int) -> List[Dict[str, object]]:
+        ...
+
     def get_symbol(self, symbol_id: str) -> Optional[Dict[str, object]]:
         ...
 
@@ -32,6 +38,9 @@ class MetadataStore(Protocol):
     def get_summary_by_symbol(self, symbol_id: str) -> List[Dict[str, object]]:
         ...
 
+    def get_artifact_metadata(self, key: str) -> Optional[Dict[str, object]]:
+        ...
+
     def get_eval_case(self, case_name: str, fingerprint: str) -> Optional[Dict[str, object]]:
         ...
 
@@ -51,6 +60,9 @@ class MetadataStore(Protocol):
     ) -> None:
         ...
 
+    def artifact_fingerprint(self) -> str:
+        ...
+
 
 @lru_cache(maxsize=16)
 def get_metadata_store(parsed_root: str, repo_name: str, summary_root: str | None = None, eval_root: str | None = None) -> MetadataStore:
@@ -60,4 +72,3 @@ def get_metadata_store(parsed_root: str, repo_name: str, summary_root: str | Non
         summary_root=Path(summary_root) if summary_root else None,
         eval_root=Path(eval_root) if eval_root else None,
     )
-

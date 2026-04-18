@@ -5,9 +5,9 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 from backends.graph_backend import get_graph_backend
 from backends.metadata_store import get_metadata_store
+from common.text import tokenize
 from common.telemetry import trace_operation
 from retrieval.engine import classify_query, retrieve_context
-from search.indexer import tokenize
 from symbols.indexer import stable_id
 
 

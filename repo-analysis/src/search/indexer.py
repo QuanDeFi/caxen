@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import time
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from common.native_tool import build_bm25_index, native_worker_available, query_bm25_index
-from common.query_manifest import update_query_manifest
+from common.text import tokenize
 from common.telemetry import trace_operation
 from symbols.indexer import stable_id, timestamp_now
-from symbols.persistence import load_symbol_index
+from symbols.persistence import load_symbol_index, update_lmdb_artifact_metadata
 
 
 SCHEMA_VERSION = "0.3.0"
@@ -89,10 +90,8 @@ def build_search_index(
     emit("documents_built", documents=len(documents))
 
     remove_file_if_exists(repo_output / "search.sqlite3")
-
-    documents_path = repo_output / "documents.jsonl"
-    emit("writing_documents_jsonl")
-    write_documents_jsonl(documents_path, documents)
+    remove_file_if_exists(repo_output / "documents.jsonl")
+    remove_file_if_exists(repo_output / "search_manifest.json")
     remove_file_if_exists(repo_output / "agent_cache.json")
 
     bm25_artifact = {
@@ -103,7 +102,7 @@ def build_search_index(
     if native_worker_available():
         emit("building_bm25")
         try:
-            bm25_artifact = build_bm25_index(documents_path, tantivy_dir)
+            bm25_artifact = build_bm25_index_from_documents(documents, tantivy_dir)
             bm25_artifact["available"] = True
             bm25_artifact["built"] = True
             emit("bm25_built", built=True)
@@ -123,7 +122,6 @@ def build_search_index(
         "repo": repo_name,
         "generated_at": timestamp_now(),
         "artifacts": {
-            "documents_jsonl": "documents.jsonl",
             "tantivy": "tantivy" if bm25_artifact.get("built") else None,
         },
         "bm25": bm25_artifact,
@@ -138,25 +136,19 @@ def build_search_index(
             ],
         },
     }
-    with (repo_output / "search_manifest.json").open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=False)
-        handle.write("\n")
-    emit("writing_query_manifest")
-    update_query_manifest(
+    update_lmdb_artifact_metadata(
         parsed_root,
         repo_name,
-        artifacts={
-            "search_documents_jsonl": "data/search/{repo}/documents.jsonl".format(repo=repo_name),
-            "search_tantivy": "data/search/{repo}/tantivy".format(repo=repo_name) if bm25_artifact.get("built") else None,
-        },
-        features={
-            "bm25_default": bool(bm25_artifact.get("built")),
-            "agent_cache_sqlite": False,
-        },
-        build={
-            "bm25": bm25_artifact,
-            "search_json_exports": False,
-            "search_sqlite_compat": False,
+        {
+            "search_build": {
+                "schema_version": SCHEMA_VERSION,
+                "repo": repo_name,
+                "generated_at": payload["generated_at"],
+                "documents": len(documents),
+                "bm25": bm25_artifact,
+                "search_backend": "tantivy",
+                "search_root": f"data/search/{repo_name}/tantivy" if bm25_artifact.get("built") else None,
+            }
         },
     )
     emit("build_completed", documents=len(documents), bm25_built=bool(bm25_artifact.get("built")))
@@ -180,6 +172,13 @@ def search_documents(
             return query_bm25_index(tantivy_dir, " ".join(tokens), limit=limit, kinds=kinds)
         except Exception:
             return []
+
+
+def build_bm25_index_from_documents(documents: Sequence[Dict[str, object]], output_dir: Path) -> Dict[str, object]:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        documents_path = Path(tmpdir) / "documents.jsonl"
+        write_documents_jsonl(documents_path, documents)
+        return build_bm25_index(documents_path, output_dir)
 
 
 def search_documents_scoped(
@@ -206,18 +205,24 @@ def list_documents(
     kinds: Sequence[str] = (),
     path_prefix: Optional[str] = None,
 ) -> List[Dict[str, object]]:
-    documents = load_documents_jsonl(search_root / repo_name / "documents.jsonl")
-    normalized_prefix = path_prefix.rstrip("/") if path_prefix else None
-    results = []
-    for document in documents:
-        if kinds and str(document.get("kind") or "") not in kinds:
-            continue
-        path_value = str(document.get("path") or "")
-        if normalized_prefix and not path_value.startswith(normalized_prefix):
-            continue
-        results.append(document_to_result(document, score=0.0))
-    results.sort(key=lambda item: (str(item.get("kind") or ""), str(item.get("path") or ""), str(item.get("qualified_name") or item.get("name") or "")))
-    return results[:limit]
+    tantivy_dir = search_root / repo_name / "tantivy"
+    if not tantivy_dir.exists():
+        return []
+    results = query_bm25_index(
+        tantivy_dir,
+        "",
+        limit=limit,
+        kinds=kinds,
+        path_prefix=path_prefix,
+    )
+    return sorted(
+        results,
+        key=lambda item: (
+            str(item.get("kind") or ""),
+            str(item.get("path") or ""),
+            str(item.get("qualified_name") or item.get("name") or ""),
+        ),
+    )[:limit]
 
 
 def find_files(
@@ -246,23 +251,30 @@ def lookup_symbol_documents(
     kinds: Sequence[str] = (),
     limit: int = 20,
 ) -> List[Dict[str, object]]:
-    results = []
-    for document in load_documents_jsonl(search_root / repo_name / "documents.jsonl"):
-        if str(document.get("symbol_id") or "") != symbol_id:
-            continue
-        if kinds and str(document.get("kind") or "") not in kinds:
-            continue
-        results.append(document_to_result(document, score=0.0))
-    results.sort(key=lambda item: (str(item.get("kind") or ""), str(item.get("path") or ""), str(item.get("name") or ""), str(item.get("qualified_name") or "")))
-    return results[:limit]
-
-
-def load_search_manifest(search_root: Path, repo_name: str) -> Dict[str, object]:
-    return load_json(search_root / repo_name / "search_manifest.json")
+    tantivy_dir = search_root / repo_name / "tantivy"
+    if not tantivy_dir.exists():
+        return []
+    results = query_bm25_index(
+        tantivy_dir,
+        "",
+        limit=limit,
+        kinds=kinds,
+        symbol_id=symbol_id,
+    )
+    exact = [item for item in results if str(item.get("symbol_id") or "") == symbol_id]
+    exact.sort(
+        key=lambda item: (
+            str(item.get("kind") or ""),
+            str(item.get("path") or ""),
+            str(item.get("name") or ""),
+            str(item.get("qualified_name") or ""),
+        )
+    )
+    return exact[:limit]
 
 
 def load_agent_cache(search_root: Path, repo_name: str) -> Dict[str, object]:
-    documents = load_documents_jsonl(search_root / repo_name / "documents.jsonl")
+    documents = list_documents(search_root, repo_name, limit=250_000)
     return build_agent_cache(repo_name, documents)
 
 
@@ -796,15 +808,6 @@ def load_documents_jsonl(path: Path) -> List[Dict[str, object]]:
                 continue
             documents.append(json.loads(raw))
     return documents
-
-
-def tokenize(query: str) -> List[str]:
-    tokens = []
-    for raw_token in query.replace("::", " ").replace("/", " ").replace("-", " ").replace(".", " ").split():
-        normalized = "".join(char for char in raw_token.lower() if char.isalnum() or char == "_")
-        if normalized:
-            tokens.append(normalized)
-    return tokens
 
 
 def document_to_result(document: Dict[str, object], *, score: float) -> Dict[str, object]:

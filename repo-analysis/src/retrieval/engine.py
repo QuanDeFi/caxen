@@ -7,10 +7,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from backends.graph_backend import get_graph_backend
 from backends.metadata_store import get_metadata_store
 from backends.search_backend import get_search_backend
+from common.text import tokenize
 from common.telemetry import trace_operation
 from embeddings.indexer import query_embedding_index
 from rerank.fusion import rerank_candidates
-from search.indexer import tokenize
 from symbols.indexer import stable_id
 
 

@@ -224,6 +224,8 @@ fn query_bm25(
     let fields = build_fields(&schema);
     let reader = index.reader()?;
     let searcher = reader.searcher();
+    let is_all_query = symbol_id.filter(|value| !value.is_empty()).is_none()
+        && query.map(str::trim).filter(|value| !value.is_empty()).is_none();
     let compiled_query: Box<dyn tantivy::query::Query> = if let Some(symbol_id) = symbol_id.filter(|value| !value.is_empty()) {
         Box::new(TermQuery::new(
             Term::from_field_text(fields.symbol_id, symbol_id),
@@ -244,7 +246,12 @@ fn query_bm25(
     } else {
         Box::new(AllQuery)
     };
-    let top_docs = searcher.search(&compiled_query, &TopDocs::with_limit(limit.saturating_mul(8).max(20)))?;
+    let collector_limit = if is_all_query {
+        limit.max(1)
+    } else {
+        limit.saturating_mul(8).max(20)
+    };
+    let top_docs = searcher.search(&compiled_query, &TopDocs::with_limit(collector_limit))?;
 
     let allowed_kinds: Vec<&str> = kinds.iter().map(|value| value.as_str()).collect();
     let normalized_prefix = path_prefix.map(|value| value.trim_end_matches('/').to_string());
@@ -272,6 +279,7 @@ fn query_bm25(
             "symbol_id": null_if_empty(get_first_text(&document, fields.symbol_id)),
             "title": get_first_text(&document, fields.title),
             "preview": get_first_text(&document, fields.preview),
+            "searchable": get_first_text(&document, fields.searchable),
             "score": score,
             "metadata": serde_json::from_str::<Value>(&metadata_json).unwrap_or_else(|_| json!({})),
         }));

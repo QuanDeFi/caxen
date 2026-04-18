@@ -1,5 +1,4 @@
 import json
-import sqlite3
 import sys
 import tempfile
 import unittest
@@ -12,7 +11,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from graph.builder import build_graph_artifact
 from symbols.indexer import build_symbol_index
-from symbols.persistence import write_symbol_database, write_symbol_parquet_bundle
+from symbols.persistence import load_symbol_index, write_metadata_bundle
 
 
 class SymbolSnapshotTest(unittest.TestCase):
@@ -104,7 +103,7 @@ class SymbolSnapshotTest(unittest.TestCase):
             expected = json.loads(golden_path.read_text(encoding="utf-8"))
             self.assertEqual(snapshot, expected)
 
-    def test_persistence_writes_sqlite_and_parquet_status(self) -> None:
+    def test_persistence_writes_metadata_lmdb(self) -> None:
         tests_root = Path(__file__).resolve().parents[1]
         fixture_path = tests_root / "fixtures" / "rust" / "semantic_sample.rs"
 
@@ -137,29 +136,13 @@ class SymbolSnapshotTest(unittest.TestCase):
                 path_prefixes=("src/lib.rs",),
             )
 
-            write_symbol_database(output_root, "demo", artifact)
-            write_symbol_parquet_bundle(output_root, "demo", artifact)
+            write_metadata_bundle(output_root, "demo", artifact)
 
-            sqlite_path = output_root / "demo" / "symbols.sqlite3"
-            parquet_status_path = output_root / "demo" / "parquet_status.json"
+            metadata_path = output_root / "demo" / "metadata.lmdb"
+            self.assertTrue(metadata_path.exists(), metadata_path)
 
-            self.assertTrue(sqlite_path.exists(), sqlite_path)
-            self.assertTrue(parquet_status_path.exists(), parquet_status_path)
-
-            with sqlite3.connect(sqlite_path) as connection:
-                cursor = connection.cursor()
-                cursor.execute("SELECT COUNT(*) FROM symbols")
-                self.assertEqual(cursor.fetchone()[0], artifact["summary"]["symbols"])
-                cursor.execute("SELECT COUNT(*) FROM imports")
-                self.assertEqual(cursor.fetchone()[0], artifact["summary"]["imports"])
-                cursor.execute("SELECT COUNT(*) FROM symbol_references")
-                self.assertEqual(cursor.fetchone()[0], artifact["summary"]["references"])
-                cursor.execute("SELECT COUNT(*) FROM statements")
-                self.assertEqual(cursor.fetchone()[0], artifact["summary"]["statements"])
-
-            parquet_status = json.loads(parquet_status_path.read_text(encoding="utf-8"))
-            self.assertIn("available", parquet_status)
-            if parquet_status["available"]:
-                self.assertIn("symbols.parquet", parquet_status["artifacts"])
-            else:
-                self.assertTrue(parquet_status["reason"])
+            restored = load_symbol_index(output_root, "demo")
+            self.assertEqual(len(restored["symbols"]), artifact["summary"]["symbols"])
+            self.assertEqual(len(restored["imports"]), artifact["summary"]["imports"])
+            self.assertEqual(len(restored["references"]), artifact["summary"]["references"])
+            self.assertEqual(len(restored["statements"]), artifact["summary"]["statements"])

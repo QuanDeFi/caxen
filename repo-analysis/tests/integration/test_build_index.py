@@ -1,9 +1,15 @@
-import json
-import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from symbols.persistence import load_symbol_index
+from graph.query import load_graph_view_uncached
 
 
 class BuildIndexIntegrationTest(unittest.TestCase):
@@ -57,42 +63,30 @@ class BuildIndexIntegrationTest(unittest.TestCase):
                 text=True,
             )
 
-            sqlite_path = parsed_root / "yellowstone-vixen" / "symbols.sqlite3"
-            parquet_status_path = parsed_root / "yellowstone-vixen" / "parquet_status.json"
+            metadata_path = parsed_root / "yellowstone-vixen" / "metadata.lmdb"
             graph_db_path = graph_root / "yellowstone-vixen" / "graph.db"
 
-            self.assertTrue(sqlite_path.exists(), sqlite_path)
-            self.assertTrue(parquet_status_path.exists(), parquet_status_path)
+            self.assertTrue(metadata_path.exists(), metadata_path)
             self.assertTrue(graph_db_path.exists(), graph_db_path)
 
-            with sqlite3.connect(sqlite_path) as connection:
-                cursor = connection.cursor()
-                metadata = dict(cursor.execute("SELECT key, value FROM metadata").fetchall())
-                summary = json.loads(metadata["summary_json"])
-                self.assertEqual(metadata["repo"], "yellowstone-vixen")
-                self.assertEqual(summary["rust_files"], 1)
-                self.assertGreater(summary["symbols"], 0)
-                self.assertGreater(summary["references"], 0)
-                cursor.execute("SELECT COUNT(*) FROM symbols")
-                self.assertEqual(cursor.fetchone()[0], summary["symbols"])
-                cursor.execute(
-                    "SELECT COUNT(*) FROM symbols WHERE qualified_name = ?",
-                    ["yellowstone_vixen_proc_macro::vixen"],
-                )
-                self.assertGreaterEqual(cursor.fetchone()[0], 1)
+            symbols_payload = load_symbol_index(parsed_root, "yellowstone-vixen")
+            summary = symbols_payload["summary"]
+            self.assertEqual(symbols_payload["repo"], "yellowstone-vixen")
+            self.assertEqual(summary["rust_files"], 1)
+            self.assertGreater(summary["symbols"], 0)
+            self.assertGreater(summary["references"], 0)
+            self.assertEqual(len(symbols_payload["symbols"]), summary["symbols"])
+            self.assertTrue(
+                any(item["qualified_name"] == "yellowstone_vixen_proc_macro::vixen" for item in symbols_payload["symbols"])
+            )
 
-            parquet_status = json.loads(parquet_status_path.read_text(encoding="utf-8"))
-            self.assertIn("available", parquet_status)
-
-            with sqlite3.connect(graph_db_path) as connection:
-                cursor = connection.cursor()
-                metadata = dict(cursor.execute("SELECT key, value FROM metadata").fetchall())
-                graph_summary = json.loads(metadata["summary_json"])
-                self.assertEqual(metadata["repo"], "yellowstone-vixen")
-                self.assertGreater(graph_summary["nodes"], 0)
-                edge_types = {row[0] for row in cursor.execute("SELECT DISTINCT type FROM edges").fetchall()}
-                self.assertIn("DEFINES", edge_types)
-                self.assertIn("IMPORTS", edge_types)
+            graph_payload = load_graph_view_uncached(graph_root, "yellowstone-vixen")["payload"]
+            graph_summary = graph_payload["summary"]
+            self.assertEqual(graph_payload["repo"], "yellowstone-vixen")
+            self.assertGreater(graph_summary["nodes"], 0)
+            edge_types = {str(edge["type"]) for edge in graph_payload["edges"]}
+            self.assertIn("DEFINES", edge_types)
+            self.assertIn("IMPORTS", edge_types)
 
     def test_build_index_on_carbon_and_vixen_real_slices_emits_semantic_edges(self) -> None:
         workspace_root = Path(__file__).resolve().parents[3]
@@ -166,22 +160,17 @@ class BuildIndexIntegrationTest(unittest.TestCase):
             )
 
             for repo_name in ("carbon", "yellowstone-vixen"):
-                with sqlite3.connect(parsed_root / repo_name / "symbols.sqlite3") as connection:
-                    cursor = connection.cursor()
-                    summary = json.loads(
-                        dict(cursor.execute("SELECT key, value FROM metadata").fetchall())["summary_json"]
-                    )
-                    self.assertGreater(summary["references"], 0)
-                    reference_kinds = {row[0] for row in cursor.execute("SELECT DISTINCT kind FROM symbol_references").fetchall()}
-                    self.assertIn("call", reference_kinds)
-                    self.assertIn("use", reference_kinds)
+                symbols_payload = load_symbol_index(parsed_root, repo_name)
+                self.assertGreater(symbols_payload["summary"]["references"], 0)
+                reference_kinds = {str(row["kind"]) for row in symbols_payload["references"]}
+                self.assertIn("call", reference_kinds)
+                self.assertIn("use", reference_kinds)
 
-                with sqlite3.connect(graph_root / repo_name / "graph.db") as connection:
-                    cursor = connection.cursor()
-                    edge_types = {row[0] for row in cursor.execute("SELECT DISTINCT type FROM edges").fetchall()}
-                    self.assertIn("CALLS", edge_types)
-                    self.assertIn("USES", edge_types)
-                    self.assertIn("IMPORTS", edge_types)
+                graph_payload = load_graph_view_uncached(graph_root, repo_name)["payload"]
+                edge_types = {str(edge["type"]) for edge in graph_payload["edges"]}
+                self.assertIn("CALLS", edge_types)
+                self.assertIn("USES", edge_types)
+                self.assertIn("IMPORTS", edge_types)
 
 
 if __name__ == "__main__":

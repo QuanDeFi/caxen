@@ -7,13 +7,14 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
 
+from common.native_tool import query_bm25_index
+from common.text import tokenize
 from embeddings.providers import (
     DEFAULT_HASHING_MODEL,
     embed_with_openai,
     openai_embeddings_available,
     resolve_embedding_provider,
 )
-from search.indexer import tokenize
 from symbols.indexer import timestamp_now
 
 
@@ -37,10 +38,9 @@ def build_embedding_index(
     model: str | None = None,
 ) -> Dict[str, object]:
     repo_search_root = search_root / repo_name
-    documents_path = repo_search_root / "documents.jsonl"
-    documents = load_search_documents(documents_path)
+    documents = load_search_documents(search_root, repo_name)
     if not documents:
-        raise FileNotFoundError(f"Missing search documents for {repo_name}: {documents_path}")
+        raise FileNotFoundError(f"Missing Tantivy search documents for {repo_name}: {repo_search_root / 'tantivy'}")
     provider_config = resolve_embedding_provider(provider, model)
     provider_name = str(provider_config["provider"])
     model_name = str(provider_config["model"])
@@ -255,30 +255,27 @@ def query_embedding_index(search_root: Path, repo_name: str, query: str, *, limi
     )[:limit]
 
 
-def load_search_documents(documents_path: Path) -> List[Dict[str, object]]:
-    if documents_path.exists():
-        documents: List[Dict[str, object]] = []
-        with documents_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                raw = line.strip()
-                if not raw:
-                    continue
-                payload = json.loads(raw)
-                documents.append(
-                    {
-                        "doc_id": payload["doc_id"],
-                        "kind": payload["kind"],
-                        "path": payload.get("path"),
-                        "name": payload.get("name"),
-                        "qualified_name": payload.get("qualified_name"),
-                        "symbol_id": payload.get("symbol_id"),
-                        "title": payload.get("title"),
-                        "preview": payload.get("preview"),
-                        "content": payload.get("content") or "",
-                    }
-                )
-        return documents
-    return []
+def load_search_documents(search_root: Path, repo_name: str) -> List[Dict[str, object]]:
+    tantivy_dir = search_root / repo_name / "tantivy"
+    if not tantivy_dir.exists():
+        return []
+    results = query_bm25_index(tantivy_dir, "", limit=1_000_000)
+    documents = []
+    for payload in results:
+        documents.append(
+            {
+                "doc_id": payload["doc_id"],
+                "kind": payload["kind"],
+                "path": payload.get("path"),
+                "name": payload.get("name"),
+                "qualified_name": payload.get("qualified_name"),
+                "symbol_id": payload.get("symbol_id"),
+                "title": payload.get("title"),
+                "preview": payload.get("preview"),
+                "content": payload.get("searchable") or "",
+            }
+        )
+    return documents
 
 
 def compute_document_frequency(document_tokens: Sequence[Sequence[str]]) -> Counter[str]:

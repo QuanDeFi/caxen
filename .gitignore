@@ -22,6 +22,7 @@ build/
 dist/
 repo-analysis/native/target/
 repo-analysis/native/.build_failed.json
+repo-analysis/docs
 
 # Generated analysis outputs
 repo-analysis/data/raw/**

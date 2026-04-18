@@ -1,9 +1,15 @@
 import json
-import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from graph.query import load_graph_view_uncached
 
 
 class RetrievalPipelineIntegrationTest(unittest.TestCase):
@@ -59,7 +65,6 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
                 text=True,
             )
             self.assertTrue((graph_root / "yellowstone-vixen" / "graph.db").exists())
-            self.assertTrue((parsed_root / "yellowstone-vixen" / "query_manifest.json").exists())
             subprocess.run(
                 [
                     "python3",
@@ -115,10 +120,11 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
                 text=True,
             )
 
-            self.assertTrue((search_root / "yellowstone-vixen" / "documents.jsonl").exists())
+            self.assertFalse((search_root / "yellowstone-vixen" / "documents.jsonl").exists())
             self.assertTrue((search_root / "yellowstone-vixen" / "tantivy").exists())
             self.assertTrue((search_root / "yellowstone-vixen" / "embedding_index.json").exists())
-            self.assertTrue((summary_root / "yellowstone-vixen" / "summary.sqlite3").exists())
+            self.assertTrue((parsed_root / "yellowstone-vixen" / "metadata.lmdb").exists())
+            self.assertFalse((summary_root / "yellowstone-vixen" / "summary.sqlite3").exists())
 
             find_symbol = subprocess.run(
                 [
@@ -470,10 +476,9 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             expand_payload = json.loads(expand.stdout)
             self.assertEqual(expand_payload["operation"], "neighbors")
 
-            with sqlite3.connect(graph_root / "yellowstone-vixen" / "graph.db") as connection:
-                cursor = connection.cursor()
-                node_kinds = {row[0] for row in cursor.execute("SELECT DISTINCT kind FROM nodes").fetchall()}
-                edge_types = {row[0] for row in cursor.execute("SELECT DISTINCT type FROM edges").fetchall()}
+            graph_payload = load_graph_view_uncached(graph_root, "yellowstone-vixen")["payload"]
+            node_kinds = {str(node["kind"]) for node in graph_payload["nodes"]}
+            edge_types = {str(edge["type"]) for edge in graph_payload["edges"]}
             self.assertIn("directory", node_kinds)
             self.assertIn("package", node_kinds)
             self.assertIn("project_summary", node_kinds)

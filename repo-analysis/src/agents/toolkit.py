@@ -14,7 +14,6 @@ from retrieval.planner import (
     prepare_answer_bundle as build_answer_bundle,
     retrieve_iterative as build_iterative_bundle,
 )
-from search.indexer import list_documents
 from symbols.indexer import stable_id
 
 
@@ -770,7 +769,7 @@ def themed_results(
             filtered.append(result)
     if filtered:
         return filtered[:limit]
-    return list_documents(search_root, repo_name, limit=limit, kinds=("directory", "file"))
+    return search_backend.list_documents(limit=limit, kinds=("directory", "file"))
 
 
 def compare_repo_from_agent_cache(
