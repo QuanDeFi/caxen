@@ -16,9 +16,9 @@ Upstream source trees are preserved as close to upstream as possible. New analys
 `repo-analysis` now provides:
 
 - raw inventory generation for the upstream repos
-- Rust symbol and statement extraction
+- DB-first Rust symbol, reference, and statement extraction in `symbols.sqlite3`
 - DB-first graph artifacts in SQLite, with optional JSON export
-- DB-first lexical search artifacts in SQLite and Tantivy
+- DB-first lexical search and agent cache in `search.sqlite3`, with BM25/Tantivy
 - optional embedding sidecar artifacts
 - DB-first repo, package, directory, file, and symbol summaries
 - graph query, retrieval-planning, answer-bundle, and evaluation CLI commands
