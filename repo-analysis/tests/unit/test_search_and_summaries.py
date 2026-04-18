@@ -238,7 +238,7 @@ class SearchAndSummaryTest(unittest.TestCase):
             timings = telemetry.get("timings", {})
 
             self.assertGreaterEqual(int(counters.get("full_symbol_payload_loads", 0)), 1)
-            self.assertGreaterEqual(int(counters.get("full_graph_payload_loads", 0)), 1)
+            self.assertEqual(int(counters.get("full_graph_payload_loads", 0)), 0)
             self.assertIn("retrieve_context", timings)
             self.assertIn("search_documents", timings)
 

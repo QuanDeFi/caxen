@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from backends.graph_backend import get_graph_backend
 from common.telemetry import increment_counter, trace_operation
 from search.indexer import search_documents
 from symbols.indexer import stable_id
@@ -79,6 +80,10 @@ def execute_graph_query(
     request: Dict[str, object],
 ) -> Dict[str, object]:
     operation = str(request.get("operation") or "neighbors")
+    graph_backend = get_graph_backend(str(graph_root.resolve()), repo_name)
+    backend_response = graph_backend.execute(request)
+    if backend_response is not None:
+        return backend_response
     cached_response = execute_cached_graph_query(search_root, parsed_root, graph_root, repo_name, request)
     if cached_response is not None:
         return cached_response
