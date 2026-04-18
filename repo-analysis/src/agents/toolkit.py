@@ -4,25 +4,10 @@ import json
 from pathlib import Path, PurePosixPath
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from backends.graph_backend import get_graph_backend
 from backends.metadata_store import get_metadata_store
 from backends.search_backend import get_search_backend
 from common.telemetry import snapshot_telemetry, trace_operation
-from graph.query import (
-    adjacent_symbols as graph_adjacent_symbols,
-    callers_of as graph_callers_of,
-    callees_of as graph_callees_of,
-    execute_graph_query as execute_graph_request,
-    implements_of as graph_implements_of,
-    inherits_of as graph_inherits_of,
-    path_between as graph_path_between,
-    reads_of as graph_reads_of,
-    refs_of as graph_refs_of,
-    statement_slice as graph_statement_slice,
-    symbol_summary as graph_symbol_summary,
-    where_defined as graph_where_defined,
-    who_imports as graph_who_imports,
-    writes_of as graph_writes_of,
-)
 from retrieval.engine import retrieve_context
 from retrieval.planner import (
     plan_query as build_query_plan,
@@ -34,6 +19,56 @@ from symbols.indexer import stable_id
 
 
 DEFAULT_REPOS = ("carbon", "yellowstone-vixen")
+
+
+def execute_graph_backend_request(
+    graph_root: Path,
+    repo_name: str,
+    request: Dict[str, object],
+) -> Dict[str, object]:
+    backend = get_graph_backend(str(graph_root.resolve()), repo_name)
+    response = backend.execute(request)
+    if response is None:
+        raise FileNotFoundError(f"Missing graph backend artifact for repo '{repo_name}' under {graph_root / repo_name}")
+    return response
+
+
+def graph_root_from_parsed(parsed_root: Path) -> Path:
+    return parsed_root.parent / "graph"
+
+
+def graph_neighbors_response(
+    graph_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    operation: Optional[str] = None,
+    edge_types: Sequence[str] = (),
+    direction: str = "both",
+    depth: int = 1,
+    node_kinds: Sequence[str] = (),
+    limit: int = 20,
+) -> Dict[str, object]:
+    request: Dict[str, object] = {
+        "operation": operation or "neighbors",
+        "seed": symbol_query,
+        "limit": limit,
+    }
+    if operation is None or edge_types:
+        request["edge_types"] = list(edge_types)
+    if operation is None or direction != "both":
+        request["direction"] = direction
+    if operation is None or depth != 1:
+        request["depth"] = depth
+    if node_kinds:
+        request["node_kinds"] = list(node_kinds)
+    response = execute_graph_backend_request(graph_root, repo_name, request)
+    return {
+        "repo": repo_name,
+        "query": symbol_query,
+        "matches": response.get("seeds", []),
+        "neighbors": response.get("results", []),
+    }
 
 
 def repo_overview(summary_root: Path, repo_name: str) -> Dict[str, object]:
@@ -223,9 +258,7 @@ def get_summary(
         project_summary = metadata_store.get_summary_by_id(stable_id("sum", repo_name, "project"))
         return {"repo": repo_name, "node_id": node_id, "summary": project_summary}
 
-    graph_response = execute_graph_request(
-        search_root,
-        parsed_root,
+    graph_response = execute_graph_backend_request(
         graph_root,
         repo_name,
         {"operation": "symbol_summary", "seed": {"node_id": node_id}, "limit": 1},
@@ -301,7 +334,7 @@ def get_enclosing_context(
             "symbol": describe_symbol_row(symbol),
             "container": describe_symbol_row(container) if container else None,
             "path_summary": path_summary[0] if path_summary else None,
-            "statement_slice": graph_statement_slice(
+            "statement_slice": statement_slice(
                 search_root,
                 parsed_root,
                 graph_root,
@@ -371,7 +404,16 @@ def where_defined(
                 if len(matches) >= limit:
                     break
     if not matches:
-        return graph_where_defined(search_root, parsed_root, repo_name, symbol_query, limit=limit)
+        response = execute_graph_backend_request(
+            graph_root_from_parsed(parsed_root),
+            repo_name,
+            {"operation": "where_defined", "seed": symbol_query, "limit": limit},
+        )
+        return {
+            "repo": repo_name,
+            "query": symbol_query,
+            "matches": response.get("results", []),
+        }
     return {
         "repo": repo_name,
         "query": symbol_query,
@@ -388,7 +430,7 @@ def who_imports(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_who_imports(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="who_imports", limit=limit)
 
 
 def adjacent_symbols(
@@ -402,14 +444,13 @@ def adjacent_symbols(
     direction: str = "both",
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_adjacent_symbols(
-        search_root,
-        parsed_root,
+    return graph_neighbors_response(
         graph_root,
         repo_name,
         symbol_query,
         edge_types=edge_types,
         direction=direction,
+        depth=1,
         limit=limit,
     )
 
@@ -423,7 +464,7 @@ def callers_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_callers_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="callers_of", limit=limit)
 
 
 def callees_of(
@@ -435,7 +476,7 @@ def callees_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_callees_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="callees_of", limit=limit)
 
 
 def reads_of(
@@ -447,7 +488,7 @@ def reads_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_reads_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="reads_of", limit=limit)
 
 
 def writes_of(
@@ -459,7 +500,7 @@ def writes_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_writes_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="writes_of", limit=limit)
 
 
 def refs_of(
@@ -471,7 +512,7 @@ def refs_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_refs_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="refs_of", limit=limit)
 
 
 def implements_of(
@@ -483,7 +524,7 @@ def implements_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_implements_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="implements_of", limit=limit)
 
 
 def inherits_of(
@@ -495,7 +536,7 @@ def inherits_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_inherits_of(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="inherits_of", limit=limit)
 
 
 def statement_slice(
@@ -508,7 +549,23 @@ def statement_slice(
     limit: int = 20,
     window: int = 8,
 ) -> Dict[str, object]:
-    return graph_statement_slice(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit, window=window)
+    with trace_operation("statement_slice"):
+        response = execute_graph_backend_request(
+            graph_root,
+            repo_name,
+            {
+                "operation": "statement_slice",
+                "seed": symbol_query,
+                "limit": limit,
+                "window": window,
+            },
+        )
+        return {
+            "repo": repo_name,
+            "query": symbol_query,
+            "matches": response.get("seeds", []),
+            "statements": response.get("results", []),
+        }
 
 
 def path_between(
@@ -523,17 +580,27 @@ def path_between(
     edge_types: Sequence[str] = (),
     direction: str = "both",
 ) -> Dict[str, object]:
-    return graph_path_between(
-        search_root,
-        parsed_root,
-        graph_root,
-        repo_name,
-        source_query,
-        target_query,
-        limit=limit,
-        edge_types=edge_types,
-        direction=direction,
-    )
+    with trace_operation("path_between"):
+        response = execute_graph_backend_request(
+            graph_root,
+            repo_name,
+            {
+                "operation": "path_between",
+                "seed": source_query,
+                "target": target_query,
+                "limit": limit,
+                "edge_types": list(edge_types),
+                "direction": direction,
+            },
+        )
+        return {
+            "repo": repo_name,
+            "source_query": source_query,
+            "target_query": target_query,
+            "matches": response.get("seeds", []),
+            "targets": response.get("targets", []),
+            "paths": response.get("results", []),
+        }
 
 
 def execute_graph_query(
@@ -543,7 +610,7 @@ def execute_graph_query(
     repo_name: str,
     request: Dict[str, object],
 ) -> Dict[str, object]:
-    return execute_graph_request(search_root, parsed_root, graph_root, repo_name, request)
+    return execute_graph_backend_request(graph_root, repo_name, request)
 
 
 def expand_subgraph(
@@ -559,9 +626,7 @@ def expand_subgraph(
     node_kinds: Sequence[str] = (),
     budget: int = 20,
 ) -> Dict[str, object]:
-    return execute_graph_request(
-        search_root,
-        parsed_root,
+    return execute_graph_backend_request(
         graph_root,
         repo_name,
         {
@@ -585,7 +650,22 @@ def symbol_summary(
     *,
     limit: int = 5,
 ) -> Dict[str, object]:
-    return graph_symbol_summary(search_root, parsed_root, graph_root, repo_name, symbol_query, limit=limit)
+    with trace_operation("symbol_summary"):
+        response = execute_graph_backend_request(
+            graph_root,
+            repo_name,
+            {
+                "operation": "symbol_summary",
+                "seed": symbol_query,
+                "limit": limit,
+            },
+        )
+        return {
+            "repo": repo_name,
+            "query": symbol_query,
+            "matches": response.get("seeds", []),
+            "summaries": response.get("results", []),
+        }
 
 
 def plan_query(
@@ -836,7 +916,7 @@ def resolve_symbol_query(search_root: Path, parsed_root: Path, repo_name: str, s
     if name_matches:
         return metadata_store.get_symbol(name_matches[0])
 
-    matches = graph_where_defined(search_root, parsed_root, repo_name, symbol_query, limit=1)["matches"]
+    matches = where_defined(search_root, parsed_root, repo_name, symbol_query, limit=1)["matches"]
     if not matches:
         return None
     symbol_id = matches[0]["symbol_id"]

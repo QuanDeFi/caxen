@@ -1,3 +1,3 @@
-from .engine import graph_indexes, retrieve_context
+from .engine import retrieve_context
 
-__all__ = ["graph_indexes", "retrieve_context"]
+__all__ = ["retrieve_context"]
