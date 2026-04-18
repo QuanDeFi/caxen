@@ -3,8 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from backends.graph_backend import get_graph_backend
+from backends.metadata_store import get_metadata_store
 from common.telemetry import trace_operation
-from graph.query import execute_graph_query
 from retrieval.engine import classify_query, retrieve_context
 from search.indexer import tokenize
 from summaries.builder import load_summary_artifacts
@@ -86,6 +87,12 @@ def prepare_answer_bundle(
         bundles = []
         for repo_plan in plan["plans"]:
             current_repo = repo_plan["repo"]
+            graph_backend = get_graph_backend(str(graph_root.resolve()), current_repo)
+            metadata_store = get_metadata_store(
+                str(parsed_root.resolve()),
+                current_repo,
+                summary_root=str(summary_root.resolve()),
+            )
             context = retrieve_context(
                 search_root,
                 graph_root,
@@ -108,11 +115,7 @@ def prepare_answer_bundle(
                 query_text = str(candidate.get("qualified_name") or candidate.get("name") or "")
                 if not query_text:
                     continue
-                graph_response = execute_graph_query(
-                    search_root,
-                    parsed_root,
-                    graph_root,
-                    current_repo,
+                graph_response = graph_backend.execute(
                     {
                         "operation": "neighbors",
                         "seed": {"symbol_id": candidate["symbol_id"]},
@@ -125,14 +128,10 @@ def prepare_answer_bundle(
                 graph_neighborhoods.append(
                     {
                         "seed": query_text,
-                        "results": graph_response["results"],
+                        "results": (graph_response or {}).get("results", []),
                     }
                 )
-                statement_response = execute_graph_query(
-                    search_root,
-                    parsed_root,
-                    graph_root,
-                    current_repo,
+                statement_response = graph_backend.execute(
                     {
                         "operation": "statement_slice",
                         "seed": {"symbol_id": candidate["symbol_id"]},
@@ -140,11 +139,11 @@ def prepare_answer_bundle(
                         "window": 8,
                     },
                 )
-                if statement_response["results"]:
+                if statement_response and statement_response.get("results"):
                     statement_slices.append(
                         {
                             "seed": query_text,
-                            "results": statement_response["results"],
+                            "results": statement_response.get("results", []),
                         }
                     )
 
@@ -181,7 +180,11 @@ def prepare_answer_bundle(
                     "top_files": compact_candidates(file_candidates, limit=5),
                     "graph_neighborhoods": graph_neighborhoods,
                     "statement_slices": statement_slices,
-                    "relevant_summaries": select_relevant_summaries(summaries, selected_context),
+                    "relevant_summaries": select_relevant_summaries_from_store(
+                        summaries["project"],
+                        metadata_store,
+                        selected_context,
+                    ),
                     "evidence": evidence[:limit],
                     "bundle_summary": summarize_bundle(selected_context, graph_neighborhoods, statement_slices, evidence),
                 }
@@ -334,6 +337,50 @@ def select_relevant_summaries(
         ][:5],
         "files": [item for item in summaries["files"] if item["path"] in selected_paths][:5],
         "symbols": [item for item in summaries["symbols"] if item["symbol_id"] in selected_symbol_ids][:5],
+    }
+
+
+def select_relevant_summaries_from_store(
+    project_summary: Dict[str, object],
+    metadata_store: object,
+    selected_context: Sequence[Dict[str, object]],
+) -> Dict[str, object]:
+    selected_paths = [str(item.get("path")) for item in selected_context if item.get("path")]
+    selected_symbol_ids = [str(item.get("symbol_id")) for item in selected_context if item.get("symbol_id")]
+    files: List[Dict[str, object]] = []
+    symbols: List[Dict[str, object]] = []
+    seen = set()
+
+    for path in selected_paths:
+        for summary in metadata_store.get_summary_by_path(path):
+            key = str(summary.get("summary_id") or ("path", path))
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(summary)
+            if len(files) >= 5:
+                break
+        if len(files) >= 5:
+            break
+
+    for symbol_id in selected_symbol_ids:
+        for summary in metadata_store.get_summary_by_symbol(symbol_id):
+            key = str(summary.get("summary_id") or ("symbol", symbol_id))
+            if key in seen:
+                continue
+            seen.add(key)
+            symbols.append(summary)
+            if len(symbols) >= 5:
+                break
+        if len(symbols) >= 5:
+            break
+
+    return {
+        "project": project_summary,
+        "packages": [],
+        "directories": [],
+        "files": files,
+        "symbols": symbols,
     }
 
 
