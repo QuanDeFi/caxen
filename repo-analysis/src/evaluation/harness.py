@@ -8,6 +8,19 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
+from agents.toolkit import (
+    callers_of,
+    callees_of,
+    find_file,
+    find_symbol,
+    get_symbol_body,
+    get_symbol_signature,
+    path_between,
+    prepare_answer_bundle as prepare_answer_bundle_tool,
+    statement_slice,
+    where_defined,
+)
+from common.telemetry import reset_telemetry, snapshot_telemetry
 from backends.metadata_store import get_metadata_store
 from embeddings.indexer import query_embedding_index
 from retrieval.engine import retrieve_context
@@ -103,6 +116,29 @@ DEFAULT_BENCHMARKS = [
     },
 ]
 
+DEFAULT_INTERACTIVE_SCENARIOS = [
+    {
+        "repo": "yellowstone-vixen",
+        "symbol_query": "Handler",
+        "file_query": "crates/runtime/src/handler.rs",
+        "call_symbol": "Handler",
+        "path_source": "Handler",
+        "path_target": "Pipeline",
+        "statement_symbol": "Handler",
+        "bundle_query": "runtime handler trait",
+    },
+    {
+        "repo": "carbon",
+        "symbol_query": "InstructionDecoder",
+        "file_query": "crates/core/src/instruction.rs",
+        "call_symbol": "InstructionDecoder",
+        "path_source": "InstructionDecoder",
+        "path_target": "InstructionName",
+        "statement_symbol": "InstructionDecoder",
+        "bundle_query": "instruction decoder trait",
+    },
+]
+
 
 def run_benchmarks(
     search_root: Path,
@@ -170,6 +206,106 @@ def run_benchmarks(
     write_json(eval_root / "benchmarks.json", payload)
     emit("run_completed", completed_runs=completed_runs)
     return payload
+
+
+def benchmark_interactive_commands(
+    search_root: Path,
+    graph_root: Path,
+    parsed_root: Path,
+    summary_root: Path,
+    eval_root: Path,
+    *,
+    repos: Sequence[str] = (),
+    scenarios: Optional[Sequence[Dict[str, object]]] = None,
+    limit: int = 5,
+) -> Dict[str, object]:
+    selected_repos = set(repos or [item["repo"] for item in (scenarios or DEFAULT_INTERACTIVE_SCENARIOS)])
+    selected_scenarios = [item for item in (scenarios or DEFAULT_INTERACTIVE_SCENARIOS) if item["repo"] in selected_repos]
+    runs = []
+    for scenario in selected_scenarios:
+        repo_name = str(scenario["repo"])
+        command_specs = [
+            (
+                "find-symbol",
+                lambda: find_symbol(search_root, repo_name, str(scenario["symbol_query"]), limit=limit),
+            ),
+            (
+                "find-file",
+                lambda: find_file(search_root, repo_name, str(scenario["file_query"]), limit=limit),
+            ),
+            (
+                "where-defined",
+                lambda: where_defined(search_root, parsed_root, repo_name, str(scenario["symbol_query"]), limit=limit),
+            ),
+            (
+                "get-symbol-signature",
+                lambda: get_symbol_signature(search_root, parsed_root, repo_name, str(scenario["symbol_query"])),
+            ),
+            (
+                "get-symbol-body",
+                lambda: get_symbol_body(search_root, parsed_root, repo_name, str(scenario["symbol_query"])),
+            ),
+            (
+                "callers-of",
+                lambda: callers_of(search_root, parsed_root, graph_root, repo_name, str(scenario["call_symbol"]), limit=limit),
+            ),
+            (
+                "callees-of",
+                lambda: callees_of(search_root, parsed_root, graph_root, repo_name, str(scenario["call_symbol"]), limit=limit),
+            ),
+            (
+                "path-between",
+                lambda: path_between(
+                    search_root,
+                    parsed_root,
+                    graph_root,
+                    repo_name,
+                    str(scenario["path_source"]),
+                    str(scenario["path_target"]),
+                    limit=limit,
+                ),
+            ),
+            (
+                "statement-slice",
+                lambda: statement_slice(search_root, parsed_root, graph_root, repo_name, str(scenario["statement_symbol"]), limit=limit),
+            ),
+            (
+                "prepare-answer-bundle",
+                lambda: prepare_answer_bundle_tool(
+                    search_root,
+                    summary_root,
+                    graph_root,
+                    parsed_root,
+                    str(scenario["bundle_query"]),
+                    repo_name=repo_name,
+                    limit=limit,
+                ),
+            ),
+        ]
+        for command_name, runner in command_specs:
+            reset_telemetry()
+            started = time.perf_counter()
+            payload = runner()
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            runs.append(
+                {
+                    "repo": repo_name,
+                    "command": command_name,
+                    "elapsed_ms": round(elapsed_ms, 3),
+                    "telemetry": snapshot_telemetry(),
+                    "result_summary": summarize_benchmark_result(payload),
+                }
+            )
+
+    report = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": timestamp_now(),
+        "summary": summarize_interactive_benchmark_runs(runs),
+        "runs": runs,
+    }
+    eval_root.mkdir(parents=True, exist_ok=True)
+    write_json(eval_root / "interactive_benchmark_report.json", report)
+    return report
 
 
 def export_benchmark_prompts(
@@ -260,6 +396,44 @@ def score_answer_bundles(
     eval_root.mkdir(parents=True, exist_ok=True)
     write_json(eval_root / "bundle_scores.json", payload)
     return payload
+
+
+def summarize_benchmark_result(payload: Dict[str, object]) -> Dict[str, object]:
+    if "results" in payload and isinstance(payload["results"], list):
+        return {"results": len(payload["results"])}
+    if "matches" in payload and isinstance(payload["matches"], list):
+        return {"matches": len(payload["matches"])}
+    if "neighbors" in payload and isinstance(payload["neighbors"], list):
+        return {"neighbors": len(payload["neighbors"])}
+    if "paths" in payload and isinstance(payload["paths"], list):
+        return {"paths": len(payload["paths"])}
+    if "statements" in payload and isinstance(payload["statements"], list):
+        return {"statements": len(payload["statements"])}
+    if "bundles" in payload and isinstance(payload["bundles"], list):
+        return {"bundles": len(payload["bundles"])}
+    return {}
+
+
+def summarize_interactive_benchmark_runs(runs: Sequence[Dict[str, object]]) -> Dict[str, object]:
+    by_command: Dict[str, List[float]] = {}
+    for run in runs:
+        by_command.setdefault(str(run["command"]), []).append(float(run["elapsed_ms"]))
+    commands = []
+    for command_name, latencies in sorted(by_command.items()):
+        ordered = sorted(latencies)
+        median = ordered[len(ordered) // 2] if ordered else 0.0
+        commands.append(
+            {
+                "command": command_name,
+                "runs": len(ordered),
+                "median_ms": round(median, 3),
+                "max_ms": round(max(ordered), 3) if ordered else 0.0,
+            }
+        )
+    return {
+        "runs": len(runs),
+        "commands": commands,
+    }
 
 
 def score_external_answers(

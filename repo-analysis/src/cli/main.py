@@ -54,7 +54,7 @@ from common.inventory import write_inventory
 from common.native_tool import probe_native_worker
 from common.query_manifest import update_query_manifest
 from embeddings.indexer import build_embedding_index, query_embedding_index
-from evaluation.harness import export_benchmark_prompts, run_benchmarks, score_answer_bundles
+from evaluation.harness import benchmark_interactive_commands, export_benchmark_prompts, run_benchmarks, score_answer_bundles
 from graph.builder import build_graph_artifact, write_graph_artifact
 from graph.store import write_graph_database
 from search.indexer import build_search_index
@@ -483,6 +483,15 @@ def build_parser() -> argparse.ArgumentParser:
     score_external_cmd = subparsers.add_parser("score-external-answers", help="Score externally produced answers against benchmark expectations.")
     score_external_cmd.add_argument("--eval-root", required=True)
     score_external_cmd.add_argument("--answers-path", required=True)
+
+    benchmark_interactive_cmd = subparsers.add_parser("benchmark-interactive", help="Emit a baseline latency and telemetry report for interactive commands.")
+    benchmark_interactive_cmd.add_argument("--search-root", required=True)
+    benchmark_interactive_cmd.add_argument("--graph-root", required=True)
+    benchmark_interactive_cmd.add_argument("--parsed-root", required=True)
+    benchmark_interactive_cmd.add_argument("--summary-root", required=True)
+    benchmark_interactive_cmd.add_argument("--eval-root", required=True)
+    benchmark_interactive_cmd.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
+    benchmark_interactive_cmd.add_argument("--limit", type=int, default=5)
     return parser
 
 
@@ -1349,6 +1358,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             score_external_answers(
                 Path(args.eval_root).resolve(),
                 Path(args.answers_path).resolve(),
+            )
+        )
+    if args.command == "benchmark-interactive":
+        return print_json(
+            benchmark_interactive_commands(
+                Path(args.search_root).resolve(),
+                Path(args.graph_root).resolve(),
+                Path(args.parsed_root).resolve(),
+                Path(args.summary_root).resolve(),
+                Path(args.eval_root).resolve(),
+                repos=tuple(args.repo or ()),
+                limit=args.limit,
             )
         )
 

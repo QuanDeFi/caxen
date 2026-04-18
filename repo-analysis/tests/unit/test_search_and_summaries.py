@@ -12,6 +12,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from agents.toolkit import (
+    compare_repos,
     execute_graph_query,
     expand_subgraph,
     find_file,
@@ -37,6 +38,7 @@ from common.telemetry import reset_telemetry, snapshot_telemetry
 from common.query_manifest import load_query_manifest
 from embeddings.indexer import build_embedding_index, query_embedding_index
 from evaluation.harness import export_benchmark_prompts, run_benchmarks, score_answer_bundles, score_external_answers
+from evaluation.harness import benchmark_interactive_commands
 from graph.builder import build_graph_artifact
 from graph.query import load_graph_view_uncached
 from graph.store import write_graph_database
@@ -312,6 +314,69 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertEqual(prepared["contexts"][0]["repo"], "demo")
             self.assertGreater(len(prepared["contexts"][0]["selected_context"]), 0)
 
+    def test_graph_heavy_interactive_commands_do_not_trigger_full_payload_hydration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = seed_demo_workspace(Path(tmpdir))
+            reset_telemetry()
+
+            statement_slice(
+                paths["search_root"],
+                paths["parsed_root"],
+                paths["graph_root"],
+                "demo",
+                "answer",
+                limit=5,
+            )
+            path_between(
+                paths["search_root"],
+                paths["parsed_root"],
+                paths["graph_root"],
+                "demo",
+                "answer",
+                "helper",
+                limit=3,
+            )
+            prepare_answer_bundle(
+                paths["search_root"],
+                paths["summary_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                "find the helper call path",
+                repo_name="demo",
+                limit=5,
+            )
+            retrieve_iterative(
+                paths["search_root"],
+                paths["summary_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                "find the helper call path",
+                repo_name="demo",
+                limit=5,
+                refinement_hints=("answer method",),
+            )
+            compare_repos(
+                paths["search_root"],
+                paths["summary_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                "find the helper implementation",
+                repos=("demo",),
+                limit=5,
+            )
+
+            telemetry = snapshot_telemetry()
+            counters = telemetry.get("counters", {})
+            timings = telemetry.get("timings", {})
+
+            self.assertEqual(int(counters.get("full_symbol_payload_loads", 0)), 0)
+            self.assertEqual(int(counters.get("full_graph_payload_loads", 0)), 0)
+            self.assertIn("statement_slice", timings)
+            self.assertIn("path_between", timings)
+            self.assertIn("prepare_answer_bundle", timings)
+            self.assertIn("retrieve_context.graph_expansion", timings)
+            self.assertIn("retrieve_context.metadata_hydration", timings)
+
     def test_summary_outputs_cover_repo_and_path_rollups(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = seed_demo_workspace(Path(tmpdir))
@@ -362,6 +427,39 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertGreater(run["answer_quality"]["score"], 0.5)
             self.assertIn("avg_answer_score", payload["summary"]["modes"][0])
             self.assertTrue((eval_root / "benchmarks.json").exists())
+
+    def test_interactive_benchmark_report_captures_stage1_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            paths = seed_demo_workspace(root)
+            eval_root = root / "eval"
+
+            report = benchmark_interactive_commands(
+                paths["search_root"],
+                paths["graph_root"],
+                paths["parsed_root"],
+                paths["summary_root"],
+                eval_root,
+                scenarios=[
+                    {
+                        "repo": "demo",
+                        "symbol_query": "answer",
+                        "file_query": "src/lib.rs",
+                        "call_symbol": "answer",
+                        "path_source": "answer",
+                        "path_target": "helper",
+                        "statement_symbol": "answer",
+                        "bundle_query": "find the helper call path",
+                    }
+                ],
+                limit=5,
+            )
+
+            self.assertEqual(report["summary"]["runs"], 10)
+            commands = {item["command"] for item in report["summary"]["commands"]}
+            self.assertIn("prepare-answer-bundle", commands)
+            self.assertIn("statement-slice", commands)
+            self.assertTrue((eval_root / "interactive_benchmark_report.json").exists())
 
     def test_graph_query_and_bundle_planner_return_deterministic_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

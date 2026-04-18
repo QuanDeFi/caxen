@@ -67,13 +67,17 @@ def retrieve_context(
         tokens = tokenize(query)
         query_profile = classify_query(tokens, query)
         effective_kinds = tuple(kinds) if kinds else default_query_kinds(query_profile)
-        lexical_results = search_backend.search(query, limit=max(limit * 2, 10), kinds=effective_kinds)
+        with trace_operation("retrieve_context.lexical_search"):
+            lexical_results = search_backend.search(query, limit=max(limit * 2, 10), kinds=effective_kinds)
         gate = retrieval_gate(tokens, lexical_results, selective_retrieval)
         effective_use_graph = use_graph and gate["use_graph"]
         effective_use_embeddings = use_embeddings and gate["use_embeddings"]
-        embedding_results = (
-            query_embedding_index(search_root, repo_name, query, limit=max(limit, 5)) if effective_use_embeddings else []
-        )
+        with trace_operation("retrieve_context.embedding_search"):
+            embedding_results = (
+                query_embedding_index(search_root, repo_name, query, limit=max(limit, 5))
+                if effective_use_embeddings
+                else []
+            )
         candidates: Dict[Tuple[str, str], Dict[str, object]] = {}
 
         for result in lexical_results:
@@ -100,28 +104,31 @@ def retrieve_context(
             if node_id:
                 seed_nodes.append((node_id, float(result["score"])))
 
-        expanded = (
-            expand_graph_candidates(
-                graph_backend,
-                repo_name,
-                seed_nodes,
-                depth,
-                max_fanout=max_graph_fanout,
+        with trace_operation("retrieve_context.graph_expansion"):
+            expanded = (
+                expand_graph_candidates(
+                    graph_backend,
+                    repo_name,
+                    seed_nodes,
+                    depth,
+                    max_fanout=max_graph_fanout,
+                )
+                if effective_use_graph
+                else []
             )
-            if effective_use_graph
-            else []
-        )
-        for candidate in expanded:
-            symbol = metadata_store.get_symbol(str(candidate.get("symbol_id") or ""))
-            if symbol:
-                candidate.setdefault("preview", symbol.get("signature") or symbol["qualified_name"])
-                candidate["name"] = symbol.get("name")
-                candidate["qualified_name"] = symbol.get("qualified_name")
-                candidate["path"] = symbol.get("path")
-            add_candidate(candidates, candidate)
+        with trace_operation("retrieve_context.metadata_hydration"):
+            for candidate in expanded:
+                symbol = metadata_store.get_symbol(str(candidate.get("symbol_id") or ""))
+                if symbol:
+                    candidate.setdefault("preview", symbol.get("signature") or symbol["qualified_name"])
+                    candidate["name"] = symbol.get("name")
+                    candidate["qualified_name"] = symbol.get("qualified_name")
+                    candidate["path"] = symbol.get("path")
+                add_candidate(candidates, candidate)
 
         if use_summaries:
-            apply_summary_bonus(candidates, metadata_store, tokens)
+            with trace_operation("retrieve_context.summary_bonus"):
+                apply_summary_bonus(candidates, metadata_store, tokens)
 
         ranked_candidates = list(candidates.values())
         ranked = (

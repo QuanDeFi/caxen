@@ -182,8 +182,6 @@ def execute_cached_graph_query(
     repo_name: str,
     request: Dict[str, object],
 ) -> Optional[Dict[str, object]]:
-    if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") != "1":
-        return None
     operation = str(request.get("operation") or "neighbors")
     sqlite_path = graph_root / repo_name / "graph.sqlite3"
     if not sqlite_path.exists():
@@ -225,6 +223,8 @@ def execute_cached_graph_query(
                 return None
             if not has_neighbor_cache(connection):
                 return None
+        elif operation in {"statement_slice", "path_between"}:
+            pass
         else:
             return None
         seed_rows = load_nodes_by_id(connection, [seed["node_id"] for seed in seeds])
@@ -247,6 +247,30 @@ def execute_cached_graph_query(
 
         if operation == "symbol_summary":
             payload["results"] = build_cached_symbol_summaries(connection, seeds, limit=limit)
+        elif operation == "statement_slice":
+            payload["results"] = build_cached_statement_slice(
+                connection,
+                seeds,
+                limit=limit,
+                window=max(int(request.get("window") or 8), 1),
+            )
+        elif operation == "path_between":
+            targets = resolve_cached_seed_matches(search_root, repo_name, request.get("target"), limit=max(limit, 10))
+            target_rows = load_nodes_by_id(connection, [target["node_id"] for target in targets])
+            payload["targets"] = [
+                describe_sqlite_node(target_rows[target["node_id"]])
+                for target in targets
+                if target["node_id"] in target_rows
+            ]
+            payload["results"] = build_cached_shortest_paths(
+                connection,
+                seeds,
+                targets,
+                edge_types=edge_types,
+                direction=direction,
+                node_kinds=node_kinds,
+                limit=limit,
+            )
         else:
             payload["results"] = build_cached_neighbors(
                 connection,
@@ -829,6 +853,7 @@ def resolve_cached_search_matches(
     normalized = query.lower()
     results = search_documents(search_root, repo_name, query, limit=max(limit * 4, 40), kinds=("symbol",))
     scored = []
+    direct_only = []
     seen = set()
     for result in results:
         symbol_id = str(result.get("symbol_id") or "")
@@ -852,9 +877,12 @@ def resolve_cached_search_matches(
         if terminal.lower() == normalized:
             score += 60
         score += int(float(result.get("score") or 0.0) * 10)
+        if normalized in {qualified_name.lower(), name.lower(), terminal.lower()}:
+            direct_only.append((score, symbol_id, qualified_name, name))
         scored.append((score, symbol_id, qualified_name, name))
-    scored.sort(key=lambda item: (-item[0], item[2], item[3]))
-    return [{"node_id": item[1]} for item in scored[:limit]]
+    final = direct_only or scored
+    final.sort(key=lambda item: (-item[0], item[2], item[3]))
+    return [{"node_id": item[1]} for item in final[:limit]]
 
 
 def resolve_cached_path_matches(
@@ -1583,6 +1611,296 @@ def hydrate_cached_statements(
         results.append(described)
     results.sort(key=lambda item: (str(item.get("path") or ""), int(item.get("line") or 0), str(item.get("statement_id") or "")))
     return results
+
+
+def build_cached_statement_slice(
+    connection: sqlite3.Connection,
+    seeds: Sequence[Dict[str, object]],
+    *,
+    limit: int,
+    window: int,
+) -> List[Dict[str, object]]:
+    if not seeds:
+        return []
+    seed_ids = [seed["node_id"] for seed in seeds]
+    seed_rows = load_nodes_by_id(connection, seed_ids)
+    statement_ids: list[str] = []
+    seen_statement_ids: set[str] = set()
+
+    for seed in seeds:
+        seed_row = seed_rows.get(seed["node_id"])
+        if seed_row is None:
+            continue
+        if str(seed_row["kind"]) == "statement":
+            candidate_ids = [seed["node_id"]]
+            outgoing_rows = connection.execute(
+                """
+                SELECT target_node_id
+                FROM edges
+                WHERE source_node_id = ? AND type = 'CONTROL_FLOW'
+                ORDER BY edge_id
+                LIMIT ?
+                """,
+                [seed["node_id"], window],
+            ).fetchall()
+            incoming_rows = connection.execute(
+                """
+                SELECT source_node_id
+                FROM edges
+                WHERE target_node_id = ? AND type = 'CONTROL_FLOW'
+                ORDER BY edge_id
+                LIMIT ?
+                """,
+                [seed["node_id"], window],
+            ).fetchall()
+            candidate_ids.extend(str(row[0]) for row in outgoing_rows)
+            candidate_ids.extend(str(row[0]) for row in incoming_rows)
+        else:
+            contain_rows = connection.execute(
+                """
+                SELECT target_node_id
+                FROM edges
+                WHERE source_node_id = ? AND type = 'CONTAINS'
+                ORDER BY edge_id
+                LIMIT ?
+                """,
+                [seed["node_id"], window * 4],
+            ).fetchall()
+            candidate_ids = [str(row[0]) for row in contain_rows]
+
+        if candidate_ids:
+            node_rows = load_nodes_by_id(connection, candidate_ids)
+            ordered = sorted(
+                (
+                    row for row in node_rows.values()
+                    if str(row["kind"]) == "statement"
+                ),
+                key=lambda row: statement_row_sort_key(row),
+            )
+            for row in ordered[:window]:
+                statement_id = str(row["node_id"])
+                if statement_id in seen_statement_ids:
+                    continue
+                seen_statement_ids.add(statement_id)
+                statement_ids.append(statement_id)
+                if len(statement_ids) >= limit:
+                    break
+        if len(statement_ids) >= limit:
+            break
+
+    statement_rows = load_nodes_by_id(connection, statement_ids)
+    return [
+        hydrate_cached_statement(connection, statement_rows[statement_id])
+        for statement_id in statement_ids
+        if statement_id in statement_rows
+    ][:limit]
+
+
+def hydrate_cached_statement(connection: sqlite3.Connection, row: sqlite3.Row) -> Dict[str, object]:
+    metadata = json.loads(row["metadata_json"] or "{}")
+    statement_id = str(row["node_id"])
+    outgoing_rows = connection.execute(
+        """
+        SELECT type, target_node_id
+        FROM edges
+        WHERE source_node_id = ?
+        ORDER BY edge_id
+        """,
+        [statement_id],
+    ).fetchall()
+    incoming_rows = connection.execute(
+        """
+        SELECT type, source_node_id
+        FROM edges
+        WHERE target_node_id = ?
+        ORDER BY edge_id
+        """,
+        [statement_id],
+    ).fetchall()
+    referenced_ids = {
+        str(item[1])
+        for item in outgoing_rows
+        if item[1]
+    } | {
+        str(item[1])
+        for item in incoming_rows
+        if item[1]
+    }
+    node_rows = load_nodes_by_id(connection, list(referenced_ids))
+    described = describe_sqlite_node(row)
+    described["statement_id"] = statement_id
+    described["text"] = metadata.get("text")
+    described["container_symbol_id"] = metadata.get("container_symbol_id")
+    described["container_qualified_name"] = metadata.get("container_qualified_name")
+    described["line"] = int(str(described.get("name") or "0").split("@L")[-1]) if "@L" in str(described.get("name") or "") else 0
+    described["defines"] = hydrate_cached_node_list(node_rows, [str(item[1]) for item in outgoing_rows if str(item[0]) == "DEFINES"])
+    described["reads"] = hydrate_cached_node_list(node_rows, [str(item[1]) for item in outgoing_rows if str(item[0]) == "READS"])
+    described["writes"] = hydrate_cached_node_list(node_rows, [str(item[1]) for item in outgoing_rows if str(item[0]) == "WRITES"])
+    described["refs"] = hydrate_cached_node_list(
+        node_rows,
+        [str(item[1]) for item in outgoing_rows if str(item[0]) in {"REFS", "REFERENCES"}],
+    )
+    described["calls"] = hydrate_cached_node_list(node_rows, [str(item[1]) for item in outgoing_rows if str(item[0]) == "CALLS"])
+    described["control_predecessors"] = hydrate_cached_node_list(
+        node_rows,
+        [str(item[1]) for item in incoming_rows if str(item[0]) == "CONTROL_FLOW"],
+    )
+    described["control_successors"] = hydrate_cached_node_list(
+        node_rows,
+        [str(item[1]) for item in outgoing_rows if str(item[0]) == "CONTROL_FLOW"],
+    )
+    return described
+
+
+def build_cached_shortest_paths(
+    connection: sqlite3.Connection,
+    seeds: Sequence[Dict[str, object]],
+    targets: Sequence[Dict[str, object]],
+    *,
+    edge_types: Sequence[str],
+    direction: str,
+    node_kinds: Sequence[str],
+    limit: int,
+) -> List[Dict[str, object]]:
+    if not seeds or not targets:
+        return []
+    allowed_edge_types = set(edge_types)
+    allowed_node_kinds = set(node_kinds)
+    target_ids = {target["node_id"] for target in targets}
+    results: list[Dict[str, object]] = []
+
+    for seed in seeds:
+        queue = deque([seed["node_id"]])
+        parents: Dict[str, Tuple[Optional[str], Optional[Dict[str, object]]]] = {
+            seed["node_id"]: (None, None)
+        }
+        found_target_id: Optional[str] = None
+        while queue and found_target_id is None:
+            current = queue.popleft()
+            for neighbor_id, edge_payload in query_cached_adjacency(
+                connection,
+                current,
+                direction=direction,
+                edge_types=allowed_edge_types,
+            ):
+                neighbor_row = load_nodes_by_id(connection, [neighbor_id]).get(neighbor_id)
+                if neighbor_row is None:
+                    continue
+                neighbor_kind = str(neighbor_row["kind"] or "")
+                if allowed_node_kinds and neighbor_kind not in allowed_node_kinds and neighbor_id not in target_ids:
+                    continue
+                if neighbor_id in parents:
+                    continue
+                parents[neighbor_id] = (current, edge_payload)
+                if neighbor_id in target_ids:
+                    found_target_id = neighbor_id
+                    break
+                queue.append(neighbor_id)
+
+        if found_target_id is None:
+            continue
+
+        ordered_node_ids: list[str] = []
+        ordered_edges: list[Dict[str, object]] = []
+        cursor = found_target_id
+        while cursor is not None:
+            parent_id, parent_edge = parents[cursor]
+            ordered_node_ids.append(cursor)
+            if parent_edge is not None:
+                ordered_edges.append(parent_edge)
+            cursor = parent_id
+        ordered_node_ids.reverse()
+        ordered_edges.reverse()
+        node_rows = load_nodes_by_id(connection, ordered_node_ids)
+        results.append(
+            {
+                "source": describe_sqlite_node(node_rows[seed["node_id"]]),
+                "target": describe_sqlite_node(node_rows[found_target_id]),
+                "hop_count": len(ordered_edges),
+                "nodes": [describe_sqlite_node(node_rows[node_id]) for node_id in ordered_node_ids if node_id in node_rows],
+                "edges": ordered_edges,
+            }
+        )
+        if len(results) >= limit:
+            break
+
+    results.sort(
+        key=lambda item: (
+            int(item["hop_count"]),
+            str(item["target"].get("path") or ""),
+            str(item["target"].get("qualified_name") or item["target"].get("name") or ""),
+        )
+    )
+    return results[:limit]
+
+
+def query_cached_adjacency(
+    connection: sqlite3.Connection,
+    node_id: str,
+    *,
+    direction: str,
+    edge_types: set[str],
+) -> List[Tuple[str, Dict[str, object]]]:
+    entries: list[Tuple[str, Dict[str, object]]] = []
+    if direction in {"outgoing", "both"}:
+        rows = connection.execute(
+            """
+            SELECT edge_id, type, target_node_id, metadata_json
+            FROM edges
+            WHERE source_node_id = ?
+            ORDER BY edge_id
+            """,
+            [node_id],
+        ).fetchall()
+        for row in rows:
+            edge_type = str(row["type"])
+            if edge_types and edge_type not in edge_types:
+                continue
+            entries.append(
+                (
+                    str(row["target_node_id"]),
+                    {
+                        "type": edge_type,
+                        "direction": "outgoing",
+                        "metadata": json.loads(row["metadata_json"] or "{}"),
+                    },
+                )
+            )
+    if direction in {"incoming", "both"}:
+        rows = connection.execute(
+            """
+            SELECT edge_id, type, source_node_id, metadata_json
+            FROM edges
+            WHERE target_node_id = ?
+            ORDER BY edge_id
+            """,
+            [node_id],
+        ).fetchall()
+        for row in rows:
+            edge_type = str(row["type"])
+            if edge_types and edge_type not in edge_types:
+                continue
+            entries.append(
+                (
+                    str(row["source_node_id"]),
+                    {
+                        "type": edge_type,
+                        "direction": "incoming",
+                        "metadata": json.loads(row["metadata_json"] or "{}"),
+                    },
+                )
+            )
+    return entries
+
+
+def statement_row_sort_key(row: sqlite3.Row) -> Tuple[str, int, str]:
+    metadata = json.loads(row["metadata_json"] or "{}")
+    span = metadata.get("span") or {}
+    return (
+        str(row["path"] or ""),
+        int(span.get("start_line") or 0),
+        str(row["node_id"]),
+    )
 
 
 def count_edge_targets(
