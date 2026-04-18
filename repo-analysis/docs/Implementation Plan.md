@@ -372,7 +372,7 @@ Eval caching is LMDB-backed and consistent with the new runtime.
 
 Delete the old hot-path code.
 
-### Delete
+### Remove
 
 * SQLite hot-path reads in `search.indexer.search_documents`
 * compatibility `LmdbMetadataStore` SQLite code
