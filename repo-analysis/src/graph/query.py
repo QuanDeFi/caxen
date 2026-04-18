@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from collections import Counter, defaultdict, deque
 from functools import lru_cache
@@ -73,6 +72,10 @@ CACHEABLE_NEIGHBOR_EDGE_TYPES = {
 }
 
 
+def graph_root_from_parsed(parsed_root: Path) -> Path:
+    return parsed_root.parent / "graph"
+
+
 def execute_graph_query(
     search_root: Path,
     parsed_root: Path,
@@ -80,207 +83,11 @@ def execute_graph_query(
     repo_name: str,
     request: Dict[str, object],
 ) -> Dict[str, object]:
-    operation = str(request.get("operation") or "neighbors")
     graph_backend = get_graph_backend(str(graph_root.resolve()), repo_name)
     backend_response = graph_backend.execute(request)
-    if backend_response is not None:
-        return backend_response
-    cached_response = execute_cached_graph_query(search_root, parsed_root, graph_root, repo_name, request)
-    if cached_response is not None:
-        return cached_response
-    limit = max(int(request.get("limit") or 20), 1)
-    depth = max(int(request.get("depth") or 1), 0)
-    direction = str(request.get("direction") or EDGE_DIRECTIONS.get(operation, "both"))
-    edge_types = tuple(request.get("edge_types") or EDGE_DEFAULTS.get(operation, ()))
-    node_kinds = tuple(request.get("node_kinds") or ())
-    graph = load_graph_view(graph_root, repo_name)
-    symbols_payload = load_symbols_payload(parsed_root, repo_name)
-    symbol_by_id = {item["symbol_id"]: item for item in symbols_payload.get("symbols", [])}
-    seeds = resolve_seed_matches(
-        search_root,
-        parsed_root,
-        graph,
-        symbols_payload,
-        repo_name,
-        request.get("seed") or request.get("query"),
-        limit=max(limit, 10),
-    )
-
-    payload = {
-        "repo": repo_name,
-        "operation": operation,
-        "graph_backend": graph["backend"],
-        "request": {
-            "direction": direction,
-            "edge_types": list(edge_types),
-            "depth": depth,
-            "limit": limit,
-            "node_kinds": list(node_kinds),
-            "seed": request.get("seed") or request.get("query"),
-        },
-        "seeds": [describe_node(seed, symbol_by_id) for seed in seeds],
-    }
-
-    if operation == "where_defined":
-        payload["results"] = payload["seeds"][:limit]
-        return payload
-
-    if operation == "statement_slice":
-        payload["results"] = collect_statement_slice(
-            graph,
-            symbol_by_id,
-            seeds,
-            limit=limit,
-            window=max(int(request.get("window") or 8), 1),
-        )
-        return payload
-
-    if operation == "path_between":
-        targets = resolve_seed_matches(
-            search_root,
-            parsed_root,
-            graph,
-            symbols_payload,
-            repo_name,
-            request.get("target"),
-            limit=max(limit, 10),
-        )
-        payload["targets"] = [describe_node(target, symbol_by_id) for target in targets]
-        payload["results"] = shortest_paths(
-            graph,
-            symbol_by_id,
-            seeds,
-            targets,
-            edge_types=edge_types,
-            direction=direction,
-            node_kinds=node_kinds,
-            limit=limit,
-        )
-        return payload
-
-    if operation == "symbol_summary":
-        payload["results"] = build_symbol_summaries(graph, symbol_by_id, seeds, limit=limit)
-        return payload
-
-    payload["results"] = collect_neighbors(
-        graph,
-        symbol_by_id,
-        seeds,
-        edge_types=edge_types,
-        direction=direction,
-        depth=depth,
-        node_kinds=node_kinds,
-        limit=limit,
-    )
-    return payload
-
-
-def execute_cached_graph_query(
-    search_root: Path,
-    parsed_root: Path,
-    graph_root: Path,
-    repo_name: str,
-    request: Dict[str, object],
-) -> Optional[Dict[str, object]]:
-    operation = str(request.get("operation") or "neighbors")
-    sqlite_path = graph_root / repo_name / "graph.sqlite3"
-    if not sqlite_path.exists():
-        return None
-
-    limit = max(int(request.get("limit") or 20), 1)
-    depth = max(int(request.get("depth") or 1), 0)
-    direction = str(request.get("direction") or EDGE_DIRECTIONS.get(operation, "both"))
-    edge_types = tuple(request.get("edge_types") or EDGE_DEFAULTS.get(operation, ()))
-    node_kinds = tuple(request.get("node_kinds") or ())
-    seeds = resolve_cached_seed_matches(search_root, repo_name, request.get("seed") or request.get("query"), limit=max(limit, 10))
-    if not seeds:
-        return {
-            "repo": repo_name,
-            "operation": operation,
-            "graph_backend": "sqlite",
-            "request": {
-                "direction": direction,
-                "edge_types": list(edge_types),
-                "depth": depth,
-                "limit": limit,
-                "node_kinds": list(node_kinds),
-                "seed": request.get("seed") or request.get("query"),
-            },
-            "seeds": [],
-            "results": [],
-        }
-
-    with sqlite3.connect(sqlite_path) as connection:
-        connection.row_factory = sqlite3.Row
-        if operation == "symbol_summary":
-            if not has_symbol_summary_cache(connection):
-                return None
-        elif operation in {"callers_of", "callees_of"}:
-            if not has_neighbor_cache(connection):
-                return None
-        elif operation == "neighbors":
-            if not can_use_cached_neighbors(request, depth=depth, edge_types=edge_types):
-                return None
-            if not has_neighbor_cache(connection):
-                return None
-        elif operation in {"statement_slice", "path_between"}:
-            pass
-        else:
-            return None
-        seed_rows = load_nodes_by_id(connection, [seed["node_id"] for seed in seeds])
-        described_seeds = [describe_sqlite_node(seed_rows[seed["node_id"]]) for seed in seeds if seed["node_id"] in seed_rows]
-
-        payload = {
-            "repo": repo_name,
-            "operation": operation,
-            "graph_backend": "sqlite",
-            "request": {
-                "direction": direction,
-                "edge_types": list(edge_types),
-                "depth": depth,
-                "limit": limit,
-                "node_kinds": list(node_kinds),
-                "seed": request.get("seed") or request.get("query"),
-            },
-            "seeds": described_seeds,
-        }
-
-        if operation == "symbol_summary":
-            payload["results"] = build_cached_symbol_summaries(connection, seeds, limit=limit)
-        elif operation == "statement_slice":
-            payload["results"] = build_cached_statement_slice(
-                connection,
-                seeds,
-                limit=limit,
-                window=max(int(request.get("window") or 8), 1),
-            )
-        elif operation == "path_between":
-            targets = resolve_cached_seed_matches(search_root, repo_name, request.get("target"), limit=max(limit, 10))
-            target_rows = load_nodes_by_id(connection, [target["node_id"] for target in targets])
-            payload["targets"] = [
-                describe_sqlite_node(target_rows[target["node_id"]])
-                for target in targets
-                if target["node_id"] in target_rows
-            ]
-            payload["results"] = build_cached_shortest_paths(
-                connection,
-                seeds,
-                targets,
-                edge_types=edge_types,
-                direction=direction,
-                node_kinds=node_kinds,
-                limit=limit,
-            )
-        else:
-            payload["results"] = build_cached_neighbors(
-                connection,
-                seeds,
-                direction=direction,
-                edge_types=edge_types,
-                node_kinds=node_kinds,
-                limit=limit,
-            )
-        return payload
+    if backend_response is None:
+        raise FileNotFoundError(f"Missing graph backend artifact for repo '{repo_name}' under {graph_root / repo_name}")
+    return backend_response
 
 
 def where_defined(
@@ -292,12 +99,17 @@ def where_defined(
     limit: int = 10,
 ) -> Dict[str, object]:
     with trace_operation("where_defined"):
-        symbols = load_symbols_payload(parsed_root, repo_name)
-        matches = resolve_symbol_matches(search_root, symbols, repo_name, symbol_query, limit=limit)
+        response = execute_graph_query(
+            search_root,
+            parsed_root,
+            graph_root=graph_root_from_parsed(parsed_root),
+            repo_name=repo_name,
+            request={"operation": "where_defined", "seed": symbol_query, "limit": limit},
+        )
         return {
             "repo": repo_name,
             "query": symbol_query,
-            "matches": [describe_symbol(symbol) for symbol in matches],
+            "matches": response["results"],
         }
 
 
@@ -599,37 +411,25 @@ def load_graph_view(graph_root: Path, repo_name: str) -> Dict[str, object]:
 @lru_cache(maxsize=8)
 def _load_graph_view_cached(graph_root: str, repo_name: str) -> Dict[str, object]:
     root = Path(graph_root)
-    ryugraph_path = root / repo_name / "ryugraph.json"
-    if ryugraph_path.exists():
-        return graph_indexes(load_json(ryugraph_path), backend="ryugraph")
-    graph_json_path = root / repo_name / "graph.json"
-    if graph_json_path.exists():
-        return load_graph_json(graph_json_path)
-    if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") != "1":
-        raise FileNotFoundError(f"Missing ryugraph/json graph artifact for repo '{repo_name}' under {root / repo_name}")
     sqlite_path = root / repo_name / "graph.sqlite3"
     if sqlite_path.exists():
         return load_graph_sqlite(sqlite_path)
-    return load_graph_json(graph_json_path)
+    graph_json_path = root / repo_name / "graph.json"
+    if graph_json_path.exists():
+        return load_graph_json(graph_json_path)
+    raise FileNotFoundError(f"Missing graph artifact for repo '{repo_name}' under {root / repo_name}")
 
 
 def load_graph_view_uncached(graph_root: Path, repo_name: str) -> Dict[str, object]:
     increment_counter("full_graph_payload_loads")
     with trace_operation("load_graph_view_uncached"):
-        ryugraph_path = graph_root / repo_name / "ryugraph.json"
-        if ryugraph_path.exists():
-            return graph_indexes(load_json(ryugraph_path), backend="ryugraph")
-        graph_json_path = graph_root / repo_name / "graph.json"
-        if graph_json_path.exists():
-            return load_graph_json(graph_json_path)
-        if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") != "1":
-            raise FileNotFoundError(
-                f"Missing ryugraph/json graph artifact for repo '{repo_name}' under {graph_root / repo_name}"
-            )
         sqlite_path = graph_root / repo_name / "graph.sqlite3"
         if sqlite_path.exists():
             return load_graph_sqlite(sqlite_path)
-        return load_graph_json(graph_json_path)
+        graph_json_path = graph_root / repo_name / "graph.json"
+        if graph_json_path.exists():
+            return load_graph_json(graph_json_path)
+        raise FileNotFoundError(f"Missing graph artifact for repo '{repo_name}' under {graph_root / repo_name}")
 
 
 def has_symbol_summary_cache(connection: sqlite3.Connection) -> bool:

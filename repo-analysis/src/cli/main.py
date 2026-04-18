@@ -661,7 +661,7 @@ def handle_build_index(args: argparse.Namespace) -> int:
         else:
             remove_file_if_exists(parsed_root / repo_name / "symbols.json")
             remove_file_if_exists(graph_root / repo_name / "graph.json")
-        graph_db_path = write_graph_database(graph_root, repo_name, graph_artifact)
+        graph_db_path = write_graph_database(graph_root, repo_name, graph_artifact, emit_json=args.emit_json)
         update_query_manifest(
             parsed_root,
             repo_name,
