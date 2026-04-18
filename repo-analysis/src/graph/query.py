@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections import Counter, defaultdict, deque
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from backends.graph_backend import get_graph_backend
 from common.telemetry import increment_counter, trace_operation
 from search.indexer import search_documents
 from symbols.indexer import stable_id
@@ -79,6 +81,10 @@ def execute_graph_query(
     request: Dict[str, object],
 ) -> Dict[str, object]:
     operation = str(request.get("operation") or "neighbors")
+    graph_backend = get_graph_backend(str(graph_root.resolve()), repo_name)
+    backend_response = graph_backend.execute(request)
+    if backend_response is not None:
+        return backend_response
     cached_response = execute_cached_graph_query(search_root, parsed_root, graph_root, repo_name, request)
     if cached_response is not None:
         return cached_response
@@ -176,6 +182,8 @@ def execute_cached_graph_query(
     repo_name: str,
     request: Dict[str, object],
 ) -> Optional[Dict[str, object]]:
+    if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") != "1":
+        return None
     operation = str(request.get("operation") or "neighbors")
     sqlite_path = graph_root / repo_name / "graph.sqlite3"
     if not sqlite_path.exists():
@@ -567,19 +575,37 @@ def load_graph_view(graph_root: Path, repo_name: str) -> Dict[str, object]:
 @lru_cache(maxsize=8)
 def _load_graph_view_cached(graph_root: str, repo_name: str) -> Dict[str, object]:
     root = Path(graph_root)
+    ryugraph_path = root / repo_name / "ryugraph.json"
+    if ryugraph_path.exists():
+        return graph_indexes(load_json(ryugraph_path), backend="ryugraph")
+    graph_json_path = root / repo_name / "graph.json"
+    if graph_json_path.exists():
+        return load_graph_json(graph_json_path)
+    if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") != "1":
+        raise FileNotFoundError(f"Missing ryugraph/json graph artifact for repo '{repo_name}' under {root / repo_name}")
     sqlite_path = root / repo_name / "graph.sqlite3"
     if sqlite_path.exists():
         return load_graph_sqlite(sqlite_path)
-    return load_graph_json(root / repo_name / "graph.json")
+    return load_graph_json(graph_json_path)
 
 
 def load_graph_view_uncached(graph_root: Path, repo_name: str) -> Dict[str, object]:
     increment_counter("full_graph_payload_loads")
     with trace_operation("load_graph_view_uncached"):
+        ryugraph_path = graph_root / repo_name / "ryugraph.json"
+        if ryugraph_path.exists():
+            return graph_indexes(load_json(ryugraph_path), backend="ryugraph")
+        graph_json_path = graph_root / repo_name / "graph.json"
+        if graph_json_path.exists():
+            return load_graph_json(graph_json_path)
+        if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") != "1":
+            raise FileNotFoundError(
+                f"Missing ryugraph/json graph artifact for repo '{repo_name}' under {graph_root / repo_name}"
+            )
         sqlite_path = graph_root / repo_name / "graph.sqlite3"
         if sqlite_path.exists():
             return load_graph_sqlite(sqlite_path)
-        return load_graph_json(graph_root / repo_name / "graph.json")
+        return load_graph_json(graph_json_path)
 
 
 def has_symbol_summary_cache(connection: sqlite3.Connection) -> bool:
