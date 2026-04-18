@@ -2,17 +2,16 @@ from __future__ import annotations
 
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
+from backends.graph_backend import get_graph_backend
+from backends.metadata_store import get_metadata_store
 from backends.search_backend import get_search_backend
 from common.telemetry import trace_operation
-from graph.query import load_graph_view_uncached
 from embeddings.indexer import query_embedding_index
 from rerank.fusion import rerank_candidates
 from search.indexer import tokenize
 from symbols.indexer import stable_id
-from symbols.persistence import load_symbol_index
-from summaries.builder import load_summary_artifacts
 
 
 EDGE_BONUS = {
@@ -59,6 +58,12 @@ def retrieve_context(
 ) -> Dict[str, object]:
     with trace_operation("retrieve_context"):
         search_backend = get_search_backend(str(search_root.resolve()), repo_name)
+        graph_backend = get_graph_backend(str(graph_root.resolve()), repo_name)
+        metadata_store = get_metadata_store(
+            str(parsed_root.resolve()),
+            repo_name,
+            summary_root=str(summary_root.resolve()) if summary_root else None,
+        )
         tokens = tokenize(query)
         query_profile = classify_query(tokens, query)
         effective_kinds = tuple(kinds) if kinds else default_query_kinds(query_profile)
@@ -69,14 +74,6 @@ def retrieve_context(
         embedding_results = (
             query_embedding_index(search_root, repo_name, query, limit=max(limit, 5)) if effective_use_embeddings else []
         )
-        graph = load_graph_view_uncached(graph_root, repo_name)["payload"]
-        symbols = load_symbol_index(parsed_root, repo_name)
-        symbol_by_id = {item["symbol_id"]: item for item in symbols.get("symbols", [])}
-        symbols_by_path = defaultdict(list)
-        for symbol in symbols.get("symbols", []):
-            symbols_by_path[symbol["path"]].append(symbol)
-
-        node_by_id, outgoing, incoming = graph_indexes(graph)
         candidates: Dict[Tuple[str, str], Dict[str, object]] = {}
 
         for result in lexical_results:
@@ -87,9 +84,6 @@ def retrieve_context(
                     "reasons": ["lexical"],
                 },
             )
-            if result["kind"] == "file" and result.get("path"):
-                for localized in localize_file_symbols(tokens, symbols_by_path[result["path"]], base_score=float(result["score"]) * 0.5):
-                    add_candidate(candidates, localized)
 
         for result in embedding_results:
             add_candidate(
@@ -107,18 +101,27 @@ def retrieve_context(
                 seed_nodes.append((node_id, float(result["score"])))
 
         expanded = (
-            expand_graph_candidates(repo_name, node_by_id, outgoing, incoming, seed_nodes, depth, max_fanout=max_graph_fanout)
+            expand_graph_candidates(
+                graph_backend,
+                repo_name,
+                seed_nodes,
+                depth,
+                max_fanout=max_graph_fanout,
+            )
             if effective_use_graph
             else []
         )
         for candidate in expanded:
-            symbol = symbol_by_id.get(candidate.get("symbol_id"))
+            symbol = metadata_store.get_symbol(str(candidate.get("symbol_id") or ""))
             if symbol:
                 candidate.setdefault("preview", symbol.get("signature") or symbol["qualified_name"])
+                candidate["name"] = symbol.get("name")
+                candidate["qualified_name"] = symbol.get("qualified_name")
+                candidate["path"] = symbol.get("path")
             add_candidate(candidates, candidate)
 
-        if use_summaries and summary_root is not None:
-            apply_summary_bonus(candidates, summary_root, repo_name, tokens)
+        if use_summaries:
+            apply_summary_bonus(candidates, metadata_store, tokens)
 
         ranked_candidates = list(candidates.values())
         ranked = (
@@ -147,6 +150,14 @@ def retrieve_context(
         }
 
 
+def result_to_node_id(repo_name: str, result: Dict[str, object]) -> Optional[str]:
+    if result.get("symbol_id"):
+        return result["symbol_id"]
+    if result.get("kind") == "file" and result.get("path"):
+        return stable_id("file", repo_name, result["path"])
+    return None
+
+
 def graph_indexes(graph: Dict[str, object]) -> Tuple[Dict[str, Dict[str, object]], Dict[str, List[Dict[str, object]]], Dict[str, List[Dict[str, object]]]]:
     node_by_id = {node["node_id"]: node for node in graph.get("nodes", [])}
     outgoing: Dict[str, List[Dict[str, object]]] = defaultdict(list)
@@ -157,82 +168,32 @@ def graph_indexes(graph: Dict[str, object]) -> Tuple[Dict[str, Dict[str, object]
     return node_by_id, outgoing, incoming
 
 
-def result_to_node_id(repo_name: str, result: Dict[str, object]) -> Optional[str]:
-    if result.get("symbol_id"):
-        return result["symbol_id"]
-    if result.get("kind") == "file" and result.get("path"):
-        return stable_id("file", repo_name, result["path"])
-    return None
-
-
-def localize_file_symbols(tokens: Sequence[str], symbols: Sequence[Dict[str, object]], *, base_score: float) -> List[Dict[str, object]]:
-    localized = []
-    for symbol in symbols:
-        searchable = " ".join(
-            str(item or "").lower()
-            for item in (
-                symbol["name"],
-                symbol["qualified_name"],
-                symbol["kind"],
-                symbol.get("signature"),
-            )
-        )
-        overlap = sum(1 for token in tokens if token in searchable)
-        if overlap == 0:
-            continue
-        localized.append(
-            {
-                "doc_id": stable_id("cand", symbol["repo"], symbol["symbol_id"], "localized"),
-                "kind": "symbol",
-                "repo": symbol["repo"],
-                "path": symbol["path"],
-                "name": symbol["name"],
-                "qualified_name": symbol["qualified_name"],
-                "symbol_id": symbol["symbol_id"],
-                "title": symbol["qualified_name"],
-                "preview": symbol.get("signature") or symbol["qualified_name"],
-                "score": round(base_score + overlap * 0.4, 6),
-                "metadata": {
-                    "kind": symbol["kind"],
-                    "crate": symbol["crate"],
-                    "module_path": symbol["module_path"],
-                },
-                "reasons": ["symbol-localization"],
-            }
-        )
-    return localized
-
-
 def expand_graph_candidates(
+    graph_backend: object,
     repo_name: str,
-    node_by_id: Dict[str, Dict[str, object]],
-    outgoing: Dict[str, List[Dict[str, object]]],
-    incoming: Dict[str, List[Dict[str, object]]],
     seed_nodes: Sequence[Tuple[str, float]],
     depth: int,
     *,
     max_fanout: int,
 ) -> List[Dict[str, object]]:
     expanded = []
-    seen = set()
-    frontier = list(seed_nodes)
-
-    for _ in range(max(depth, 0)):
-        next_frontier = []
-        for node_id, base_score in frontier:
-            for direction, edges in (("outgoing", outgoing.get(node_id, [])), ("incoming", incoming.get(node_id, []))):
-                for edge in edges[:max(max_fanout, 1)]:
-                    neighbor_id = edge["to"] if direction == "outgoing" else edge["from"]
-                    if neighbor_id == node_id or (node_id, neighbor_id, edge["type"]) in seen:
-                        continue
-                    seen.add((node_id, neighbor_id, edge["type"]))
-                    neighbor = node_by_id.get(neighbor_id)
-                    if not neighbor or neighbor["kind"] == "repository":
-                        continue
-                    score = round(base_score + EDGE_BONUS.get(edge["type"], 0.5), 6)
-                    expanded.append(node_to_candidate(repo_name, neighbor, score, edge, direction))
-                    next_frontier.append((neighbor_id, score * 0.5))
-        frontier = next_frontier
+    for node_id, base_score in seed_nodes:
+        response = graph_backend.execute(
+            {
+                "operation": "neighbors",
+                "seed": {"node_id": node_id},
+                "edge_types": tuple(EDGE_BONUS.keys()),
+                "direction": "both",
+                "depth": max(depth, 1),
+                "limit": max(max_fanout, 1),
+            }
+        )
+        for item in (response or {}).get("results", []):
+            edge = dict(item.get("edge") or {})
+            edge_type = str(edge.get("type") or "NEIGHBOR")
+            direction = str(edge.get("metadata", {}).get("direction") or "both")
+            score = round(base_score + EDGE_BONUS.get(edge_type, 0.5), 6)
+            expanded.append(node_to_candidate(repo_name, item, score, edge, direction))
     return expanded
 
 
@@ -243,6 +204,8 @@ def node_to_candidate(
     edge: Dict[str, object],
     direction: str,
 ) -> Dict[str, object]:
+    edge_id = str(edge.get("edge_id") or stable_id("edge", repo_name, node.get("node_id") or "unknown"))
+    edge_type = str(edge.get("type") or "NEIGHBOR")
     if node["kind"] in {
         "statement",
         "file",
@@ -267,7 +230,7 @@ def node_to_candidate(
     else:
         kind = node["kind"]
     return {
-        "doc_id": stable_id("cand", repo_name, node["node_id"], edge["edge_id"], direction),
+        "doc_id": stable_id("cand", repo_name, node["node_id"], edge_id, direction),
         "kind": kind,
         "repo": repo_name,
         "path": node.get("path"),
@@ -275,14 +238,14 @@ def node_to_candidate(
         "qualified_name": node.get("qualified_name"),
         "symbol_id": node["node_id"] if kind == "symbol" and node["node_id"].startswith("sym:") else None,
         "title": node.get("qualified_name") or node.get("path") or node.get("name"),
-        "preview": f"{edge['type']} via {direction}",
+        "preview": f"{edge_type} via {direction}",
         "score": score,
         "metadata": {
             "node_kind": node["kind"],
-            "edge_type": edge["type"],
+            "edge_type": edge_type,
             "direction": direction,
         },
-        "reasons": [f"graph:{edge['type']}:{direction}"],
+        "reasons": [f"graph:{edge_type}:{direction}"],
     }
 
 
@@ -389,20 +352,17 @@ def default_query_kinds(query_profile: Dict[str, object]) -> Tuple[str, ...]:
 
 def apply_summary_bonus(
     candidates: Dict[Tuple[str, str], Dict[str, object]],
-    summary_root: Path,
-    repo_name: str,
+    metadata_store: object,
     tokens: Sequence[str],
 ) -> None:
-    summaries = load_summary_artifacts(summary_root, repo_name)
-    file_summaries = {item["path"]: item for item in summaries.get("files", [])}
-    symbol_summaries = {item["symbol_id"]: item for item in summaries.get("symbols", [])}
-
     for candidate in candidates.values():
         searchable = []
-        if candidate.get("path") and candidate["path"] in file_summaries:
-            searchable.append(file_summaries[candidate["path"]]["summary"])
-        if candidate.get("symbol_id") and candidate["symbol_id"] in symbol_summaries:
-            searchable.append(symbol_summaries[candidate["symbol_id"]]["summary"])
+        if candidate.get("path"):
+            summaries = metadata_store.get_summary_by_path(str(candidate["path"]))
+            searchable.extend(str(item.get("summary") or "") for item in summaries)
+        if candidate.get("symbol_id"):
+            summaries = metadata_store.get_summary_by_symbol(str(candidate["symbol_id"]))
+            searchable.extend(str(item.get("summary") or "") for item in summaries)
         if not searchable:
             continue
         haystack = " ".join(searchable).lower()

@@ -6,6 +6,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, Iterable
 
+from backends.ryugraph.loader import write_ryugraph_payload
+
 
 def write_graph_database(output_root: Path, repo_name: str, payload: Dict[str, object]) -> Path:
     repo_output = output_root / repo_name
@@ -135,6 +137,7 @@ def write_graph_database(output_root: Path, repo_name: str, payload: Dict[str, o
         )
         connection.commit()
 
+    write_ryugraph_payload(output_root, repo_name, payload)
     return target
 
 
