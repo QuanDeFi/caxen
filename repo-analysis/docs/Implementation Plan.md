@@ -372,7 +372,7 @@ Eval caching is LMDB-backed and consistent with the new runtime.
 
 Delete the old hot-path code.
 
-### Delete or retire
+### Delete
 
 * SQLite hot-path reads in `search.indexer.search_documents`
 * compatibility `LmdbMetadataStore` SQLite code
@@ -381,74 +381,15 @@ Delete the old hot-path code.
 * `load_symbol_index()` in interactive paths
 * `load_graph_view_uncached()` in interactive paths
 * `CAXEN_ENABLE_SQLITE_HOTPATH_READS`
-
-### Keep only if needed
-
 * SQLite export builders for debugging
 * JSON exports for inspection
 * migration tooling
 
 ---
 
-## Stage sequence
-
-Use this exact order.
-
-### Stage-1
-
-Telemetry hardening and benchmark lock
-
-### Stage-2
-
-Real Tantivy search backend cutover
-
-### Stage-3
-
-Real LMDB metadata store and metadata builder
-
-### Stage-4
-
-Toolkit and retrieval exact-lookup cutover to LMDB
-
-### Stage-5
-
-Real graph loader and graph backend for first-hop queries
-
-### Stage-6
-
-Graph backend support for `statement_slice` and `path_between`
-
-### Stage-7
-
-Planner and bundle assembly fully backend-native
-
-### Stage-8
-
-Eval cache cutover and artifact fingerprint update
-
-### Stage-9
-
-Delete compatibility fallbacks and legacy hot-path SQLite reads
-
----
-
-## Acceptance checklist per Stage
-
-A Stage is accepted only if:
-
-* all existing unit tests pass
-* new tests cover the migrated path
-* telemetry shows no new full payload loads
-* median latency for the migrated command does not regress
-* relevance on benchmark cases does not regress
-
-Use the existing test suite as the base, but add explicit assertions for the commands not fully protected yet. 
-
----
-
 ## Practical advice
 
-Do **not** try to land the full cutover in one Stage.
+Do **not** try to land the full cutover in one Phase.
 
 The correct strategy is:
 
@@ -456,7 +397,5 @@ The correct strategy is:
 * then make exact metadata truly native
 * then move graph execution
 * only then remove the compatibility code
-
-That gets you measurable wins early and avoids a giant unstable rewrite.
 
 
