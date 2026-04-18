@@ -55,3 +55,7 @@ def snapshot_telemetry() -> Dict[str, object]:
             },
         }
 
+def reset_telemetry() -> None:
+    with _LOCK:
+        _COUNTERS.clear()
+        _TIMINGS.clear()

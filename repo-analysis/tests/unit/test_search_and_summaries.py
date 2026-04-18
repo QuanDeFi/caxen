@@ -33,7 +33,7 @@ from agents.toolkit import (
     summarize_path,
     trace_calls,
 )
-from common.telemetry import snapshot_telemetry
+from common.telemetry import reset_telemetry, snapshot_telemetry
 from common.query_manifest import load_query_manifest
 from embeddings.indexer import build_embedding_index, query_embedding_index
 from evaluation.harness import export_benchmark_prompts, run_benchmarks, score_answer_bundles, score_external_answers
@@ -222,6 +222,7 @@ class SearchAndSummaryTest(unittest.TestCase):
     def test_telemetry_tracks_full_payload_hydration_and_hot_path_timing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = seed_demo_workspace(Path(tmpdir))
+            reset_telemetry()
 
             retrieve_context(
                 paths["search_root"],
@@ -240,6 +241,21 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertGreaterEqual(int(counters.get("full_graph_payload_loads", 0)), 1)
             self.assertIn("retrieve_context", timings)
             self.assertIn("search_documents", timings)
+
+    def test_lexical_toolkit_commands_do_not_trigger_full_payload_hydration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = seed_demo_workspace(Path(tmpdir))
+            reset_telemetry()
+
+            find_symbol(paths["search_root"], "demo", "helper", limit=5)
+            find_file(paths["search_root"], "demo", "src/lib.rs", limit=5)
+            search_lexical(paths["search_root"], "demo", "helper", limit=5, kinds=("symbol",))
+
+            telemetry = snapshot_telemetry()
+            counters = telemetry.get("counters", {})
+
+            self.assertEqual(int(counters.get("full_symbol_payload_loads", 0)), 0)
+            self.assertEqual(int(counters.get("full_graph_payload_loads", 0)), 0)
 
             with sqlite3.connect(paths["parsed_root"] / "demo" / "symbols.sqlite3") as connection:
                 tables = {

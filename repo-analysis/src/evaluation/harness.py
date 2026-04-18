@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
+from backends.metadata_store import get_metadata_store
 from embeddings.indexer import query_embedding_index
 from retrieval.engine import retrieve_context
 from retrieval.planner import prepare_answer_bundle
@@ -568,83 +569,50 @@ def load_or_build_cached_case(
     )
     cache_fingerprint = compute_case_cache_fingerprint(case, artifact_fingerprint, limit=limit)
 
-    with sqlite3.connect(cache_path) as connection:
-        connection.row_factory = sqlite3.Row
-        row = connection.execute(
-            """
-            SELECT bundle_json, prompt_payload_json, bundle_score_json
-            FROM benchmark_case_cache
-            WHERE case_name = ? AND cache_fingerprint = ?
-            """,
-            (str(case["name"]), cache_fingerprint),
-        ).fetchone()
-        if row is not None:
-            return {
-                "bundle": json.loads(row["bundle_json"]),
-                "prompt_payload": json.loads(row["prompt_payload_json"]),
-                "bundle_score": json.loads(row["bundle_score_json"]),
-                "cache": "hit",
-            }
-
-        bundle = prepare_answer_bundle(
-            search_root,
-            summary_root,
-            graph_root,
-            parsed_root,
-            str(case["query"]),
-            repo_name=repo_name,
-            limit=limit,
-        )
-        prompt_payload = build_prompt_payload(case, bundle)
-        bundle_score = score_bundle(case, bundle)
-        connection.execute(
-            """
-            INSERT INTO benchmark_case_cache(
-                case_name,
-                repo,
-                task_type,
-                query,
-                limit_value,
-                artifact_fingerprint,
-                cache_fingerprint,
-                bundle_json,
-                prompt_payload_json,
-                bundle_score_json,
-                updated_at
-            )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(case_name) DO UPDATE SET
-                repo=excluded.repo,
-                task_type=excluded.task_type,
-                query=excluded.query,
-                limit_value=excluded.limit_value,
-                artifact_fingerprint=excluded.artifact_fingerprint,
-                cache_fingerprint=excluded.cache_fingerprint,
-                bundle_json=excluded.bundle_json,
-                prompt_payload_json=excluded.prompt_payload_json,
-                bundle_score_json=excluded.bundle_score_json,
-                updated_at=excluded.updated_at
-            """,
-            (
-                str(case["name"]),
-                repo_name,
-                str(case["task_type"]),
-                str(case["query"]),
-                int(limit),
-                artifact_fingerprint,
-                cache_fingerprint,
-                json.dumps(bundle, sort_keys=False),
-                json.dumps(prompt_payload, sort_keys=False),
-                json.dumps(bundle_score, sort_keys=False),
-                timestamp_now(),
-            ),
-        )
+    metadata_store = get_metadata_store(
+        str(parsed_root.resolve()),
+        repo_name,
+        summary_root=str(summary_root.resolve()),
+        eval_root=str(cache_path.parent.resolve()),
+    )
+    cached = metadata_store.get_eval_case(str(case["name"]), cache_fingerprint)
+    if cached is not None:
         return {
-            "bundle": bundle,
-            "prompt_payload": prompt_payload,
-            "bundle_score": bundle_score,
-            "cache": "miss",
+            "bundle": cached["bundle"],
+            "prompt_payload": cached["prompt_payload"],
+            "bundle_score": cached["bundle_score"],
+            "cache": "hit",
         }
+
+    bundle = prepare_answer_bundle(
+        search_root,
+        summary_root,
+        graph_root,
+        parsed_root,
+        str(case["query"]),
+        repo_name=repo_name,
+        limit=limit,
+    )
+    prompt_payload = build_prompt_payload(case, bundle)
+    bundle_score = score_bundle(case, bundle)
+    metadata_store.put_eval_case(
+        str(case["name"]),
+        repo=repo_name,
+        task_type=str(case["task_type"]),
+        query=str(case["query"]),
+        limit_value=int(limit),
+        artifact_fingerprint=artifact_fingerprint,
+        cache_fingerprint=cache_fingerprint,
+        bundle=bundle,
+        prompt_payload=prompt_payload,
+        bundle_score=bundle_score,
+    )
+    return {
+        "bundle": bundle,
+        "prompt_payload": prompt_payload,
+        "bundle_score": bundle_score,
+        "cache": "miss",
+    }
 
 
 def compute_case_cache_fingerprint(case: Dict[str, object], artifact_fingerprint: str, *, limit: int) -> str:

@@ -4,11 +4,12 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from backends.search_backend import get_search_backend
 from common.telemetry import trace_operation
 from graph.query import load_graph_view_uncached
 from embeddings.indexer import query_embedding_index
 from rerank.fusion import rerank_candidates
-from search.indexer import search_documents, tokenize
+from search.indexer import tokenize
 from symbols.indexer import stable_id
 from symbols.persistence import load_symbol_index
 from summaries.builder import load_summary_artifacts
@@ -57,10 +58,11 @@ def retrieve_context(
     max_graph_fanout: int = 32,
 ) -> Dict[str, object]:
     with trace_operation("retrieve_context"):
+        search_backend = get_search_backend(str(search_root.resolve()), repo_name)
         tokens = tokenize(query)
         query_profile = classify_query(tokens, query)
         effective_kinds = tuple(kinds) if kinds else default_query_kinds(query_profile)
-        lexical_results = search_documents(search_root, repo_name, query, limit=max(limit * 2, 10), kinds=effective_kinds)
+        lexical_results = search_backend.search(query, limit=max(limit * 2, 10), kinds=effective_kinds)
         gate = retrieval_gate(tokens, lexical_results, selective_retrieval)
         effective_use_graph = use_graph and gate["use_graph"]
         effective_use_embeddings = use_embeddings and gate["use_embeddings"]
