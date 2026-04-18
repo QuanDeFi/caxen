@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+import os
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 
 EDGE_DEFAULTS = {
@@ -35,11 +36,16 @@ class RyuGraphBackend:
     repo_name: str
 
     @property
+    def ryugraph_path(self) -> Path:
+        return self.graph_root / self.repo_name / "ryugraph.json"
+
+    @property
     def sqlite_path(self) -> Path:
         return self.graph_root / self.repo_name / "graph.sqlite3"
 
     def execute(self, request: Dict[str, object]) -> Optional[Dict[str, object]]:
-        if not self.sqlite_path.exists():
+        graph = self._graph_payload(self.ryugraph_path, self.sqlite_path)
+        if graph is None:
             return None
 
         operation = str(request.get("operation") or "neighbors")
@@ -47,9 +53,10 @@ class RyuGraphBackend:
         depth = max(int(request.get("depth") or 1), 0)
         direction = str(request.get("direction") or EDGE_DIRECTIONS.get(operation, "both"))
         edge_types = tuple(request.get("edge_types") or EDGE_DEFAULTS.get(operation, ()))
+        node_kinds = tuple(str(item) for item in (request.get("node_kinds") or ()))
 
-        seed_rows = self._resolve_seed_rows(request.get("seed") or request.get("query"), limit=max(limit, 10))
-        if not seed_rows:
+        seeds = self._resolve_seed_nodes(graph, request.get("seed") or request.get("query"), limit=max(limit, 10))
+        if not seeds:
             return {
                 "repo": self.repo_name,
                 "operation": operation,
@@ -59,14 +66,13 @@ class RyuGraphBackend:
                     "edge_types": list(edge_types),
                     "depth": depth,
                     "limit": limit,
-                    "node_kinds": list(request.get("node_kinds") or ()),
+                    "node_kinds": list(node_kinds),
                     "seed": request.get("seed") or request.get("query"),
                 },
                 "seeds": [],
                 "results": [],
             }
 
-        seeds = [self._describe_node(row) for row in seed_rows]
         payload = {
             "repo": self.repo_name,
             "operation": operation,
@@ -76,7 +82,7 @@ class RyuGraphBackend:
                 "edge_types": list(edge_types),
                 "depth": depth,
                 "limit": limit,
-                "node_kinds": list(request.get("node_kinds") or ()),
+                "node_kinds": list(node_kinds),
                 "seed": request.get("seed") or request.get("query"),
             },
             "seeds": seeds,
@@ -86,247 +92,191 @@ class RyuGraphBackend:
             payload["results"] = seeds[:limit]
             return payload
 
-        if operation in {"neighbors", "callers_of", "callees_of", "who_imports", "implements_of", "inherits_of", "reads_of", "writes_of", "refs_of"}:
-            payload["results"] = self._neighbors(seed_rows, direction=direction, edge_types=edge_types, limit=limit)
+        if operation in {
+            "neighbors",
+            "callers_of",
+            "callees_of",
+            "who_imports",
+            "implements_of",
+            "inherits_of",
+            "reads_of",
+            "writes_of",
+            "refs_of",
+        }:
+            payload["results"] = self._neighbors(
+                graph,
+                seeds,
+                direction=direction,
+                edge_types=edge_types,
+                node_kinds=node_kinds,
+                depth=depth,
+                limit=limit,
+            )
             return payload
 
         if operation == "symbol_summary":
-            payload["results"] = self._symbol_summaries(seed_rows, limit=limit)
+            payload["results"] = self._symbol_summaries(graph, seeds, limit=limit)
             return payload
 
         return None
 
-    def _resolve_seed_rows(self, seed: object, *, limit: int) -> List[sqlite3.Row]:
+    @staticmethod
+    @lru_cache(maxsize=16)
+    def _graph_payload(ryugraph_path: Path, sqlite_path: Path) -> Optional[Dict[str, object]]:
+        if ryugraph_path.exists():
+            payload = json.loads(ryugraph_path.read_text(encoding="utf-8"))
+            node_by_id = {node["node_id"]: node for node in payload.get("nodes", [])}
+            outgoing: Dict[str, List[Dict[str, object]]] = {}
+            incoming: Dict[str, List[Dict[str, object]]] = {}
+            for edge in payload.get("edges", []):
+                outgoing.setdefault(edge["from"], []).append(edge)
+                incoming.setdefault(edge["to"], []).append(edge)
+            return {"payload": payload, "node_by_id": node_by_id, "outgoing": outgoing, "incoming": incoming}
+
+        # PR-5 default disables sqlite hot-path reads.
+        if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") == "1" and sqlite_path.exists():
+            # Keep compatibility mode explicit via env flag.
+            from graph.query import load_graph_sqlite
+
+            graph = load_graph_sqlite(sqlite_path)
+            return {
+                "payload": graph["payload"],
+                "node_by_id": graph["node_by_id"],
+                "outgoing": graph["outgoing"],
+                "incoming": graph["incoming"],
+            }
+        return None
+
+    def _resolve_seed_nodes(self, graph: Dict[str, object], seed: object, *, limit: int) -> List[Dict[str, object]]:
         if seed is None:
             return []
 
-        with sqlite3.connect(self.sqlite_path) as connection:
-            connection.row_factory = sqlite3.Row
-            if isinstance(seed, dict):
-                if seed.get("node_id"):
-                    row = connection.execute(
-                        "SELECT node_id, kind, repo, path, name, qualified_name, metadata_json FROM nodes WHERE node_id = ?",
-                        [str(seed["node_id"])],
-                    ).fetchone()
-                    return [row] if row else []
-                if seed.get("symbol_id"):
-                    row = connection.execute(
-                        "SELECT node_id, kind, repo, path, name, qualified_name, metadata_json FROM nodes WHERE node_id = ?",
-                        [str(seed["symbol_id"])],
-                    ).fetchone()
-                    return [row] if row else []
-                if seed.get("path"):
-                    rows = connection.execute(
-                        """
-                        SELECT node_id, kind, repo, path, name, qualified_name, metadata_json
-                        FROM nodes
-                        WHERE path = ?
-                        ORDER BY node_id
-                        LIMIT ?
-                        """,
-                        [str(seed["path"]), int(limit)],
-                    ).fetchall()
-                    return list(rows)
-                if seed.get("qualified_name"):
-                    rows = connection.execute(
-                        """
-                        SELECT node_id, kind, repo, path, name, qualified_name, metadata_json
-                        FROM nodes
-                        WHERE qualified_name = ?
-                        ORDER BY node_id
-                        LIMIT ?
-                        """,
-                        [str(seed["qualified_name"]), int(limit)],
-                    ).fetchall()
-                    return list(rows)
-                if seed.get("name"):
-                    rows = connection.execute(
-                        """
-                        SELECT node_id, kind, repo, path, name, qualified_name, metadata_json
-                        FROM nodes
-                        WHERE name = ?
-                        ORDER BY node_id
-                        LIMIT ?
-                        """,
-                        [str(seed["name"]), int(limit)],
-                    ).fetchall()
-                    return list(rows)
+        node_by_id = graph["node_by_id"]
+        nodes = list(node_by_id.values())
 
-            if not isinstance(seed, str):
+        if isinstance(seed, dict):
+            if seed.get("node_id"):
+                node = node_by_id.get(str(seed["node_id"]))
+                return [node] if node else []
+            if seed.get("symbol_id"):
+                node = node_by_id.get(str(seed["symbol_id"]))
+                return [node] if node else []
+            key = str(seed.get("qualified_name") or seed.get("name") or seed.get("path") or "").strip()
+            if not key:
                 return []
+            seed = key
 
-            query = seed.strip()
-            if not query:
-                return []
+        if not isinstance(seed, str):
+            return []
 
-            direct = connection.execute(
-                "SELECT node_id, kind, repo, path, name, qualified_name, metadata_json FROM nodes WHERE node_id = ?",
-                [query],
-            ).fetchone()
-            if direct:
-                return [direct]
+        query = seed.strip()
+        if not query:
+            return []
 
-            rows = connection.execute(
-                """
-                SELECT node_id, kind, repo, path, name, qualified_name, metadata_json
-                FROM nodes
-                WHERE qualified_name = ? OR name = ? OR path = ?
-                ORDER BY node_id
-                LIMIT ?
-                """,
-                [query, query, query, int(limit)],
-            ).fetchall()
-            if rows:
-                return list(rows)
+        if query in node_by_id:
+            return [node_by_id[query]]
 
-            wildcard = f"%{query}%"
-            fuzzy = connection.execute(
-                """
-                SELECT node_id, kind, repo, path, name, qualified_name, metadata_json
-                FROM nodes
-                WHERE qualified_name LIKE ? OR name LIKE ? OR path LIKE ?
-                ORDER BY node_id
-                LIMIT ?
-                """,
-                [wildcard, wildcard, wildcard, int(limit)],
-            ).fetchall()
-            return list(fuzzy)
+        exact = [
+            node
+            for node in nodes
+            if str(node.get("qualified_name") or "") == query
+            or str(node.get("name") or "") == query
+            or str(node.get("path") or "") == query
+        ]
+        if exact:
+            return exact[:limit]
+
+        lowered = query.lower()
+        fuzzy = [
+            node
+            for node in nodes
+            if lowered in str(node.get("qualified_name") or "").lower()
+            or lowered in str(node.get("name") or "").lower()
+            or lowered in str(node.get("path") or "").lower()
+        ]
+        return fuzzy[:limit]
 
     def _neighbors(
         self,
-        seeds: Sequence[sqlite3.Row],
+        graph: Dict[str, object],
+        seeds: Sequence[Dict[str, object]],
         *,
         direction: str,
         edge_types: Sequence[str],
+        node_kinds: Sequence[str],
+        depth: int,
         limit: int,
     ) -> List[Dict[str, object]]:
-        with sqlite3.connect(self.sqlite_path) as connection:
-            connection.row_factory = sqlite3.Row
-            neighbors: List[Dict[str, object]] = []
-            seen = set()
-            for seed in seeds:
-                seed_id = str(seed["node_id"])
-                for edge in self._load_edges(connection, seed_id, direction=direction, edge_types=edge_types, limit=limit * 2):
-                    target_id = str(edge["target_node_id"])
-                    if direction == "incoming":
-                        target_id = str(edge["source_node_id"])
-                    elif direction == "both":
-                        target_id = str(edge["target_node_id"])
-                        if str(edge["source_node_id"]) != seed_id:
-                            target_id = str(edge["source_node_id"])
+        node_by_id = graph["node_by_id"]
+        outgoing = graph["outgoing"]
+        incoming = graph["incoming"]
 
-                    if target_id in seen:
-                        continue
-                    seen.add(target_id)
-                    node = connection.execute(
-                        "SELECT node_id, kind, repo, path, name, qualified_name, metadata_json FROM nodes WHERE node_id = ?",
-                        [target_id],
-                    ).fetchone()
-                    if node is None:
-                        continue
-                    metadata = json.loads(edge["metadata_json"] or "{}")
-                    neighbors.append(
-                        {
-                            **self._describe_node(node),
-                            "edge": {
-                                "edge_id": edge["edge_id"],
-                                "type": edge["type"],
-                                "from": edge["source_node_id"],
-                                "to": edge["target_node_id"],
-                                "metadata": metadata,
-                            },
-                        }
-                    )
-                    if len(neighbors) >= limit:
-                        return neighbors
-            return neighbors
+        allowed_edges = set(edge_types)
+        allowed_kinds = set(node_kinds)
+        results: List[Dict[str, object]] = []
+        seen = set()
+        frontier = [(seed["node_id"], 0) for seed in seeds]
 
-    def _symbol_summaries(self, seeds: Sequence[sqlite3.Row], *, limit: int) -> List[Dict[str, object]]:
-        with sqlite3.connect(self.sqlite_path) as connection:
-            connection.row_factory = sqlite3.Row
-            summaries: List[Dict[str, object]] = []
-            for seed in seeds:
-                row = connection.execute(
-                    """
-                    SELECT node_id, incoming_counts_json, outgoing_counts_json, direct_calls_json,
-                           reads_json, writes_json, refs_json, statements_json
-                    FROM symbol_summary_cache
-                    WHERE node_id = ?
-                    """,
-                    [str(seed["node_id"])],
-                ).fetchone()
-                if row is None:
+        while frontier and len(results) < limit:
+            node_id, steps = frontier.pop(0)
+            if steps >= max(depth, 1):
+                continue
+
+            edges: List[tuple[str, Dict[str, object], str]] = []
+            if direction in {"outgoing", "both"}:
+                edges.extend((edge["to"], edge, "outgoing") for edge in outgoing.get(node_id, []))
+            if direction in {"incoming", "both"}:
+                edges.extend((edge["from"], edge, "incoming") for edge in incoming.get(node_id, []))
+
+            for neighbor_id, edge, edge_direction in edges:
+                edge_type = str(edge.get("type") or "")
+                if allowed_edges and edge_type not in allowed_edges:
                     continue
-                summaries.append(
-                    {
-                        "node_id": row["node_id"],
-                        "incoming_counts": json.loads(row["incoming_counts_json"] or "{}"),
-                        "outgoing_counts": json.loads(row["outgoing_counts_json"] or "{}"),
-                        "direct_calls": json.loads(row["direct_calls_json"] or "[]"),
-                        "reads": json.loads(row["reads_json"] or "[]"),
-                        "writes": json.loads(row["writes_json"] or "[]"),
-                        "refs": json.loads(row["refs_json"] or "[]"),
-                        "statements": json.loads(row["statements_json"] or "[]"),
-                    }
-                )
-                if len(summaries) >= limit:
+                neighbor = node_by_id.get(neighbor_id)
+                if not neighbor:
+                    continue
+                if allowed_kinds and str(neighbor.get("kind") or "") not in allowed_kinds:
+                    continue
+                key = (node_id, neighbor_id, edge_type, edge_direction)
+                if key in seen:
+                    continue
+                seen.add(key)
+                edge_payload = {
+                    "edge_id": edge.get("edge_id"),
+                    "type": edge_type,
+                    "from": edge.get("from"),
+                    "to": edge.get("to"),
+                    "metadata": {**dict(edge.get("metadata") or {}), "direction": edge_direction},
+                }
+                results.append({**neighbor, "edge": edge_payload})
+                frontier.append((neighbor_id, steps + 1))
+                if len(results) >= limit:
                     break
-            return summaries
+
+        return results
 
     @staticmethod
-    def _load_edges(
-        connection: sqlite3.Connection,
-        node_id: str,
-        *,
-        direction: str,
-        edge_types: Sequence[str],
-        limit: int,
-    ) -> Iterable[sqlite3.Row]:
-        params: List[object] = []
-        edge_filter = ""
-        if edge_types:
-            placeholders = ",".join("?" for _ in edge_types)
-            edge_filter = f" AND type IN ({placeholders})"
-            params.extend(edge_types)
-
-        if direction == "outgoing":
-            query = (
-                "SELECT edge_id, type, source_node_id, target_node_id, metadata_json FROM edges "
-                "WHERE source_node_id = ?" + edge_filter + " ORDER BY type, target_node_id LIMIT ?"
+    def _symbol_summaries(graph: Dict[str, object], seeds: Sequence[Dict[str, object]], *, limit: int) -> List[Dict[str, object]]:
+        node_by_id = graph["node_by_id"]
+        summaries = []
+        for seed in seeds:
+            node = node_by_id.get(seed["node_id"])
+            if not node:
+                continue
+            summaries.append(
+                {
+                    "node_id": seed["node_id"],
+                    "incoming_counts": {},
+                    "outgoing_counts": {},
+                    "direct_calls": [],
+                    "reads": [],
+                    "writes": [],
+                    "refs": [],
+                    "statements": [],
+                    "name": node.get("name"),
+                    "qualified_name": node.get("qualified_name"),
+                }
             )
-            return connection.execute(query, [node_id, *params, int(limit)]).fetchall()
-        if direction == "incoming":
-            query = (
-                "SELECT edge_id, type, source_node_id, target_node_id, metadata_json FROM edges "
-                "WHERE target_node_id = ?" + edge_filter + " ORDER BY type, source_node_id LIMIT ?"
-            )
-            return connection.execute(query, [node_id, *params, int(limit)]).fetchall()
-
-        outgoing = connection.execute(
-            (
-                "SELECT edge_id, type, source_node_id, target_node_id, metadata_json FROM edges "
-                "WHERE source_node_id = ?" + edge_filter + " ORDER BY type, target_node_id LIMIT ?"
-            ),
-            [node_id, *params, int(limit)],
-        ).fetchall()
-        incoming = connection.execute(
-            (
-                "SELECT edge_id, type, source_node_id, target_node_id, metadata_json FROM edges "
-                "WHERE target_node_id = ?" + edge_filter + " ORDER BY type, source_node_id LIMIT ?"
-            ),
-            [node_id, *params, int(limit)],
-        ).fetchall()
-        return [*outgoing, *incoming]
-
-    @staticmethod
-    def _describe_node(row: sqlite3.Row) -> Dict[str, object]:
-        metadata = json.loads(row["metadata_json"] or "{}")
-        return {
-            "node_id": row["node_id"],
-            "kind": row["kind"],
-            "repo": row["repo"],
-            "path": row["path"],
-            "name": row["name"],
-            "qualified_name": row["qualified_name"],
-            **metadata,
-        }
+            if len(summaries) >= limit:
+                break
+        return summaries
