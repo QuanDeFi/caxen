@@ -411,24 +411,18 @@ def load_graph_view(graph_root: Path, repo_name: str) -> Dict[str, object]:
 @lru_cache(maxsize=8)
 def _load_graph_view_cached(graph_root: str, repo_name: str) -> Dict[str, object]:
     root = Path(graph_root)
-    sqlite_path = root / repo_name / "graph.sqlite3"
+    sqlite_path = root / repo_name / "graph.db"
     if sqlite_path.exists():
         return load_graph_sqlite(sqlite_path)
-    graph_json_path = root / repo_name / "graph.json"
-    if graph_json_path.exists():
-        return load_graph_json(graph_json_path)
     raise FileNotFoundError(f"Missing graph artifact for repo '{repo_name}' under {root / repo_name}")
 
 
 def load_graph_view_uncached(graph_root: Path, repo_name: str) -> Dict[str, object]:
     increment_counter("full_graph_payload_loads")
     with trace_operation("load_graph_view_uncached"):
-        sqlite_path = graph_root / repo_name / "graph.sqlite3"
+        sqlite_path = graph_root / repo_name / "graph.db"
         if sqlite_path.exists():
             return load_graph_sqlite(sqlite_path)
-        graph_json_path = graph_root / repo_name / "graph.json"
-        if graph_json_path.exists():
-            return load_graph_json(graph_json_path)
         raise FileNotFoundError(f"Missing graph artifact for repo '{repo_name}' under {graph_root / repo_name}")
 
 
@@ -458,11 +452,6 @@ def can_use_cached_neighbors(
     if not requested_edge_types:
         return False
     return requested_edge_types.issubset(CACHEABLE_NEIGHBOR_EDGE_TYPES)
-
-
-def load_graph_json(path: Path) -> Dict[str, object]:
-    payload = load_json(path)
-    return graph_indexes(payload, backend="json")
 
 
 def load_graph_sqlite(path: Path) -> Dict[str, object]:

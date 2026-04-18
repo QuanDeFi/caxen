@@ -58,7 +58,7 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertTrue((graph_root / "yellowstone-vixen" / "graph.sqlite3").exists())
+            self.assertTrue((graph_root / "yellowstone-vixen" / "graph.db").exists())
             self.assertTrue((parsed_root / "yellowstone-vixen" / "query_manifest.json").exists())
             subprocess.run(
                 [
@@ -470,7 +470,7 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             expand_payload = json.loads(expand.stdout)
             self.assertEqual(expand_payload["operation"], "neighbors")
 
-            with sqlite3.connect(graph_root / "yellowstone-vixen" / "graph.sqlite3") as connection:
+            with sqlite3.connect(graph_root / "yellowstone-vixen" / "graph.db") as connection:
                 cursor = connection.cursor()
                 node_kinds = {row[0] for row in cursor.execute("SELECT DISTINCT kind FROM nodes").fetchall()}
                 edge_types = {row[0] for row in cursor.execute("SELECT DISTINCT type FROM edges").fetchall()}

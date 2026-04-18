@@ -10,7 +10,5 @@ def write_graph_database(
     output_root: Path,
     repo_name: str,
     payload: Dict[str, object],
-    *,
-    emit_json: bool = False,
 ) -> Path:
-    return load_ryugraph_database(output_root, repo_name, payload, emit_json=emit_json)
+    return load_ryugraph_database(output_root, repo_name, payload)

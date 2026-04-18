@@ -55,11 +55,11 @@ from common.native_tool import probe_native_worker
 from common.query_manifest import update_query_manifest
 from embeddings.indexer import build_embedding_index, query_embedding_index
 from evaluation.harness import benchmark_interactive_commands, export_benchmark_prompts, run_benchmarks, score_answer_bundles
-from graph.builder import build_graph_artifact, write_graph_artifact
+from graph.builder import build_graph_artifact
 from graph.store import write_graph_database
 from search.indexer import build_search_index
 from summaries.builder import build_summary_artifacts, sync_summary_state, write_summary_artifacts
-from symbols.indexer import build_symbol_index, current_rss_mb, write_symbol_index
+from symbols.indexer import build_symbol_index, current_rss_mb
 from symbols.persistence import write_lmdb_metadata_bundle, write_symbol_database, write_symbol_parquet_bundle
 
 
@@ -135,12 +135,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=100,
         help="Emit progress logs every N parsed files.",
     )
-    build_index.add_argument(
-        "--emit-json",
-        action="store_true",
-        help="Also write JSON export artifacts for parsed symbols and graph.",
-    )
-
     build_search = subparsers.add_parser(
         "build-search",
         help="Build lexical search artifacts over raw and parsed outputs.",
@@ -150,17 +144,6 @@ def build_parser() -> argparse.ArgumentParser:
     build_search.add_argument("--parsed-root", required=True)
     build_search.add_argument("--search-root", required=True)
     build_search.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
-    build_search.add_argument(
-        "--emit-json",
-        action="store_true",
-        help="Also write optional JSON export artifacts such as agent_cache.json.",
-    )
-    build_search.add_argument(
-        "--emit-sqlite",
-        action="store_true",
-        help="Also write search.sqlite3 as a compatibility/debug artifact.",
-    )
-
     build_summaries = subparsers.add_parser(
         "build-summaries",
         help="Build deterministic project/directory/file/symbol summaries.",
@@ -170,11 +153,6 @@ def build_parser() -> argparse.ArgumentParser:
     build_summaries.add_argument("--graph-root", required=True)
     build_summaries.add_argument("--summary-root", required=True)
     build_summaries.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
-    build_summaries.add_argument(
-        "--emit-json",
-        action="store_true",
-        help="Also write JSON export artifacts for summary bundles.",
-    )
 
     build_embeddings = subparsers.add_parser(
         "build-embeddings",
@@ -655,22 +633,18 @@ def handle_build_index(args: argparse.Namespace) -> int:
         write_symbol_database(parsed_root, repo_name, symbol_index)
         write_lmdb_metadata_bundle(parsed_root, repo_name, symbol_index)
         write_symbol_parquet_bundle(parsed_root, repo_name, symbol_index)
-        if args.emit_json:
-            write_symbol_index(parsed_root, repo_name, symbol_index)
-            write_graph_artifact(graph_root, repo_name, graph_artifact)
-        else:
-            remove_file_if_exists(parsed_root / repo_name / "symbols.json")
-            remove_file_if_exists(graph_root / repo_name / "graph.json")
-        graph_db_path = write_graph_database(graph_root, repo_name, graph_artifact, emit_json=args.emit_json)
+        remove_file_if_exists(parsed_root / repo_name / "symbols.json")
+        remove_file_if_exists(graph_root / repo_name / "graph.json")
+        graph_db_path = write_graph_database(graph_root, repo_name, graph_artifact)
         update_query_manifest(
             parsed_root,
             repo_name,
             artifacts={
-                "symbols_json": f"data/parsed/{repo_name}/symbols.json" if args.emit_json else None,
+                "symbols_json": None,
                 "symbols_sqlite3": f"data/parsed/{repo_name}/symbols.sqlite3",
                 "metadata_lmdb": f"data/parsed/{repo_name}/metadata.lmdb",
-                "graph_json": f"data/graph/{repo_name}/graph.json" if args.emit_json else None,
-                "graph_sqlite3": f"data/graph/{repo_name}/graph.sqlite3",
+                "graph_json": None,
+                "graph_db": f"data/graph/{repo_name}/graph.db",
             },
             features={
                 "graph_sqlite": True,
@@ -684,7 +658,7 @@ def handle_build_index(args: argparse.Namespace) -> int:
                 "native_worker": native_worker,
                 "path_prefixes": list(path_prefixes),
                 "graph_database": graph_db_path.name,
-                "json_exports": args.emit_json,
+                "json_exports": False,
             },
         )
 
@@ -781,8 +755,6 @@ def handle_build_search(args: argparse.Namespace) -> int:
             raw_root,
             parsed_root,
             search_root,
-            emit_json=args.emit_json,
-            emit_sqlite=args.emit_sqlite,
             progress_callback=progress_callback,
         )
         emit_build_progress(
@@ -841,7 +813,7 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
             graph_root,
             progress_callback=progress_callback,
         )
-        write_summary_artifacts(summary_root, repo_name, payload, emit_json=args.emit_json)
+        write_summary_artifacts(summary_root, repo_name, payload)
         emit_build_progress(
             progress_path,
             {
@@ -854,7 +826,7 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
                 f"elapsed_ms={round((time.perf_counter() - started) * 1000, 3):.1f}"
             ),
         )
-        sync_summary_state(parsed_root, graph_root, repo_name, payload, emit_json=args.emit_json)
+        sync_summary_state(parsed_root, graph_root, repo_name, payload)
         emit_build_progress(
             progress_path,
             {
@@ -872,11 +844,11 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
             repo_name,
             artifacts={
                 "summary_sqlite3": f"data/summaries/{repo_name}/summary.sqlite3",
-                "summary_project": f"data/summaries/{repo_name}/project.json" if args.emit_json else None,
-                "summary_packages": f"data/summaries/{repo_name}/packages.json" if args.emit_json else None,
-                "summary_directories": f"data/summaries/{repo_name}/directories.json" if args.emit_json else None,
-                "summary_files": f"data/summaries/{repo_name}/files.json" if args.emit_json else None,
-                "summary_symbols": f"data/summaries/{repo_name}/symbols.json" if args.emit_json else None,
+                "summary_project": None,
+                "summary_packages": None,
+                "summary_directories": None,
+                "summary_files": None,
+                "summary_symbols": None,
             },
             features={
                 "summary_graph_nodes": True,
@@ -885,7 +857,7 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
             build={
                 "summary_schema_version": payload["schema_version"],
                 "summary_counts": payload["summary"],
-                "summary_json_exports": args.emit_json,
+                "summary_json_exports": False,
             },
         )
         emit_build_progress(

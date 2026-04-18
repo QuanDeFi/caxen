@@ -27,20 +27,12 @@ Optional:
 
 - `data/raw/<repo>/`: raw inventory
 - `data/parsed/<repo>/`: `symbols.sqlite3`, parquet status, query manifest
-- `data/graph/<repo>/`: `graph.sqlite3`
-- `data/search/<repo>/`: `search.sqlite3` with lexical docs and agent cache, BM25/Tantivy, and optional embeddings
+- `data/graph/<repo>/`: `graph.db`, graph manifest
+- `data/search/<repo>/`: `documents.jsonl`, `search_manifest.json`, BM25/Tantivy, and optional embeddings
 - `data/summaries/<repo>/`: `summary.sqlite3`
-- `data/eval/`: `eval.sqlite3`, prompt exports, benchmark and scoring output
+- `data/eval/`: `eval.lmdb`, prompt exports, benchmark and scoring output
 
-Default runtime is DB-first. JSON exports are optional with `--emit-json` on `build-index`, `build-search`, and `build-summaries`.
-
-If you want JSON exports too:
-
-```bash
-python3 repo-analysis/src/cli/main.py build-index ... --emit-json
-python3 repo-analysis/src/cli/main.py build-search ... --emit-json
-python3 repo-analysis/src/cli/main.py build-summaries ... --emit-json
-```
+Default runtime is DB-first. JSON inspection exports are not part of the runtime path.
 
 ## CLI
 
@@ -117,9 +109,11 @@ Prefer these artifacts:
 
 - `data/summaries/<repo>/summary.sqlite3`
 - `data/parsed/<repo>/symbols.sqlite3`
-- `data/graph/<repo>/graph.sqlite3`
-- `data/search/<repo>/search.sqlite3`
-- `data/eval/eval.sqlite3`
+- `data/graph/<repo>/graph.db`
+- `data/parsed/<repo>/metadata.lmdb`
+- `data/search/<repo>/documents.jsonl`
+- `data/search/<repo>/search_manifest.json`
+- `data/eval/eval.lmdb`
 - `data/search/<repo>/tantivy/`
 
 Treat `prepare-answer-bundle` as the default handoff artifact for an external LLM. It is the compact, provenance-carrying context package.

@@ -40,7 +40,7 @@ class RyuGraphBackend:
 
     @property
     def sqlite_path(self) -> Path:
-        return self.graph_root / self.repo_name / "graph.sqlite3"
+        return self.graph_root / self.repo_name / "graph.db"
 
     def execute(self, request: Dict[str, object]) -> Optional[Dict[str, object]]:
         if not self.sqlite_path.exists():

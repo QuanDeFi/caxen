@@ -2957,12 +2957,3 @@ def filter_shadowed_simple_tokens(values: List[Tuple[str, int, int]]) -> List[Tu
 
 def collapse_whitespace(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
-
-
-def write_symbol_index(output_root: Path, repo_name: str, payload: Dict[str, object]) -> None:
-    repo_output = output_root / repo_name
-    repo_output.mkdir(parents=True, exist_ok=True)
-    target = repo_output / "symbols.json"
-    with target.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=False)
-        handle.write("\n")

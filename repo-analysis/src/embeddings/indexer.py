@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import sqlite3
 from collections import Counter
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
@@ -39,8 +38,7 @@ def build_embedding_index(
 ) -> Dict[str, object]:
     repo_search_root = search_root / repo_name
     documents_path = repo_search_root / "documents.jsonl"
-    sqlite_path = repo_search_root / "search.sqlite3"
-    documents = load_search_documents(documents_path, sqlite_path=sqlite_path)
+    documents = load_search_documents(documents_path)
     if not documents:
         raise FileNotFoundError(f"Missing search documents for {repo_name}: {documents_path}")
     provider_config = resolve_embedding_provider(provider, model)
@@ -257,7 +255,7 @@ def query_embedding_index(search_root: Path, repo_name: str, query: str, *, limi
     )[:limit]
 
 
-def load_search_documents(documents_path: Path, *, sqlite_path: Path | None = None) -> List[Dict[str, object]]:
+def load_search_documents(documents_path: Path) -> List[Dict[str, object]]:
     if documents_path.exists():
         documents: List[Dict[str, object]] = []
         with documents_path.open("r", encoding="utf-8") as handle:
@@ -280,35 +278,7 @@ def load_search_documents(documents_path: Path, *, sqlite_path: Path | None = No
                     }
                 )
         return documents
-
-    if sqlite_path is None or not sqlite_path.exists():
-        return []
-
-    with sqlite3.connect(sqlite_path) as connection:
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            """
-            SELECT d.doc_id, d.kind, d.path, d.name, d.qualified_name, d.symbol_id, d.title, d.preview,
-                   f.content
-            FROM documents d
-            JOIN lexical_documents f ON d.doc_id = f.doc_id
-            ORDER BY d.kind, COALESCE(d.path, ''), COALESCE(d.qualified_name, ''), COALESCE(d.name, '')
-            """
-        ).fetchall()
-    return [
-        {
-            "doc_id": row["doc_id"],
-            "kind": row["kind"],
-            "path": row["path"],
-            "name": row["name"],
-            "qualified_name": row["qualified_name"],
-            "symbol_id": row["symbol_id"],
-            "title": row["title"],
-            "preview": row["preview"],
-            "content": row["content"] or "",
-        }
-        for row in rows
-    ]
+    return []
 
 
 def compute_document_frequency(document_tokens: Sequence[Sequence[str]]) -> Counter[str]:

@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from common.native_tool import query_bm25_index
-from search.indexer import lookup_symbol_documents, search_documents, search_documents_scoped, tokenize
+from search.indexer import tokenize
 
 
 class TantivySearchBackend:
@@ -34,23 +33,6 @@ class TantivySearchBackend:
                 path_prefix=path_prefix,
             )
             return results[:limit]
-        if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") == "1":
-            if path_prefix:
-                return search_documents_scoped(
-                    self.search_root,
-                    self.repo_name,
-                    query,
-                    limit=limit,
-                    kinds=kinds,
-                    path_prefix=path_prefix,
-                )
-            return search_documents(
-                self.search_root,
-                self.repo_name,
-                query,
-                limit=limit,
-                kinds=kinds,
-            )
         return []
 
     def find_file(self, path_pattern: str, *, limit: int) -> List[Dict[str, object]]:
@@ -88,16 +70,6 @@ class TantivySearchBackend:
             exact = [item for item in docs if str(item.get("symbol_id") or "") == symbol_id]
             if exact:
                 return exact[:limit]
-        if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") == "1":
-            fallback = lookup_symbol_documents(
-                self.search_root,
-                self.repo_name,
-                symbol_id,
-                kinds=kinds,
-                limit=limit,
-            )
-            if fallback:
-                return fallback
         return []
 
     def compare_repo_candidates(self, query: str, *, limit: int) -> List[Dict[str, object]]:

@@ -57,17 +57,13 @@ class BuildIndexIntegrationTest(unittest.TestCase):
                 text=True,
             )
 
-            symbols_path = parsed_root / "yellowstone-vixen" / "symbols.json"
             sqlite_path = parsed_root / "yellowstone-vixen" / "symbols.sqlite3"
             parquet_status_path = parsed_root / "yellowstone-vixen" / "parquet_status.json"
-            graph_path = graph_root / "yellowstone-vixen" / "graph.json"
-            graph_sqlite_path = graph_root / "yellowstone-vixen" / "graph.sqlite3"
+            graph_db_path = graph_root / "yellowstone-vixen" / "graph.db"
 
-            self.assertFalse(symbols_path.exists(), symbols_path)
             self.assertTrue(sqlite_path.exists(), sqlite_path)
             self.assertTrue(parquet_status_path.exists(), parquet_status_path)
-            self.assertFalse(graph_path.exists(), graph_path)
-            self.assertTrue(graph_sqlite_path.exists(), graph_sqlite_path)
+            self.assertTrue(graph_db_path.exists(), graph_db_path)
 
             with sqlite3.connect(sqlite_path) as connection:
                 cursor = connection.cursor()
@@ -88,7 +84,7 @@ class BuildIndexIntegrationTest(unittest.TestCase):
             parquet_status = json.loads(parquet_status_path.read_text(encoding="utf-8"))
             self.assertIn("available", parquet_status)
 
-            with sqlite3.connect(graph_sqlite_path) as connection:
+            with sqlite3.connect(graph_db_path) as connection:
                 cursor = connection.cursor()
                 metadata = dict(cursor.execute("SELECT key, value FROM metadata").fetchall())
                 graph_summary = json.loads(metadata["summary_json"])
@@ -97,32 +93,6 @@ class BuildIndexIntegrationTest(unittest.TestCase):
                 edge_types = {row[0] for row in cursor.execute("SELECT DISTINCT type FROM edges").fetchall()}
                 self.assertIn("DEFINES", edge_types)
                 self.assertIn("IMPORTS", edge_types)
-
-            subprocess.run(
-                [
-                    "python3",
-                    str(cli),
-                    "build-index",
-                    "--workspace-root",
-                    str(workspace_root),
-                    "--raw-root",
-                    str(raw_root),
-                    "--parsed-root",
-                    str(parsed_root),
-                    "--graph-root",
-                    str(graph_root),
-                    "--repo",
-                    "yellowstone-vixen",
-                    "--path-prefix",
-                    "crates/proc-macro/src/lib.rs",
-                    "--emit-json",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            self.assertTrue(symbols_path.exists(), symbols_path)
-            self.assertTrue(graph_path.exists(), graph_path)
 
     def test_build_index_on_carbon_and_vixen_real_slices_emits_semantic_edges(self) -> None:
         workspace_root = Path(__file__).resolve().parents[3]
@@ -206,7 +176,7 @@ class BuildIndexIntegrationTest(unittest.TestCase):
                     self.assertIn("call", reference_kinds)
                     self.assertIn("use", reference_kinds)
 
-                with sqlite3.connect(graph_root / repo_name / "graph.sqlite3") as connection:
+                with sqlite3.connect(graph_root / repo_name / "graph.db") as connection:
                     cursor = connection.cursor()
                     edge_types = {row[0] for row in cursor.execute("SELECT DISTINCT type FROM edges").fetchall()}
                     self.assertIn("CALLS", edge_types)

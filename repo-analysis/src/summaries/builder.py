@@ -112,34 +112,12 @@ def write_summary_artifacts(
     output_root: Path,
     repo_name: str,
     payload: Dict[str, object],
-    *,
-    emit_json: bool = False,
 ) -> None:
     repo_output = output_root / repo_name
     repo_output.mkdir(parents=True, exist_ok=True)
     write_summary_bundle_database(output_root, repo_name, payload)
-
-    if not emit_json:
-        for filename in ("project.json", "packages.json", "directories.json", "files.json", "symbols.json", "summary_manifest.json"):
-            remove_file_if_exists(repo_output / filename)
-        return
-
-    for filename, value in (
-        ("project.json", payload["project"]),
-        ("packages.json", payload["packages"]),
-        ("directories.json", payload["directories"]),
-        ("files.json", payload["files"]),
-        ("symbols.json", payload["symbols"]),
-        ("summary_manifest.json", {
-            "schema_version": payload["schema_version"],
-            "repo": payload["repo"],
-            "generated_at": payload["generated_at"],
-            "summary": payload["summary"],
-        }),
-    ):
-        with (repo_output / filename).open("w", encoding="utf-8") as handle:
-            json.dump(value, handle, indent=2, sort_keys=False)
-            handle.write("\n")
+    for filename in ("project.json", "packages.json", "directories.json", "files.json", "symbols.json", "summary_manifest.json"):
+        remove_file_if_exists(repo_output / filename)
 
 
 def load_summary_artifacts(summary_root: Path, repo_name: str) -> Dict[str, object]:
@@ -364,21 +342,17 @@ def sync_summary_state(
     graph_root: Path,
     repo_name: str,
     payload: Dict[str, object],
-    *,
-    emit_json: bool = False,
 ) -> None:
     write_summary_database(parsed_root, repo_name, payload)
     symbol_payload = load_symbol_index(parsed_root, repo_name)
     write_lmdb_metadata_bundle(parsed_root, repo_name, symbol_payload, summaries_payload=payload)
-    augment_graph_with_summaries(graph_root, repo_name, payload, emit_json=emit_json)
+    augment_graph_with_summaries(graph_root, repo_name, payload)
 
 
 def augment_graph_with_summaries(
     graph_root: Path,
     repo_name: str,
     payload: Dict[str, object],
-    *,
-    emit_json: bool = False,
 ) -> None:
     graph = load_graph_view_uncached(graph_root, repo_name)["payload"]
     node_by_id = {node["node_id"]: node for node in graph.get("nodes", [])}
@@ -469,11 +443,6 @@ def augment_graph_with_summaries(
         ],
     }
     write_graph_database(graph_root, repo_name, graph)
-    if emit_json:
-        graph_path = graph_root / repo_name / "graph.json"
-        with graph_path.open("w", encoding="utf-8") as handle:
-            json.dump(graph, handle, indent=2, sort_keys=False)
-            handle.write("\n")
 
 
 def edge_counts(graph: Dict[str, object]) -> Tuple[Dict[str, Counter], Dict[str, Counter]]:

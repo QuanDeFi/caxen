@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
-import sqlite3
 import time
 from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
@@ -51,8 +49,6 @@ def build_search_index(
     parsed_root: Path,
     output_root: Path,
     *,
-    emit_json: bool = False,
-    emit_sqlite: bool = False,
     progress_callback: Callable[[Dict[str, object]], None] | None = None,
 ) -> Dict[str, object]:
     started = time.perf_counter()
@@ -92,24 +88,12 @@ def build_search_index(
     repo_output.mkdir(parents=True, exist_ok=True)
     emit("documents_built", documents=len(documents))
 
-    agent_cache = build_agent_cache(repo_name, documents)
-    sqlite_path = repo_output / "search.sqlite3"
-    if emit_sqlite:
-        if sqlite_path.exists():
-            sqlite_path.unlink()
-        emit("writing_sqlite")
-        write_search_database(sqlite_path, documents, agent_cache)
-    else:
-        remove_file_if_exists(sqlite_path)
+    remove_file_if_exists(repo_output / "search.sqlite3")
 
     documents_path = repo_output / "documents.jsonl"
     emit("writing_documents_jsonl")
     write_documents_jsonl(documents_path, documents)
-    if emit_json:
-        emit("writing_agent_cache", entries=agent_cache["summary"]["entries"])
-        write_json(repo_output / "agent_cache.json", agent_cache)
-    else:
-        remove_file_if_exists(repo_output / "agent_cache.json")
+    remove_file_if_exists(repo_output / "agent_cache.json")
 
     bm25_artifact = {
         "available": False,
@@ -139,9 +123,7 @@ def build_search_index(
         "repo": repo_name,
         "generated_at": timestamp_now(),
         "artifacts": {
-            "sqlite": "search.sqlite3" if emit_sqlite else None,
             "documents_jsonl": "documents.jsonl",
-            "agent_cache": "agent_cache.json" if emit_json else None,
             "tantivy": "tantivy" if bm25_artifact.get("built") else None,
         },
         "bm25": bm25_artifact,
@@ -164,19 +146,17 @@ def build_search_index(
         parsed_root,
         repo_name,
         artifacts={
-            "search_sqlite": "data/search/{repo}/search.sqlite3".format(repo=repo_name) if emit_sqlite else None,
             "search_documents_jsonl": "data/search/{repo}/documents.jsonl".format(repo=repo_name),
-            "search_agent_cache": "data/search/{repo}/agent_cache.json".format(repo=repo_name) if emit_json else None,
             "search_tantivy": "data/search/{repo}/tantivy".format(repo=repo_name) if bm25_artifact.get("built") else None,
         },
         features={
             "bm25_default": bool(bm25_artifact.get("built")),
-            "agent_cache_sqlite": True,
+            "agent_cache_sqlite": False,
         },
         build={
             "bm25": bm25_artifact,
-            "search_json_exports": emit_json,
-            "search_sqlite_compat": emit_sqlite,
+            "search_json_exports": False,
+            "search_sqlite_compat": False,
         },
     )
     emit("build_completed", documents=len(documents), bm25_built=bool(bm25_artifact.get("built")))
@@ -192,29 +172,14 @@ def search_documents(
     kinds: Sequence[str] = (),
 ) -> List[Dict[str, object]]:
     with trace_operation("search_documents"):
-        sqlite_path = search_root / repo_name / "search.sqlite3"
         tantivy_dir = search_root / repo_name / "tantivy"
         tokens = tokenize(query)
-        if not tokens or (not sqlite_path.exists() and not tantivy_dir.exists()):
+        if not tokens or not tantivy_dir.exists():
             return []
-
-        if tantivy_dir.exists():
-            try:
-                results = query_bm25_index(tantivy_dir, " ".join(tokens), limit=limit, kinds=kinds)
-                if results:
-                    return results
-            except Exception:
-                pass
-
-        if os.environ.get("CAXEN_ENABLE_SQLITE_HOTPATH_READS") != "1":
+        try:
+            return query_bm25_index(tantivy_dir, " ".join(tokens), limit=limit, kinds=kinds)
+        except Exception:
             return []
-
-        with sqlite3.connect(sqlite_path) as connection:
-            connection.row_factory = sqlite3.Row
-            results = query_documents(connection, build_and_query(tokens), limit, kinds)
-            if not results and len(tokens) > 1:
-                results = query_documents(connection, build_or_query(tokens), limit, kinds)
-            return results
 
 
 def search_documents_scoped(
@@ -241,33 +206,18 @@ def list_documents(
     kinds: Sequence[str] = (),
     path_prefix: Optional[str] = None,
 ) -> List[Dict[str, object]]:
-    sqlite_path = search_root / repo_name / "search.sqlite3"
-    if not sqlite_path.exists():
-        return []
-
-    clauses = []
-    params: List[object] = []
-    if kinds:
-        clauses.append(f"kind IN ({','.join('?' for _ in kinds)})")
-        params.extend(kinds)
-    if path_prefix:
-        clauses.append("path LIKE ?")
-        params.append(f"{path_prefix}%")
-
-    where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    sql = (
-        "SELECT doc_id, kind, repo, path, name, qualified_name, symbol_id, title, preview, metadata_json "
-        "FROM documents "
-        f"{where_clause} "
-        "ORDER BY kind, COALESCE(path, ''), COALESCE(qualified_name, ''), COALESCE(name, '') "
-        "LIMIT ?"
-    )
-    params.append(limit)
-
-    with sqlite3.connect(sqlite_path) as connection:
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(sql, params).fetchall()
-        return [row_to_result(row, score=0.0) for row in rows]
+    documents = load_documents_jsonl(search_root / repo_name / "documents.jsonl")
+    normalized_prefix = path_prefix.rstrip("/") if path_prefix else None
+    results = []
+    for document in documents:
+        if kinds and str(document.get("kind") or "") not in kinds:
+            continue
+        path_value = str(document.get("path") or "")
+        if normalized_prefix and not path_value.startswith(normalized_prefix):
+            continue
+        results.append(document_to_result(document, score=0.0))
+    results.sort(key=lambda item: (str(item.get("kind") or ""), str(item.get("path") or ""), str(item.get("qualified_name") or item.get("name") or "")))
+    return results[:limit]
 
 
 def find_files(
@@ -277,28 +227,15 @@ def find_files(
     *,
     limit: int = 20,
 ) -> List[Dict[str, object]]:
-    sqlite_path = search_root / repo_name / "search.sqlite3"
-    if not sqlite_path.exists():
-        return []
-
-    like_pattern = path_pattern.replace("*", "%")
-    if "%" not in like_pattern:
-        like_pattern = f"%{like_pattern}%"
-
-    with sqlite3.connect(sqlite_path) as connection:
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            """
-            SELECT doc_id, kind, repo, path, name, qualified_name, symbol_id, title, preview, metadata_json
-            FROM documents
-            WHERE kind IN ('directory', 'file')
-              AND path LIKE ?
-            ORDER BY kind, LENGTH(COALESCE(path, '')), COALESCE(path, '')
-            LIMIT ?
-            """,
-            [like_pattern, limit],
-        ).fetchall()
-    return [row_to_result(row, score=0.0) for row in rows]
+    documents = list_documents(search_root, repo_name, limit=max(limit * 8, 40), kinds=("directory", "file"))
+    normalized_pattern = path_pattern.lower().replace("*", "")
+    if not normalized_pattern:
+        return documents[:limit]
+    results = []
+    for item in documents:
+        if normalized_pattern in str(item.get("path") or "").lower():
+            results.append(item)
+    return results[:limit]
 
 
 def lookup_symbol_documents(
@@ -309,30 +246,15 @@ def lookup_symbol_documents(
     kinds: Sequence[str] = (),
     limit: int = 20,
 ) -> List[Dict[str, object]]:
-    sqlite_path = search_root / repo_name / "search.sqlite3"
-    if not sqlite_path.exists():
-        return []
-
-    clauses = ["symbol_id = ?"]
-    params: List[object] = [symbol_id]
-    if kinds:
-        clauses.append(f"kind IN ({','.join('?' for _ in kinds)})")
-        params.extend(kinds)
-    params.append(limit)
-
-    with sqlite3.connect(sqlite_path) as connection:
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            (
-                "SELECT doc_id, kind, repo, path, name, qualified_name, symbol_id, title, preview, metadata_json "
-                "FROM documents "
-                f"WHERE {' AND '.join(clauses)} "
-                "ORDER BY kind, COALESCE(path, ''), COALESCE(name, ''), COALESCE(qualified_name, '') "
-                "LIMIT ?"
-            ),
-            params,
-        ).fetchall()
-    return [row_to_result(row, score=0.0) for row in rows]
+    results = []
+    for document in load_documents_jsonl(search_root / repo_name / "documents.jsonl"):
+        if str(document.get("symbol_id") or "") != symbol_id:
+            continue
+        if kinds and str(document.get("kind") or "") not in kinds:
+            continue
+        results.append(document_to_result(document, score=0.0))
+    results.sort(key=lambda item: (str(item.get("kind") or ""), str(item.get("path") or ""), str(item.get("name") or ""), str(item.get("qualified_name") or "")))
+    return results[:limit]
 
 
 def load_search_manifest(search_root: Path, repo_name: str) -> Dict[str, object]:
@@ -340,42 +262,8 @@ def load_search_manifest(search_root: Path, repo_name: str) -> Dict[str, object]
 
 
 def load_agent_cache(search_root: Path, repo_name: str) -> Dict[str, object]:
-    sqlite_path = search_root / repo_name / "search.sqlite3"
-    with sqlite3.connect(sqlite_path) as connection:
-        connection.row_factory = sqlite3.Row
-        metadata_rows = dict(connection.execute("SELECT key, value FROM metadata").fetchall())
-        rows = connection.execute(
-            """
-            SELECT doc_id, kind, path, name, qualified_name, symbol_id, title, preview, metadata_json, search_text
-            FROM agent_cache_entries
-            ORDER BY kind, COALESCE(path, ''), COALESCE(qualified_name, ''), COALESCE(name, '')
-            """
-        ).fetchall()
-    entries = [
-        {
-            "doc_id": row["doc_id"],
-            "kind": row["kind"],
-            "path": row["path"],
-            "name": row["name"],
-            "qualified_name": row["qualified_name"],
-            "symbol_id": row["symbol_id"],
-            "title": row["title"],
-            "preview": row["preview"],
-            "metadata": json.loads(row["metadata_json"] or "{}"),
-            "search_text": row["search_text"],
-        }
-        for row in rows
-    ]
-    return {
-        "schema_version": AGENT_CACHE_SCHEMA_VERSION,
-        "repo": repo_name,
-        "generated_at": metadata_rows.get("generated_at"),
-        "summary": {
-            "entries": len(entries),
-            "kinds": dict(sorted(Counter(entry["kind"] for entry in entries).items())),
-        },
-        "entries": entries,
-    }
+    documents = load_documents_jsonl(search_root / repo_name / "documents.jsonl")
+    return build_agent_cache(repo_name, documents)
 
 
 def build_documents(
@@ -897,6 +785,19 @@ def write_documents_jsonl(path: Path, documents: Sequence[Dict[str, object]]) ->
             handle.write("\n")
 
 
+def load_documents_jsonl(path: Path) -> List[Dict[str, object]]:
+    if not path.exists():
+        return []
+    documents: List[Dict[str, object]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            raw = line.strip()
+            if not raw:
+                continue
+            documents.append(json.loads(raw))
+    return documents
+
+
 def tokenize(query: str) -> List[str]:
     tokens = []
     for raw_token in query.replace("::", " ").replace("/", " ").replace("-", " ").replace(".", " ").split():
@@ -906,190 +807,20 @@ def tokenize(query: str) -> List[str]:
     return tokens
 
 
-def build_and_query(tokens: Sequence[str]) -> str:
-    return " ".join(f"{token}*" for token in tokens)
-
-
-def build_or_query(tokens: Sequence[str]) -> str:
-    return " OR ".join(f"{token}*" for token in tokens)
-
-
-def query_documents(
-    connection: sqlite3.Connection,
-    fts_query: str,
-    limit: int,
-    kinds: Sequence[str],
-) -> List[Dict[str, object]]:
-    where_clauses = ["lexical_documents MATCH ?"]
-    params: List[object] = [fts_query]
-    if kinds:
-        where_clauses.append(f"documents.kind IN ({','.join('?' for _ in kinds)})")
-        params.extend(kinds)
-
-    sql = (
-        "SELECT documents.doc_id, documents.kind, documents.repo, documents.path, documents.name, "
-        "documents.qualified_name, documents.symbol_id, documents.title, documents.preview, "
-        "documents.metadata_json, -bm25(lexical_documents) AS score "
-        "FROM lexical_documents "
-        "JOIN documents ON documents.doc_id = lexical_documents.doc_id "
-        f"WHERE {' AND '.join(where_clauses)} "
-        "ORDER BY score DESC, documents.kind, COALESCE(documents.path, ''), COALESCE(documents.qualified_name, '') "
-        "LIMIT ?"
-    )
-    params.append(limit)
-    rows = connection.execute(sql, params).fetchall()
-    return [row_to_result(row, score=row["score"]) for row in rows]
-
-
-def row_to_result(row: sqlite3.Row, *, score: float) -> Dict[str, object]:
+def document_to_result(document: Dict[str, object], *, score: float) -> Dict[str, object]:
     return {
-        "doc_id": row["doc_id"],
-        "kind": row["kind"],
-        "repo": row["repo"],
-        "path": row["path"],
-        "name": row["name"],
-        "qualified_name": row["qualified_name"],
-        "symbol_id": row["symbol_id"],
-        "title": row["title"],
-        "preview": row["preview"],
+        "doc_id": document["doc_id"],
+        "kind": document["kind"],
+        "repo": document["repo"],
+        "path": document.get("path"),
+        "name": document.get("name"),
+        "qualified_name": document.get("qualified_name"),
+        "symbol_id": document.get("symbol_id"),
+        "title": document.get("title"),
+        "preview": document.get("preview"),
         "score": round(float(score), 6),
-        "metadata": json.loads(row["metadata_json"]),
+        "metadata": dict(document.get("metadata") or {}),
     }
-
-
-def write_search_database(
-    sqlite_path: Path,
-    documents: Sequence[Dict[str, object]],
-    agent_cache: Dict[str, object],
-) -> None:
-    with sqlite3.connect(sqlite_path) as connection:
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        connection.execute(
-            """
-            CREATE TABLE documents (
-                doc_id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                repo TEXT NOT NULL,
-                path TEXT,
-                name TEXT,
-                qualified_name TEXT,
-                symbol_id TEXT,
-                title TEXT NOT NULL,
-                preview TEXT NOT NULL,
-                metadata_json TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE VIRTUAL TABLE lexical_documents USING fts5(
-                doc_id UNINDEXED,
-                title,
-                content,
-                kind,
-                path,
-                name,
-                qualified_name,
-                tokenize = 'unicode61'
-            )
-            """
-        )
-        connection.execute("CREATE INDEX idx_documents_kind ON documents(kind)")
-        connection.execute("CREATE INDEX idx_documents_path ON documents(path)")
-        connection.execute("CREATE INDEX idx_documents_symbol_id ON documents(symbol_id)")
-        connection.execute(
-            """
-            CREATE TABLE agent_cache_entries (
-                doc_id TEXT PRIMARY KEY,
-                kind TEXT NOT NULL,
-                path TEXT,
-                name TEXT,
-                qualified_name TEXT,
-                symbol_id TEXT,
-                title TEXT,
-                preview TEXT,
-                metadata_json TEXT NOT NULL,
-                search_text TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute("CREATE INDEX idx_agent_cache_kind ON agent_cache_entries(kind)")
-        connection.execute("CREATE INDEX idx_agent_cache_path ON agent_cache_entries(path)")
-        connection.execute("CREATE INDEX idx_agent_cache_symbol_id ON agent_cache_entries(symbol_id)")
-
-        connection.executemany(
-            "INSERT INTO metadata(key, value) VALUES(?, ?)",
-            [
-                ("schema_version", SCHEMA_VERSION),
-                ("generated_at", timestamp_now()),
-                ("documents", str(len(documents))),
-                ("agent_cache_entries", str(int(agent_cache.get("summary", {}).get("entries") or 0))),
-            ],
-        )
-        connection.executemany(
-            """
-            INSERT INTO documents(doc_id, kind, repo, path, name, qualified_name, symbol_id, title, preview, metadata_json)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    document["doc_id"],
-                    document["kind"],
-                    document["repo"],
-                    document["path"],
-                    document["name"],
-                    document["qualified_name"],
-                    document["symbol_id"],
-                    document["title"],
-                    document["preview"],
-                    json.dumps(document["metadata"], sort_keys=True),
-                )
-                for document in documents
-            ],
-        )
-        connection.executemany(
-            """
-            INSERT INTO lexical_documents(doc_id, title, content, kind, path, name, qualified_name)
-            VALUES(?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    document["doc_id"],
-                    document["title"],
-                    document["content"],
-                    document["kind"],
-                    document["path"],
-                    document["name"],
-                    document["qualified_name"],
-                )
-                for document in documents
-            ],
-        )
-        connection.executemany(
-            """
-            INSERT INTO agent_cache_entries(
-                doc_id, kind, path, name, qualified_name, symbol_id, title, preview, metadata_json, search_text
-            )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    entry["doc_id"],
-                    entry["kind"],
-                    entry["path"],
-                    entry["name"],
-                    entry["qualified_name"],
-                    entry["symbol_id"],
-                    entry["title"],
-                    entry["preview"],
-                    json.dumps(entry["metadata"], sort_keys=True),
-                    entry["search_text"],
-                )
-                for entry in agent_cache.get("entries", [])
-            ],
-        )
-        connection.commit()
 
 
 def load_json(path: Path) -> Dict[str, object]:

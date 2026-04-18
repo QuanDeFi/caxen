@@ -859,12 +859,3 @@ def resolve_import_target_node(
         )
         return node_id
     return ensure_reference_node(nodes, node_ids, reference_nodes, repo_name, target_qualified_name, "module_ref")
-
-
-def write_graph_artifact(output_root: Path, repo_name: str, payload: Dict[str, object]) -> None:
-    repo_output = output_root / repo_name
-    repo_output.mkdir(parents=True, exist_ok=True)
-    target = repo_output / "graph.json"
-    with target.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=False)
-        handle.write("\n")

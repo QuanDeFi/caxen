@@ -213,12 +213,9 @@ class SearchAndSummaryTest(unittest.TestCase):
     def test_tantivy_hot_path_works_without_search_sqlite(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = seed_demo_workspace(Path(tmpdir))
-            sqlite_path = paths["search_root"] / "demo" / "search.sqlite3"
             tantivy_dir = paths["search_root"] / "demo" / "tantivy"
             if not tantivy_dir.exists():
                 self.skipTest("native Tantivy index unavailable in this environment")
-            if sqlite_path.exists():
-                sqlite_path.unlink()
 
             symbol_lookup = find_symbol(paths["search_root"], "demo", "helper", limit=5)
             self.assertTrue(any(item["name"] == "helper" for item in symbol_lookup["results"]))

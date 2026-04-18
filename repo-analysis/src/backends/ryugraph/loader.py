@@ -10,12 +10,10 @@ def load_ryugraph_database(
     output_root: Path,
     repo_name: str,
     payload: Dict[str, object],
-    *,
-    emit_json: bool = False,
 ) -> Path:
     repo_output = output_root / repo_name
     repo_output.mkdir(parents=True, exist_ok=True)
-    target = repo_output / "graph.sqlite3"
+    target = repo_output / "graph.db"
     if target.exists():
         target.unlink()
 
@@ -141,38 +139,29 @@ def load_ryugraph_database(
         )
         connection.commit()
 
-    write_graph_manifest(repo_output, payload, emit_json=emit_json)
-
-    if emit_json:
-        target_json = repo_output / "graph.json"
-        target_json.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
-    else:
+    write_graph_manifest(repo_output, payload)
+    for filename in ("graph.json", "ryugraph.json"):
         try:
-            (repo_output / "graph.json").unlink()
-        except FileNotFoundError:
-            pass
-        try:
-            (repo_output / "ryugraph.json").unlink()
+            (repo_output / filename).unlink()
         except FileNotFoundError:
             pass
     return target
 
 
-def write_graph_manifest(repo_output: Path, payload: Dict[str, object], *, emit_json: bool) -> None:
+def write_graph_manifest(repo_output: Path, payload: Dict[str, object]) -> None:
     manifest = {
         "schema_version": str(payload.get("schema_version") or ""),
         "repo": str(payload.get("repo") or ""),
         "generated_at": str(payload.get("generated_at") or ""),
         "graph_backend": "sqlite_graph",
         "artifacts": {
-            "graph_sqlite3": "graph.sqlite3",
-            "graph_json": "graph.json" if emit_json else None,
+            "graph_db": "graph.db",
         },
         "summary": payload.get("summary", {}),
         "features": {
             "symbol_summary_cache": True,
             "neighbor_cache": True,
-            "json_exports": bool(emit_json),
+            "json_exports": False,
         },
     }
     target = repo_output / "graph_manifest.json"

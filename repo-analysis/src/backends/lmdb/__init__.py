@@ -1,2 +1,1 @@
-"""LMDB metadata-store compatibility package."""
-
+"""LMDB metadata store."""
