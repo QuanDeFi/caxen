@@ -4,6 +4,9 @@ import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from backends.metadata_store import get_metadata_store
+from backends.search_backend import get_search_backend
+from common.telemetry import snapshot_telemetry, trace_operation
 from graph.query import (
     adjacent_symbols as graph_adjacent_symbols,
     callers_of as graph_callers_of,
@@ -26,16 +29,9 @@ from retrieval.planner import (
     prepare_answer_bundle as build_answer_bundle,
     retrieve_iterative as build_iterative_bundle,
 )
-from search.indexer import (
-    find_files,
-    list_documents,
-    load_agent_cache,
-    lookup_symbol_documents,
-    search_documents,
-    search_documents_scoped,
-)
+from search.indexer import list_documents
 from summaries.builder import load_summary_artifacts
-from symbols.persistence import load_symbol_by_id, load_symbols_by_ids
+from symbols.persistence import load_symbol_by_id
 
 
 DEFAULT_REPOS = ("carbon", "yellowstone-vixen")
@@ -51,18 +47,20 @@ def repo_overview(summary_root: Path, repo_name: str) -> Dict[str, object]:
 
 
 def find_symbol(search_root: Path, repo_name: str, query: str, *, limit: int = 10) -> Dict[str, object]:
+    search_backend = get_search_backend(str(search_root.resolve()), repo_name)
     return {
         "repo": repo_name,
         "query": query,
-        "results": search_documents(search_root, repo_name, query, limit=limit, kinds=("symbol",)),
+        "results": search_backend.search(query, limit=limit, kinds=("symbol",)),
     }
 
 
 def find_file(search_root: Path, repo_name: str, path_pattern: str, *, limit: int = 20) -> Dict[str, object]:
+    search_backend = get_search_backend(str(search_root.resolve()), repo_name)
     return {
         "repo": repo_name,
         "path_pattern": path_pattern,
-        "results": find_files(search_root, repo_name, path_pattern, limit=limit),
+        "results": search_backend.find_file(path_pattern, limit=limit),
     }
 
 
@@ -75,6 +73,7 @@ def search_lexical(
     kinds: Sequence[str] = (),
     path_prefix: Optional[str] = None,
 ) -> Dict[str, object]:
+    search_backend = get_search_backend(str(search_root.resolve()), repo_name)
     return {
         "repo": repo_name,
         "query": query,
@@ -82,14 +81,7 @@ def search_lexical(
             "kinds": list(kinds),
             "path_prefix": path_prefix,
         },
-        "results": search_documents_scoped(
-            search_root,
-            repo_name,
-            query,
-            limit=limit,
-            kinds=kinds,
-            path_prefix=path_prefix,
-        ),
+        "results": search_backend.search(query, limit=limit, kinds=kinds, path_prefix=path_prefix),
     }
 
 
@@ -219,6 +211,11 @@ def get_summary(
     repo_name: str,
     node_id: str,
 ) -> Dict[str, object]:
+    metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name, summary_root=str(summary_root.resolve()))
+    summary_by_id = metadata_store.get_summary_by_id(node_id)
+    if summary_by_id is not None:
+        return {"repo": repo_name, "node_id": node_id, "summary": summary_by_id}
+
     summaries = load_summary_artifacts(summary_root, repo_name)
     if node_id == stable_repo_id(repo_name):
         return {"repo": repo_name, "node_id": node_id, "summary": summaries["project"]}
@@ -255,13 +252,14 @@ def get_symbol_signature(
     repo_name: str,
     symbol_query: str,
 ) -> Dict[str, object]:
-    symbol = resolve_symbol_query(search_root, parsed_root, repo_name, symbol_query)
-    return {
-        "repo": repo_name,
-        "query": symbol_query,
-        "symbol": symbol,
-        "signature": symbol.get("signature") if symbol else None,
-    }
+    with trace_operation("get_symbol_signature"):
+        symbol = resolve_symbol_query(search_root, parsed_root, repo_name, symbol_query)
+        return {
+            "repo": repo_name,
+            "query": symbol_query,
+            "symbol": symbol,
+            "signature": symbol.get("signature") if symbol else None,
+        }
 
 
 def get_symbol_body(
@@ -270,23 +268,27 @@ def get_symbol_body(
     repo_name: str,
     symbol_query: str,
 ) -> Dict[str, object]:
-    symbol = resolve_symbol_query(search_root, parsed_root, repo_name, symbol_query)
-    if not symbol:
-        return {"repo": repo_name, "query": symbol_query, "symbol": None, "body": None}
+    with trace_operation("get_symbol_body"):
+        symbol = resolve_symbol_query(search_root, parsed_root, repo_name, symbol_query)
+        if not symbol:
+            return {"repo": repo_name, "query": symbol_query, "symbol": None, "body": None}
 
-    documents = lookup_symbol_documents(
-        search_root,
-        repo_name,
-        symbol["symbol_id"],
-        kinds=("function_body", "type_body"),
-        limit=4,
-    )
-    return {
-        "repo": repo_name,
-        "query": symbol_query,
-        "symbol": describe_symbol_row(symbol),
-        "body": documents[0] if documents else None,
-    }
+        search_backend = get_search_backend(str(search_root.resolve()), repo_name)
+        documents = search_backend.lookup_symbol_docs(
+            symbol["symbol_id"],
+            kinds=("function_body", "type_body"),
+            limit=4,
+        )
+        return {
+            "repo": repo_name,
+            "query": symbol_query,
+            "symbol": describe_symbol_row(symbol),
+            "body": documents[0] if documents else None,
+        }
+
+
+def telemetry_snapshot() -> Dict[str, object]:
+    return snapshot_telemetry()
 
 
 def get_enclosing_context(
@@ -301,14 +303,16 @@ def get_enclosing_context(
     if not symbol:
         return {"repo": repo_name, "query": symbol_query, "context": None}
 
-    container = load_symbol_by_id(parsed_root, repo_name, str(symbol.get("container_symbol_id") or ""))
+    metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name, summary_root=str(summary_root.resolve()))
+    container = metadata_store.get_symbol(str(symbol.get("container_symbol_id") or ""))
+    path_summary = metadata_store.get_summary_by_path(symbol["path"])
     return {
         "repo": repo_name,
         "query": symbol_query,
         "context": {
             "symbol": describe_symbol_row(symbol),
             "container": describe_symbol_row(container) if container else None,
-            "path_summary": summarize_path(summary_root, repo_name, symbol["path"]),
+            "path_summary": path_summary[0] if path_summary else summarize_path(summary_root, repo_name, symbol["path"]),
             "statement_slice": graph_statement_slice(
                 search_root,
                 parsed_root,
@@ -365,7 +369,26 @@ def where_defined(
     *,
     limit: int = 10,
 ) -> Dict[str, object]:
-    return graph_where_defined(search_root, parsed_root, repo_name, symbol_query, limit=limit)
+    metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name)
+    matches: List[Dict[str, object]] = []
+    for symbol_id in metadata_store.resolve_qname(symbol_query):
+        symbol = metadata_store.get_symbol(symbol_id)
+        if symbol:
+            matches.append(describe_symbol_row(symbol) or {})
+    if not matches:
+        for symbol_id in metadata_store.resolve_name(symbol_query, repo=repo_name):
+            symbol = metadata_store.get_symbol(symbol_id)
+            if symbol:
+                matches.append(describe_symbol_row(symbol) or {})
+                if len(matches) >= limit:
+                    break
+    if not matches:
+        return graph_where_defined(search_root, parsed_root, repo_name, symbol_query, limit=limit)
+    return {
+        "repo": repo_name,
+        "query": symbol_query,
+        "matches": matches[:limit],
+    }
 
 
 def who_imports(
@@ -662,7 +685,8 @@ def themed_results(
     path_keywords: Sequence[str],
     limit: int,
 ) -> List[Dict[str, object]]:
-    results = search_documents(search_root, repo_name, query, limit=max(limit * 3, 20), kinds=("directory", "file", "symbol"))
+    search_backend = get_search_backend(str(search_root.resolve()), repo_name)
+    results = search_backend.search(query, limit=max(limit * 3, 20), kinds=("directory", "file", "symbol"))
     filtered = []
     for result in results:
         haystack = " ".join(
@@ -689,16 +713,10 @@ def compare_repo_from_agent_cache(
     *,
     limit: int,
 ) -> Optional[Dict[str, object]]:
-    try:
-        cache = load_agent_cache(search_root, repo_name)
-    except FileNotFoundError:
+    search_backend = get_search_backend(str(search_root.resolve()), repo_name)
+    top_context = search_backend.compare_repo_candidates(query, limit=limit)
+    if not top_context:
         return None
-
-    entries = list(cache.get("entries", []))
-    if not entries:
-        return None
-
-    top_context = query_agent_cache(entries, query, limit=limit)
     return {
         "repo": repo_name,
         "focus": str(summaries.get("project", {}).get("focus") or ""),
@@ -708,8 +726,8 @@ def compare_repo_from_agent_cache(
             "graph_neighborhoods": 0,
             "statement_slices": 0,
             "evidence_items": len(top_context),
-            "source": "agent_cache",
-            "cache_entries": int(cache.get("summary", {}).get("entries") or 0),
+            "source": "search_backend",
+            "cache_entries": len(top_context),
         },
     }
 
@@ -818,8 +836,18 @@ def kind_compare_rank(kind: str) -> int:
 
 
 def resolve_symbol_query(search_root: Path, parsed_root: Path, repo_name: str, symbol_query: str) -> Optional[Dict[str, object]]:
+    metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name)
     if symbol_query.startswith("sym:"):
-        return load_symbol_by_id(parsed_root, repo_name, symbol_query)
+        symbol = metadata_store.get_symbol(symbol_query)
+        return symbol if symbol is not None else load_symbol_by_id(parsed_root, repo_name, symbol_query)
+
+    qname_matches = metadata_store.resolve_qname(symbol_query)
+    if qname_matches:
+        return metadata_store.get_symbol(qname_matches[0])
+
+    name_matches = metadata_store.resolve_name(symbol_query, repo=repo_name)
+    if name_matches:
+        return metadata_store.get_symbol(name_matches[0])
 
     matches = graph_where_defined(search_root, parsed_root, repo_name, symbol_query, limit=1)["matches"]
     if not matches:

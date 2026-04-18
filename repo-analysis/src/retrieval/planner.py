@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
+from common.telemetry import trace_operation
 from graph.query import execute_graph_query
 from retrieval.engine import classify_query, retrieve_context
 from search.indexer import tokenize
@@ -71,127 +72,128 @@ def prepare_answer_bundle(
     limit: int = 8,
     refinement_hints: Sequence[str] = (),
 ) -> Dict[str, object]:
-    normalized_task = normalize_task(task, refinement_hints)
-    plan = plan_query(
-        search_root,
-        graph_root,
-        parsed_root,
-        normalized_task,
-        repo_name=repo_name,
-        summary_root=summary_root,
-        limit=limit,
-    )
-    bundles = []
-    for repo_plan in plan["plans"]:
-        current_repo = repo_plan["repo"]
-        context = retrieve_context(
+    with trace_operation("prepare_answer_bundle"):
+        normalized_task = normalize_task(task, refinement_hints)
+        plan = plan_query(
             search_root,
             graph_root,
             parsed_root,
-            current_repo,
             normalized_task,
+            repo_name=repo_name,
             summary_root=summary_root,
             limit=limit,
-            use_summaries=True,
-            selective_retrieval=True,
         )
-        summaries = load_summary_artifacts(summary_root, current_repo)
-        selected_context = context["selected_context"]
-        symbol_candidates = [item for item in selected_context if item.get("symbol_id")]
-        file_candidates = [item for item in selected_context if item.get("path")]
+        bundles = []
+        for repo_plan in plan["plans"]:
+            current_repo = repo_plan["repo"]
+            context = retrieve_context(
+                search_root,
+                graph_root,
+                parsed_root,
+                current_repo,
+                normalized_task,
+                summary_root=summary_root,
+                limit=limit,
+                use_summaries=True,
+                selective_retrieval=True,
+            )
+            summaries = load_summary_artifacts(summary_root, current_repo)
+            selected_context = context["selected_context"]
+            symbol_candidates = [item for item in selected_context if item.get("symbol_id")]
+            file_candidates = [item for item in selected_context if item.get("path")]
 
-        graph_neighborhoods = []
-        statement_slices = []
-        for candidate in symbol_candidates[: min(3, limit)]:
-            query_text = str(candidate.get("qualified_name") or candidate.get("name") or "")
-            if not query_text:
-                continue
-            graph_response = execute_graph_query(
-                search_root,
-                parsed_root,
-                graph_root,
-                current_repo,
-                {
-                    "operation": "neighbors",
-                    "seed": {"symbol_id": candidate["symbol_id"]},
-                    "edge_types": recommended_edge_types(repo_plan["intent"]),
-                    "direction": "both",
-                    "depth": 1,
-                    "limit": 8,
-                },
-            )
-            graph_neighborhoods.append(
-                {
-                    "seed": query_text,
-                    "results": graph_response["results"],
-                }
-            )
-            statement_response = execute_graph_query(
-                search_root,
-                parsed_root,
-                graph_root,
-                current_repo,
-                {
-                    "operation": "statement_slice",
-                    "seed": {"symbol_id": candidate["symbol_id"]},
-                    "limit": 8,
-                    "window": 8,
-                },
-            )
-            if statement_response["results"]:
-                statement_slices.append(
+            graph_neighborhoods = []
+            statement_slices = []
+            for candidate in symbol_candidates[: min(3, limit)]:
+                query_text = str(candidate.get("qualified_name") or candidate.get("name") or "")
+                if not query_text:
+                    continue
+                graph_response = execute_graph_query(
+                    search_root,
+                    parsed_root,
+                    graph_root,
+                    current_repo,
+                    {
+                        "operation": "neighbors",
+                        "seed": {"symbol_id": candidate["symbol_id"]},
+                        "edge_types": recommended_edge_types(repo_plan["intent"]),
+                        "direction": "both",
+                        "depth": 1,
+                        "limit": 8,
+                    },
+                )
+                graph_neighborhoods.append(
                     {
                         "seed": query_text,
-                        "results": statement_response["results"],
+                        "results": graph_response["results"],
+                    }
+                )
+                statement_response = execute_graph_query(
+                    search_root,
+                    parsed_root,
+                    graph_root,
+                    current_repo,
+                    {
+                        "operation": "statement_slice",
+                        "seed": {"symbol_id": candidate["symbol_id"]},
+                        "limit": 8,
+                        "window": 8,
+                    },
+                )
+                if statement_response["results"]:
+                    statement_slices.append(
+                        {
+                            "seed": query_text,
+                            "results": statement_response["results"],
+                        }
+                    )
+
+            evidence = []
+            seen_evidence = set()
+            for item in selected_context:
+                key = (item.get("symbol_id"), item.get("path"), item.get("kind"))
+                if key in seen_evidence:
+                    continue
+                seen_evidence.add(key)
+                evidence.append(
+                    {
+                        "kind": item.get("kind"),
+                        "path": item.get("path"),
+                        "qualified_name": item.get("qualified_name"),
+                        "symbol_id": item.get("symbol_id"),
+                        "title": item.get("title"),
+                        "preview": item.get("preview"),
+                        "reasons": list(item.get("reasons", [])),
+                        "provenance": build_provenance(item),
+                        "why_included": explain_candidate(item),
                     }
                 )
 
-        evidence = []
-        seen_evidence = set()
-        for item in selected_context:
-            key = (item.get("symbol_id"), item.get("path"), item.get("kind"))
-            if key in seen_evidence:
-                continue
-            seen_evidence.add(key)
-            evidence.append(
+            bundles.append(
                 {
-                    "kind": item.get("kind"),
-                    "path": item.get("path"),
-                    "qualified_name": item.get("qualified_name"),
-                    "symbol_id": item.get("symbol_id"),
-                    "title": item.get("title"),
-                    "preview": item.get("preview"),
-                    "reasons": list(item.get("reasons", [])),
-                    "provenance": build_provenance(item),
-                    "why_included": explain_candidate(item),
+                    "repo": current_repo,
+                    "intent": repo_plan["intent"],
+                    "focus": summaries["project"]["focus"],
+                    "project_summary": summaries["project"]["summary"],
+                    "retrieval_recipe": repo_plan["retrieval_recipe"],
+                    "selected_context": selected_context,
+                    "top_symbols": compact_candidates(symbol_candidates, limit=5),
+                    "top_files": compact_candidates(file_candidates, limit=5),
+                    "graph_neighborhoods": graph_neighborhoods,
+                    "statement_slices": statement_slices,
+                    "relevant_summaries": select_relevant_summaries(summaries, selected_context),
+                    "evidence": evidence[:limit],
+                    "bundle_summary": summarize_bundle(selected_context, graph_neighborhoods, statement_slices, evidence),
                 }
             )
 
-        bundles.append(
-            {
-                "repo": current_repo,
-                "intent": repo_plan["intent"],
-                "focus": summaries["project"]["focus"],
-                "project_summary": summaries["project"]["summary"],
-                "retrieval_recipe": repo_plan["retrieval_recipe"],
-                "selected_context": selected_context,
-                "top_symbols": compact_candidates(symbol_candidates, limit=5),
-                "top_files": compact_candidates(file_candidates, limit=5),
-                "graph_neighborhoods": graph_neighborhoods,
-                "statement_slices": statement_slices,
-                "relevant_summaries": select_relevant_summaries(summaries, selected_context),
-                "evidence": evidence[:limit],
-                "bundle_summary": summarize_bundle(selected_context, graph_neighborhoods, statement_slices, evidence),
-            }
-        )
-
-    return {
-        "task": task,
-        "normalized_task": normalized_task,
-        "refinement_hints": list(refinement_hints),
-        "query_profile": plan["query_profile"],
-        "bundles": bundles,
-    }
+        return {
+            "task": task,
+            "normalized_task": normalized_task,
+            "refinement_hints": list(refinement_hints),
+            "query_profile": plan["query_profile"],
+            "bundles": bundles,
+        }
 
 
 def retrieve_iterative(
