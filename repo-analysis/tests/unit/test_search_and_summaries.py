@@ -40,12 +40,12 @@ from embeddings.indexer import build_embedding_index, query_embedding_index
 from evaluation.harness import export_benchmark_prompts, run_benchmarks, score_answer_bundles, score_external_answers
 from evaluation.harness import benchmark_interactive_commands
 from graph.builder import build_graph_artifact
-from graph.query import load_graph_view_uncached
+from graph.query import inspect_graph_backend_payload_uncached
 from graph.store import write_graph_database
 from retrieval.engine import retrieve_context
 from rerank.fusion import rerank_candidates
 from search.indexer import build_search_index, search_documents
-from summaries.builder import build_summary_artifacts, load_summary_artifacts, sync_summary_state, write_summary_artifacts
+from summaries.builder import build_summary_artifacts, load_summary_artifacts, sync_summary_state
 from symbols.indexer import build_symbol_index
 from symbols.persistence import load_symbol_index, write_metadata_bundle
 
@@ -158,7 +158,6 @@ def seed_demo_workspace(root: Path) -> dict[str, Path]:
     build_search_index("demo", repo_root, raw_root, parsed_root, search_root)
     build_embedding_index(search_root, "demo")
     summary_artifacts = build_summary_artifacts("demo", raw_root, parsed_root, graph_root)
-    write_summary_artifacts(summary_root, "demo", summary_artifacts)
     sync_summary_state(
         parsed_root,
         graph_root,
@@ -644,7 +643,7 @@ class SearchAndSummaryTest(unittest.TestCase):
             )
             self.assertEqual(subgraph["operation"], "neighbors")
 
-            graph_payload = load_graph_view_uncached(paths["graph_root"], "demo")["payload"]
+            graph_payload = inspect_graph_backend_payload_uncached(paths["graph_root"], "demo")["payload"]
             node_kinds = {item["kind"] for item in graph_payload["nodes"]}
             self.assertIn("directory", node_kinds)
             self.assertIn("package", node_kinds)

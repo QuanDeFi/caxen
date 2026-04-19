@@ -89,11 +89,6 @@ def build_search_index(
     repo_output.mkdir(parents=True, exist_ok=True)
     emit("documents_built", documents=len(documents))
 
-    remove_file_if_exists(repo_output / "search.sqlite3")
-    remove_file_if_exists(repo_output / "documents.jsonl")
-    remove_file_if_exists(repo_output / "search_manifest.json")
-    remove_file_if_exists(repo_output / "agent_cache.json")
-
     bm25_artifact = {
         "available": False,
         "built": False,
@@ -177,7 +172,14 @@ def search_documents(
 def build_bm25_index_from_documents(documents: Sequence[Dict[str, object]], output_dir: Path) -> Dict[str, object]:
     with tempfile.TemporaryDirectory() as tmpdir:
         documents_path = Path(tmpdir) / "documents.jsonl"
-        write_documents_jsonl(documents_path, documents)
+
+        def _write_temp_documents_file(path: Path, rows: Sequence[Dict[str, object]]) -> None:
+            with path.open("w", encoding="utf-8") as handle:
+                for row in rows:
+                    json.dump(row, handle, sort_keys=False)
+                    handle.write("\n")
+
+        _write_temp_documents_file(documents_path, documents)
         return build_bm25_index(documents_path, output_dir)
 
 
@@ -715,13 +717,6 @@ def write_json(path: Path, payload: Dict[str, object]) -> None:
         handle.write("\n")
 
 
-def remove_file_if_exists(path: Path) -> None:
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return
-
-
 def build_agent_cache(repo_name: str, documents: Sequence[Dict[str, object]]) -> Dict[str, object]:
     entries = []
     for document in documents:
@@ -788,26 +783,6 @@ def build_agent_cache_entry(document: Dict[str, object], metadata: Dict[str, obj
         },
         "search_text": " ".join(part for part in text_parts if part).lower(),
     }
-
-
-def write_documents_jsonl(path: Path, documents: Sequence[Dict[str, object]]) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        for document in documents:
-            json.dump(document, handle, sort_keys=False)
-            handle.write("\n")
-
-
-def load_documents_jsonl(path: Path) -> List[Dict[str, object]]:
-    if not path.exists():
-        return []
-    documents: List[Dict[str, object]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            raw = line.strip()
-            if not raw:
-                continue
-            documents.append(json.loads(raw))
-    return documents
 
 
 def document_to_result(document: Dict[str, object], *, score: float) -> Dict[str, object]:

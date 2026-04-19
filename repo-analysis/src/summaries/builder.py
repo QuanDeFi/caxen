@@ -6,7 +6,7 @@ from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, Iterable, List, Tuple
 
-from graph.query import load_graph_view_uncached
+from graph.query import inspect_graph_backend_payload_uncached
 from graph.store import write_graph_database
 from symbols.indexer import stable_id, timestamp_now
 from symbols.persistence import (
@@ -56,7 +56,7 @@ def build_summary_artifacts(
         symbols=len(symbols.get("symbols", [])),
         statements=len(symbols.get("statements", [])),
     )
-    graph = load_graph_view_uncached(graph_root, repo_name)["payload"]
+    graph = inspect_graph_backend_payload_uncached(graph_root, repo_name)["payload"]
     emit(
         "loaded_graph",
         nodes=len(graph.get("nodes", [])),
@@ -104,25 +104,6 @@ def build_summary_artifacts(
         symbols=len(symbol_summaries),
     )
     return payload
-
-
-def write_summary_artifacts(
-    output_root: Path,
-    repo_name: str,
-    payload: Dict[str, object],
-) -> None:
-    repo_output = output_root / repo_name
-    repo_output.mkdir(parents=True, exist_ok=True)
-    for filename in (
-        "summary.sqlite3",
-        "project.json",
-        "packages.json",
-        "directories.json",
-        "files.json",
-        "symbols.json",
-        "summary_manifest.json",
-    ):
-        remove_file_if_exists(repo_output / filename)
 
 
 def load_summary_artifacts(summary_root: Path, repo_name: str) -> Dict[str, object]:
@@ -370,7 +351,7 @@ def augment_graph_with_summaries(
     repo_name: str,
     payload: Dict[str, object],
 ) -> None:
-    graph = load_graph_view_uncached(graph_root, repo_name)["payload"]
+    graph = inspect_graph_backend_payload_uncached(graph_root, repo_name)["payload"]
     node_by_id = {node["node_id"]: node for node in graph.get("nodes", [])}
     edge_ids = {edge["edge_id"] for edge in graph.get("edges", [])}
 
@@ -506,10 +487,3 @@ def infer_repo_focus(repo_name: str) -> str:
 def load_json(path: Path) -> Dict[str, object]:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
-
-
-def remove_file_if_exists(path: Path) -> None:
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        return

@@ -299,16 +299,16 @@ def symbol_summary(
         }
 
 
-def load_graph_view(graph_root: Path, repo_name: str) -> Dict[str, object]:
-    return _load_graph_view_cached(str(graph_root.resolve()), repo_name)
+def inspect_graph_backend_payload(graph_root: Path, repo_name: str) -> Dict[str, object]:
+    return _load_graph_backend_payload_cached(str(graph_root.resolve()), repo_name)
 
 
 def reset_graph_view_cache() -> None:
-    _load_graph_view_cached.cache_clear()
+    _load_graph_backend_payload_cached.cache_clear()
 
 
 @lru_cache(maxsize=8)
-def _load_graph_view_cached(graph_root: str, repo_name: str) -> Dict[str, object]:
+def _load_graph_backend_payload_cached(graph_root: str, repo_name: str) -> Dict[str, object]:
     root = Path(graph_root)
     graph_backend = get_graph_backend(str(root.resolve()), repo_name)
     if hasattr(graph_backend, "load_payload"):
@@ -316,9 +316,9 @@ def _load_graph_view_cached(graph_root: str, repo_name: str) -> Dict[str, object
     raise FileNotFoundError(f"Missing graph artifact for repo '{repo_name}' under {root / repo_name}")
 
 
-def load_graph_view_uncached(graph_root: Path, repo_name: str) -> Dict[str, object]:
+def inspect_graph_backend_payload_uncached(graph_root: Path, repo_name: str) -> Dict[str, object]:
     increment_counter("full_graph_payload_loads")
-    with trace_operation("load_graph_view_uncached"):
+    with trace_operation("inspect_graph_backend_payload_uncached"):
         graph_backend = get_graph_backend(str(graph_root.resolve()), repo_name)
         if hasattr(graph_backend, "load_payload"):
             return graph_backend.load_payload()

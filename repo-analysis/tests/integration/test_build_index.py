@@ -9,7 +9,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from symbols.persistence import load_symbol_index
-from graph.query import load_graph_view_uncached
+from graph.query import inspect_graph_backend_payload_uncached
 
 
 class BuildIndexIntegrationTest(unittest.TestCase):
@@ -80,7 +80,7 @@ class BuildIndexIntegrationTest(unittest.TestCase):
                 any(item["qualified_name"] == "yellowstone_vixen_proc_macro::vixen" for item in symbols_payload["symbols"])
             )
 
-            graph_payload = load_graph_view_uncached(graph_root, "yellowstone-vixen")["payload"]
+            graph_payload = inspect_graph_backend_payload_uncached(graph_root, "yellowstone-vixen")["payload"]
             graph_summary = graph_payload["summary"]
             self.assertEqual(graph_payload["repo"], "yellowstone-vixen")
             self.assertGreater(graph_summary["nodes"], 0)
@@ -166,7 +166,7 @@ class BuildIndexIntegrationTest(unittest.TestCase):
                 self.assertIn("call", reference_kinds)
                 self.assertIn("use", reference_kinds)
 
-                graph_payload = load_graph_view_uncached(graph_root, repo_name)["payload"]
+                graph_payload = inspect_graph_backend_payload_uncached(graph_root, repo_name)["payload"]
                 edge_types = {str(edge["type"]) for edge in graph_payload["edges"]}
                 self.assertIn("CALLS", edge_types)
                 self.assertIn("USES", edge_types)

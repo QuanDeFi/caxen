@@ -17,7 +17,7 @@ FORBIDDEN_SNIPPETS = (
     "load_symbol_index(",
     "load_symbol_by_id(",
     "load_summary_artifacts(",
-    "load_graph_view_uncached(",
+    "inspect_graph_backend_payload_uncached(",
     "documents.jsonl",
     "search_manifest.json",
     "graph_manifest.json",

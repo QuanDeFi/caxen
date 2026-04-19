@@ -9,7 +9,7 @@ SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from graph.query import load_graph_view_uncached
+from graph.query import inspect_graph_backend_payload_uncached
 
 
 class RetrievalPipelineIntegrationTest(unittest.TestCase):
@@ -476,7 +476,7 @@ class RetrievalPipelineIntegrationTest(unittest.TestCase):
             expand_payload = json.loads(expand.stdout)
             self.assertEqual(expand_payload["operation"], "neighbors")
 
-            graph_payload = load_graph_view_uncached(graph_root, "yellowstone-vixen")["payload"]
+            graph_payload = inspect_graph_backend_payload_uncached(graph_root, "yellowstone-vixen")["payload"]
             node_kinds = {str(node["kind"]) for node in graph_payload["nodes"]}
             edge_types = {str(edge["type"]) for edge in graph_payload["edges"]}
             self.assertIn("directory", node_kinds)

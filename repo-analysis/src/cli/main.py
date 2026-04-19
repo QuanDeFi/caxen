@@ -57,7 +57,7 @@ from evaluation.harness import benchmark_interactive_commands, export_benchmark_
 from graph.builder import build_graph_artifact
 from graph.store import write_graph_database
 from search.indexer import build_search_index
-from summaries.builder import build_summary_artifacts, sync_summary_state, write_summary_artifacts
+from summaries.builder import build_summary_artifacts, sync_summary_state
 from symbols.indexer import build_symbol_index, current_rss_mb
 from symbols.persistence import update_lmdb_artifact_metadata, write_metadata_bundle
 
@@ -820,7 +820,6 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
             graph_root,
             progress_callback=progress_callback,
         )
-        write_summary_artifacts(summary_root, repo_name, payload)
         emit_build_progress(
             progress_path,
             {
