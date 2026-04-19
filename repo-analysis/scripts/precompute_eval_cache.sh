@@ -9,6 +9,5 @@ exec "$PYTHON_BIN" "$SCRIPT_DIR/../src/cli/main.py" export-benchmark-prompts \
   --search-root "$SCRIPT_DIR/../data/search" \
   --graph-root "$SCRIPT_DIR/../data/graph" \
   --parsed-root "$SCRIPT_DIR/../data/parsed" \
-  --summary-root "$SCRIPT_DIR/../data/summaries" \
   --eval-root "$SCRIPT_DIR/../data/eval" \
   "$@"
