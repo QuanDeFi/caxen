@@ -873,9 +873,100 @@ def handle_build_summaries(args: argparse.Namespace) -> int:
 def handle_build_embeddings(args: argparse.Namespace) -> int:
     search_root = Path(args.search_root).resolve()
     repo_names = args.repo or sorted(ADAPTERS)
+
     for repo_name in repo_names:
-        payload = build_embedding_index(search_root, repo_name, provider=args.provider, model=args.model)
-        print(f"Wrote embeddings for {repo_name} to {search_root / repo_name} ({payload['summary']['documents']} documents)")
+        progress_path = search_root / repo_name / "embedding_build_progress.json"
+        started = time.perf_counter()
+
+        emit_build_progress(
+            progress_path,
+            {
+                "event": "build_started",
+                "repo": repo_name,
+                "provider": args.provider,
+                "model": args.model,
+                "elapsed_ms": 0.0,
+            },
+            log_message=(
+                f"[build-embeddings] repo={repo_name} status=started "
+                f"provider={args.provider} model={args.model or '<default>'}"
+            ),
+        )
+
+        def progress_callback(event: Dict[str, object]) -> None:
+            event_name = str(event.get("event") or "")
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+            payload = {
+                **event,
+                "elapsed_ms": elapsed_ms,
+            }
+
+            message = (
+                f"[build-embeddings] repo={repo_name} stage={event_name} "
+                f"elapsed_ms={elapsed_ms:.1f}"
+            )
+
+            if payload.get("provider") is not None:
+                message += f" provider={payload.get('provider')}"
+            if payload.get("model") is not None:
+                message += f" model={payload.get('model')}"
+
+            processed_docs = payload.get("processed_docs")
+            total_docs = payload.get("total_docs")
+            if processed_docs is not None:
+                if total_docs is not None:
+                    message += f" processed_docs={processed_docs}/{total_docs}"
+                else:
+                    message += f" processed_docs={processed_docs}"
+
+            for key in (
+                "documents",
+                "batch_docs",
+                "batch_index",
+                "batches",
+                "nonzero_dimensions",
+                "vector_format",
+            ):
+                if payload.get(key) is not None:
+                    message += f" {key}={payload.get(key)}"
+
+            emit_build_progress(progress_path, payload, log_message=message)
+
+        payload = build_embedding_index(
+            search_root,
+            repo_name,
+            provider=args.provider,
+            model=args.model,
+            progress_callback=progress_callback,
+        )
+
+        completed_elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
+        emit_build_progress(
+            progress_path,
+            {
+                "event": "repo_completed",
+                "repo": repo_name,
+                "provider": payload["provider"],
+                "model": payload["model"],
+                "documents": payload["summary"]["documents"],
+                "nonzero_dimensions": payload["summary"]["nonzero_dimensions"],
+                "vector_format": payload["vector_format"],
+                "elapsed_ms": completed_elapsed_ms,
+            },
+            log_message=(
+                f"[build-embeddings] repo={repo_name} status=completed "
+                f"elapsed_ms={completed_elapsed_ms:.1f} "
+                f"documents={payload['summary']['documents']} "
+                f"vector_format={payload['vector_format']}"
+            ),
+        )
+
+        print(
+            f"Wrote embeddings for {repo_name} to {search_root / repo_name} "
+            f"({payload['summary']['documents']} documents)",
+            flush=True,
+        )
+
     return 0
 
 

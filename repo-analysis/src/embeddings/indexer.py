@@ -5,7 +5,7 @@ import json
 import math
 from collections import Counter
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence
+from typing import Callable, Dict, Iterable, Iterator, List, Sequence
 
 from common.native_tool import list_bm25_docs
 from common.text import tokenize
@@ -31,25 +31,70 @@ KIND_PRIORITY = {
 }
 
 
+ProgressCallback = Callable[[Dict[str, object]], None]
+
+
 def build_embedding_index(
     search_root: Path,
     repo_name: str,
     *,
     provider: str | None = None,
     model: str | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> Dict[str, object]:
-    repo_search_root = search_root / repo_name
-    documents = load_search_documents(search_root, repo_name)
-    if not documents:
-        raise FileNotFoundError(f"Missing Tantivy search documents for {repo_name}: {repo_search_root / 'tantivy'}")
+    started_at = timestamp_now()
+
+    def emit(event: str, **extra: object) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                "event": event,
+                "repo": repo_name,
+                **extra,
+            }
+        )
+
     provider_config = resolve_embedding_provider(provider, model)
     provider_name = str(provider_config["provider"])
     model_name = str(provider_config["model"])
 
+    emit(
+        "build_started",
+        provider=provider_name,
+        model=model_name,
+        started_at=started_at,
+    )
+
+    repo_search_root = search_root / repo_name
+    tantivy_dir = repo_search_root / "tantivy"
+    if not tantivy_dir.exists():
+        raise FileNotFoundError(f"Missing Tantivy search documents for {repo_name}: {tantivy_dir}")
+
     if provider_name == "openai":
-        payload = build_openai_embedding_payload(repo_name, documents, model_name)
+        payload = build_openai_embedding_payload(
+            search_root,
+            repo_name,
+            model_name,
+            progress_callback=progress_callback,
+        )
     else:
-        payload = build_hashing_embedding_payload(repo_name, documents, model_name)
+        payload = build_hashing_embedding_payload(
+            search_root,
+            repo_name,
+            model_name,
+            progress_callback=progress_callback,
+        )
+
+    if not payload["documents"]:
+        raise FileNotFoundError(f"Missing Tantivy search documents for {repo_name}: {tantivy_dir}")
+
+    emit(
+        "writing_outputs",
+        provider=payload["provider"],
+        model=payload["model"],
+        documents=payload["summary"]["documents"],
+    )
 
     repo_root = search_root / repo_name
     repo_root.mkdir(parents=True, exist_ok=True)
@@ -74,35 +119,117 @@ def build_embedding_index(
             sort_keys=False,
         )
         handle.write("\n")
+
+    emit(
+        "build_completed",
+        provider=payload["provider"],
+        model=payload["model"],
+        documents=payload["summary"]["documents"],
+        nonzero_dimensions=payload["summary"]["nonzero_dimensions"],
+        vector_format=payload["vector_format"],
+    )
     return payload
 
 
 def build_hashing_embedding_payload(
+    search_root: Path,
     repo_name: str,
-    documents: Sequence[Dict[str, object]],
     model_name: str,
+    *,
+    progress_callback: ProgressCallback | None = None,
 ) -> Dict[str, object]:
-    document_tokens = [tokenize(document["content"]) for document in documents]
-    document_frequency = compute_document_frequency(document_tokens)
+    def emit(event: str, **extra: object) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                "event": event,
+                "repo": repo_name,
+                **extra,
+            }
+        )
+
+    emit("hashing_scan_started", provider="hashing", model=model_name or DEFAULT_HASHING_MODEL)
+
+    document_frequency: Counter[str] = Counter()
+    document_count = 0
+    scan_batches = 0
+    total_docs_hint: int | None = None
+
+    for batch in iter_search_documents(search_root, repo_name, batch_size=LIST_DOCS_BATCH_SIZE):
+        scan_batches += 1
+        if batch:
+            first_item_total = batch[0].get("_total_docs")
+            if first_item_total is not None:
+                total_docs_hint = int(first_item_total)
+
+        for document in batch:
+            tokens = tokenize(str(document["content"]))
+            document_count += 1
+            for token in set(tokens):
+                document_frequency[token] += 1
+
+        emit(
+            "hashing_scan_progress",
+            provider="hashing",
+            model=model_name or DEFAULT_HASHING_MODEL,
+            batch_index=scan_batches,
+            batch_docs=len(batch),
+            processed_docs=document_count,
+            total_docs=total_docs_hint,
+        )
+
+    emit(
+        "hashing_scan_completed",
+        provider="hashing",
+        model=model_name or DEFAULT_HASHING_MODEL,
+        documents=document_count,
+        batches=scan_batches,
+    )
 
     embedded_documents = []
-    for document, tokens in zip(documents, document_tokens):
-        raw_vector = embed_tokens(tokens, document_frequency, len(documents))
-        norm = vector_norm(raw_vector)
-        vector = normalize_sparse_vector(raw_vector, norm)
-        embedded_documents.append(
-            {
-                "doc_id": document["doc_id"],
-                "kind": document["kind"],
-                "path": document["path"],
-                "name": document["name"],
-                "qualified_name": document["qualified_name"],
-                "symbol_id": document["symbol_id"],
-                "title": document["title"],
-                "preview": document["preview"],
-                "norm": 1.0 if vector else 0.0,
-                "vector": {str(index): round(value, 8) for index, value in sorted(vector.items()) if value},
-            }
+    nonzero_dimensions = 0
+    processed_docs = 0
+    embed_batches = 0
+
+    emit(
+        "hashing_embed_started",
+        provider="hashing",
+        model=model_name or DEFAULT_HASHING_MODEL,
+        total_docs=document_count,
+    )
+
+    for batch in iter_search_documents(search_root, repo_name, batch_size=LIST_DOCS_BATCH_SIZE):
+        embed_batches += 1
+        for document in batch:
+            tokens = tokenize(str(document["content"]))
+            raw_vector = embed_tokens(tokens, document_frequency, document_count)
+            norm = vector_norm(raw_vector)
+            vector = normalize_sparse_vector(raw_vector, norm)
+            nonzero_dimensions += len(vector)
+            embedded_documents.append(
+                {
+                    "doc_id": document["doc_id"],
+                    "kind": document["kind"],
+                    "path": document["path"],
+                    "name": document["name"],
+                    "qualified_name": document["qualified_name"],
+                    "symbol_id": document["symbol_id"],
+                    "title": document["title"],
+                    "preview": document["preview"],
+                    "norm": 1.0 if vector else 0.0,
+                    "vector": {str(index): round(value, 8) for index, value in sorted(vector.items()) if value},
+                }
+            )
+            processed_docs += 1
+        emit(
+            "hashing_embed_progress",
+            provider="hashing",
+            model=model_name or DEFAULT_HASHING_MODEL,
+            batch_index=embed_batches,
+            batch_docs=len(batch),
+            processed_docs=processed_docs,
+            total_docs=document_count,
         )
 
     return {
@@ -117,36 +244,65 @@ def build_hashing_embedding_payload(
         "documents": embedded_documents,
         "summary": {
             "documents": len(embedded_documents),
-            "nonzero_dimensions": sum(len(document["vector"]) for document in embedded_documents),
+            "nonzero_dimensions": nonzero_dimensions,
         },
     }
 
 
 def build_openai_embedding_payload(
+    search_root: Path,
     repo_name: str,
-    documents: Sequence[Dict[str, object]],
     model_name: str,
+    *,
+    progress_callback: ProgressCallback | None = None,
 ) -> Dict[str, object]:
     if not openai_embeddings_available():
         raise RuntimeError("OpenAI embedding provider requested but OPENAI_API_KEY is not set")
 
+    def emit(event: str, **extra: object) -> None:
+        if progress_callback is None:
+            return
+        progress_callback(
+            {
+                "event": event,
+                "repo": repo_name,
+                **extra,
+            }
+        )
+
+    emit("openai_embed_started", provider="openai", model=model_name)
+
     embedded_documents = []
-    for batch in batched(documents, BATCH_SIZE):
-        vectors = embed_with_openai([str(document["content"] or "") for document in batch], model_name)
-        for document, vector in zip(batch, vectors):
-            embedded_documents.append(
-                {
-                    "doc_id": document["doc_id"],
-                    "kind": document["kind"],
-                    "path": document["path"],
-                    "name": document["name"],
-                    "qualified_name": document["qualified_name"],
-                    "symbol_id": document["symbol_id"],
-                    "title": document["title"],
-                    "preview": document["preview"],
-                    "norm": 1.0 if vector else 0.0,
-                    "vector": [round(float(value), 8) for value in vector],
-                }
+    processed_docs = 0
+    batch_index = 0
+
+    for search_batch in iter_search_documents(search_root, repo_name, batch_size=LIST_DOCS_BATCH_SIZE):
+        for batch in batched(search_batch, BATCH_SIZE):
+            batch_index += 1
+            vectors = embed_with_openai([str(document["content"] or "") for document in batch], model_name)
+            for document, vector in zip(batch, vectors):
+                embedded_documents.append(
+                    {
+                        "doc_id": document["doc_id"],
+                        "kind": document["kind"],
+                        "path": document["path"],
+                        "name": document["name"],
+                        "qualified_name": document["qualified_name"],
+                        "symbol_id": document["symbol_id"],
+                        "title": document["title"],
+                        "preview": document["preview"],
+                        "norm": 1.0 if vector else 0.0,
+                        "vector": [round(float(value), 8) for value in vector],
+                    }
+                )
+            processed_docs += len(batch)
+            emit(
+                "openai_embed_progress",
+                provider="openai",
+                model=model_name,
+                batch_index=batch_index,
+                batch_docs=len(batch),
+                processed_docs=processed_docs,
             )
 
     dimensions = len(embedded_documents[0]["vector"]) if embedded_documents else 0
@@ -256,46 +412,57 @@ def query_embedding_index(search_root: Path, repo_name: str, query: str, *, limi
     )[:limit]
 
 
-def load_search_documents(search_root: Path, repo_name: str) -> List[Dict[str, object]]:
+def iter_search_documents(
+    search_root: Path,
+    repo_name: str,
+    *,
+    batch_size: int = LIST_DOCS_BATCH_SIZE,
+) -> Iterator[List[Dict[str, object]]]:
     tantivy_dir = search_root / repo_name / "tantivy"
     if not tantivy_dir.exists():
-        return []
+        return
 
-    documents: List[Dict[str, object]] = []
     offset = 0
-
     while True:
         payload = list_bm25_docs(
             tantivy_dir,
             offset=offset,
-            limit=LIST_DOCS_BATCH_SIZE,
+            limit=batch_size,
             timeout=300,
         )
         batch = payload.get("results", [])
         if not batch:
-            break
+            return
 
-        for item in batch:
-            documents.append(
-                {
-                    "doc_id": item["doc_id"],
-                    "kind": item["kind"],
-                    "path": item.get("path"),
-                    "name": item.get("name"),
-                    "qualified_name": item.get("qualified_name"),
-                    "symbol_id": item.get("symbol_id"),
-                    "title": item.get("title"),
-                    "preview": item.get("preview"),
-                    "content": item.get("searchable") or "",
-                }
-            )
+        total_docs = payload.get("total_docs")
+        normalized_batch = [normalize_search_document(item, total_docs=total_docs) for item in batch]
+        yield normalized_batch
 
         next_offset = payload.get("next_offset")
         if next_offset is None:
-            break
+            return
         offset = int(next_offset)
 
+def load_search_documents(search_root: Path, repo_name: str) -> List[Dict[str, object]]:
+    documents: List[Dict[str, object]] = []
+    for batch in iter_search_documents(search_root, repo_name):
+        documents.extend(batch)
     return documents
+
+
+def normalize_search_document(item: Dict[str, object], *, total_docs: int | None = None) -> Dict[str, object]:
+    return {
+        "doc_id": item["doc_id"],
+        "kind": item["kind"],
+        "path": item.get("path"),
+        "name": item.get("name"),
+        "qualified_name": item.get("qualified_name"),
+        "symbol_id": item.get("symbol_id"),
+        "title": item.get("title"),
+        "preview": item.get("preview"),
+        "content": item.get("searchable") or "",
+        "_total_docs": total_docs,
+    }
 
 
 def compute_document_frequency(document_tokens: Sequence[Sequence[str]]) -> Counter[str]:

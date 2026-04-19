@@ -328,6 +328,8 @@ fn list_bm25_docs(index_dir: &Path, offset: usize, limit: usize) -> Result<()> {
     let reader = index.reader()?;
     let searcher = reader.searcher();
 
+    let total_docs = searcher.num_docs();
+
     let target = offset.saturating_add(limit);
     let mut seen = 0usize;
     let mut results: Vec<StoredSearchDocument> = Vec::with_capacity(limit);
@@ -375,6 +377,7 @@ fn list_bm25_docs(index_dir: &Path, offset: usize, limit: usize) -> Result<()> {
 
     print_json(json!({
         "results": results,
+        "total_docs": total_docs,
         "next_offset": if has_more { Some(offset.saturating_add(results.len())) } else { None },
     }))
 }

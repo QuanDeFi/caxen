@@ -185,6 +185,7 @@ def list_bm25_docs(
     )
     return {
         "results": list(payload.get("results", [])),
+        "total_docs": int(payload.get("total_docs") or 0),
         "next_offset": payload.get("next_offset"),
     }
 
