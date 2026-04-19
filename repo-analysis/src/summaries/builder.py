@@ -9,11 +9,7 @@ from typing import Callable, Dict, Iterable, List, Tuple
 from graph.query import inspect_graph_backend_payload_uncached
 from graph.store import write_graph_database
 from symbols.indexer import stable_id, timestamp_now
-from symbols.persistence import (
-    load_summary_bundle_from_metadata,
-    load_symbol_index,
-    write_metadata_bundle,
-)
+from symbols.persistence import load_symbol_index, write_metadata_bundle
 
 
 SCHEMA_VERSION = "0.2.0"
@@ -104,16 +100,6 @@ def build_summary_artifacts(
         symbols=len(symbol_summaries),
     )
     return payload
-
-
-def load_summary_artifacts(summary_root: Path, repo_name: str) -> Dict[str, object]:
-    parsed_root = summary_root.parent / "parsed"
-    payload = load_summary_bundle_from_metadata(parsed_root, repo_name)
-    if payload is None:
-        raise FileNotFoundError(f"Missing summary metadata for repo '{repo_name}' under {parsed_root / repo_name}")
-    return payload
-
-
 def build_project_summary(
     repo_name: str,
     manifest: Dict[str, object],

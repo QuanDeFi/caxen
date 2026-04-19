@@ -45,9 +45,9 @@ from graph.store import write_graph_database
 from retrieval.engine import retrieve_context
 from rerank.fusion import rerank_candidates
 from search.indexer import build_search_index, search_documents
-from summaries.builder import build_summary_artifacts, load_summary_artifacts, sync_summary_state
+from summaries.builder import build_summary_artifacts, sync_summary_state
 from symbols.indexer import build_symbol_index
-from symbols.persistence import load_symbol_index, write_metadata_bundle
+from symbols.persistence import load_summary_bundle_from_metadata, load_symbol_index, write_metadata_bundle
 
 
 def seed_demo_workspace(root: Path) -> dict[str, Path]:
@@ -490,7 +490,7 @@ class SearchAndSummaryTest(unittest.TestCase):
             directory_summary = summarize_path(paths["parsed_root"], "demo", "src")
             self.assertEqual(directory_summary["kind"], "directory")
             self.assertEqual(directory_summary["summary"]["path"], "src")
-            packages = load_summary_artifacts(paths["summary_root"], "demo")["packages"]
+            packages = load_summary_bundle_from_metadata(paths["parsed_root"], "demo")["packages"]
             self.assertTrue(any(item["package_name"] == "demo-crate" for item in packages))
 
     def test_benchmark_harness_reports_answer_quality(self) -> None:

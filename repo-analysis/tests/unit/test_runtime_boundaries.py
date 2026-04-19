@@ -16,7 +16,6 @@ FORBIDDEN_SNIPPETS = (
     "from search.indexer import",
     "load_symbol_index(",
     "load_symbol_by_id(",
-    "load_summary_artifacts(",
     "inspect_graph_backend_payload_uncached(",
     "documents.jsonl",
     "search_manifest.json",
