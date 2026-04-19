@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, QueryParser, TermQuery};
 use tantivy::schema::{Document, Field, IndexRecordOption, Schema, STORED, STRING, TEXT};
-use tantivy::{doc, Index, Term};
+use tantivy::{doc, DocAddress, Index, Term};
 use tree_sitter::{Node, Parser as TsParser};
 
 #[derive(Parser)]
@@ -46,6 +46,14 @@ enum Commands {
         path_prefix: Option<String>,
         #[arg(long)]
         symbol_id: Option<String>,
+    },
+    ListBm25Docs {
+        #[arg(long)]
+        index_dir: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 10_000)]
+        limit: usize,
     },
 }
 
@@ -100,6 +108,21 @@ struct SymbolState {
     signature: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct StoredSearchDocument {
+    doc_id: String,
+    kind: String,
+    repo: String,
+    path: Option<String>,
+    name: Option<String>,
+    qualified_name: Option<String>,
+    symbol_id: Option<String>,
+    title: String,
+    preview: String,
+    searchable: String,
+    metadata: Value,
+}
+
 struct SearchFields {
     searchable: Field,
     kind: Field,
@@ -143,6 +166,11 @@ fn main() -> Result<()> {
             path_prefix.as_deref(),
             symbol_id.as_deref(),
         ),
+        Commands::ListBm25Docs {
+            index_dir,
+            offset,
+            limit,
+        } => list_bm25_docs(&index_dir, offset, limit),
     }
 }
 
@@ -293,6 +321,67 @@ fn query_bm25(
     }))
 }
 
+fn list_bm25_docs(index_dir: &Path, offset: usize, limit: usize) -> Result<()> {
+    let index = Index::open_in_dir(index_dir)?;
+    let schema = index.schema();
+    let fields = build_fields(&schema);
+    let reader = index.reader()?;
+    let searcher = reader.searcher();
+
+    let mut total_docs = 0usize;
+    let mut skipped = 0usize;
+    let mut results: Vec<StoredSearchDocument> = Vec::with_capacity(limit);
+
+    for (segment_ord, segment_reader) in searcher.segment_readers().iter().enumerate() {
+        let alive_bitset = segment_reader.alive_bitset();
+        for doc_id in 0..segment_reader.max_doc() {
+            let is_alive = alive_bitset
+                .as_ref()
+                .map(|bitset| bitset.is_alive(doc_id))
+                .unwrap_or(true);
+            if !is_alive {
+                continue;
+            }
+
+            total_docs += 1;
+
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+
+            if results.len() >= limit {
+                continue;
+            }
+
+            let address = DocAddress::new(segment_ord as u32, doc_id);
+            let document: Document = searcher.doc(address)?;
+            let metadata_json = get_first_text(&document, fields.metadata_json);
+
+            results.push(StoredSearchDocument {
+                doc_id: get_first_text(&document, fields.doc_id),
+                kind: get_first_text(&document, fields.kind),
+                repo: get_first_text(&document, fields.repo),
+                path: empty_to_none(get_first_text(&document, fields.path)),
+                name: empty_to_none(get_first_text(&document, fields.name)),
+                qualified_name: empty_to_none(get_first_text(&document, fields.qualified_name)),
+                symbol_id: empty_to_none(get_first_text(&document, fields.symbol_id)),
+                title: get_first_text(&document, fields.title),
+                preview: get_first_text(&document, fields.preview),
+                searchable: get_first_text(&document, fields.searchable),
+                metadata: serde_json::from_str::<Value>(&metadata_json).unwrap_or_else(|_| json!({})),
+            });
+        }
+    }
+
+    let consumed = offset.saturating_add(results.len());
+    print_json(json!({
+        "results": results,
+        "total_docs": total_docs,
+        "next_offset": if consumed < total_docs { Some(consumed) } else { None },
+    }))
+}
+
 fn build_schema() -> Schema {
     let mut builder = Schema::builder();
     builder.add_text_field("doc_id", STRING | STORED);
@@ -357,6 +446,14 @@ fn get_first_text(document: &Document, field: Field) -> String {
         .and_then(|value| value.as_text())
         .unwrap_or_default()
         .to_string()
+}
+
+fn empty_to_none(value: String) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn null_if_empty(value: String) -> Value {

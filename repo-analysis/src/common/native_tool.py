@@ -164,6 +164,32 @@ def query_bm25_index(
     return list(payload.get("results", []))
 
 
+def list_bm25_docs(
+    index_dir: Path,
+    *,
+    offset: int = 0,
+    limit: int = 10_000,
+    timeout: int = 300,
+) -> Dict[str, object]:
+    payload = run_native_json(
+        [
+            "list-bm25-docs",
+            "--index-dir",
+            str(index_dir),
+            "--offset",
+            str(offset),
+            "--limit",
+            str(limit),
+        ],
+        timeout=timeout,
+    )
+    return {
+        "results": list(payload.get("results", [])),
+        "total_docs": int(payload.get("total_docs") or 0),
+        "next_offset": payload.get("next_offset"),
+    }
+
+
 def persisted_failure_reason() -> str | None:
     if not NATIVE_FAILURE_MARKER.exists():
         return None

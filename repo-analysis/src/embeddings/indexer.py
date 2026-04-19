@@ -7,7 +7,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence
 
-from common.native_tool import query_bm25_index
+from common.native_tool import list_bm25_docs
 from common.text import tokenize
 from embeddings.providers import (
     DEFAULT_HASHING_MODEL,
@@ -21,6 +21,7 @@ from symbols.indexer import timestamp_now
 SCHEMA_VERSION = "0.2.0"
 DIMENSIONS = 256
 BATCH_SIZE = 32
+LIST_DOCS_BATCH_SIZE = 10_000
 KIND_PRIORITY = {
     "symbol": 0.2,
     "statement": 0.15,
@@ -259,22 +260,41 @@ def load_search_documents(search_root: Path, repo_name: str) -> List[Dict[str, o
     tantivy_dir = search_root / repo_name / "tantivy"
     if not tantivy_dir.exists():
         return []
-    results = query_bm25_index(tantivy_dir, "", limit=1_000_000)
-    documents = []
-    for payload in results:
-        documents.append(
-            {
-                "doc_id": payload["doc_id"],
-                "kind": payload["kind"],
-                "path": payload.get("path"),
-                "name": payload.get("name"),
-                "qualified_name": payload.get("qualified_name"),
-                "symbol_id": payload.get("symbol_id"),
-                "title": payload.get("title"),
-                "preview": payload.get("preview"),
-                "content": payload.get("searchable") or "",
-            }
+
+    documents: List[Dict[str, object]] = []
+    offset = 0
+
+    while True:
+        payload = list_bm25_docs(
+            tantivy_dir,
+            offset=offset,
+            limit=LIST_DOCS_BATCH_SIZE,
+            timeout=300,
         )
+        batch = payload.get("results", [])
+        if not batch:
+            break
+
+        for item in batch:
+            documents.append(
+                {
+                    "doc_id": item["doc_id"],
+                    "kind": item["kind"],
+                    "path": item.get("path"),
+                    "name": item.get("name"),
+                    "qualified_name": item.get("qualified_name"),
+                    "symbol_id": item.get("symbol_id"),
+                    "title": item.get("title"),
+                    "preview": item.get("preview"),
+                    "content": item.get("searchable") or "",
+                }
+            )
+
+        next_offset = payload.get("next_offset")
+        if next_offset is None:
+            break
+        offset = int(next_offset)
+
     return documents
 
 
