@@ -170,13 +170,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_eval.add_argument("--graph-root", required=True)
     run_eval.add_argument("--parsed-root", required=True)
     run_eval.add_argument("--eval-root", required=True)
-    run_eval.add_argument("--summary-root")
     run_eval.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
     run_eval.add_argument("--mode", action="append")
     run_eval.add_argument("--limit", type=int, default=5)
 
     repo_overview_cmd = subparsers.add_parser("repo-overview", help="Show the repo-level summary.")
-    repo_overview_cmd.add_argument("--summary-root", required=True)
+    repo_overview_cmd.add_argument("--parsed-root", required=True)
     repo_overview_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
 
     find_symbol_cmd = subparsers.add_parser("find-symbol", help="Search indexed symbols.")
@@ -240,7 +239,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     compare_repos_cmd = subparsers.add_parser("compare-repos", help="Compare retrieval context across repos.")
     compare_repos_cmd.add_argument("--search-root", required=True)
-    compare_repos_cmd.add_argument("--summary-root", required=True)
     compare_repos_cmd.add_argument("--graph-root", required=True)
     compare_repos_cmd.add_argument("--parsed-root", required=True)
     compare_repos_cmd.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
@@ -268,13 +266,12 @@ def build_parser() -> argparse.ArgumentParser:
     find_runtime_handlers_cmd.add_argument("--limit", type=int, default=10)
 
     summarize_path_cmd = subparsers.add_parser("summarize-path", help="Summarize a file or directory path.")
-    summarize_path_cmd.add_argument("--summary-root", required=True)
+    summarize_path_cmd.add_argument("--parsed-root", required=True)
     summarize_path_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     summarize_path_cmd.add_argument("path")
 
     prepare_context_cmd = subparsers.add_parser("prepare-context", help="Prepare a compact retrieval context for a task.")
     prepare_context_cmd.add_argument("--search-root", required=True)
-    prepare_context_cmd.add_argument("--summary-root", required=True)
     prepare_context_cmd.add_argument("--graph-root", required=True)
     prepare_context_cmd.add_argument("--parsed-root", required=True)
     prepare_context_cmd.add_argument("--repo", choices=sorted(ADAPTERS))
@@ -376,7 +373,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     get_summary_cmd = subparsers.add_parser("get-summary", help="Resolve a summary payload for a graph or summary node.")
     get_summary_cmd.add_argument("--search-root", required=True)
-    get_summary_cmd.add_argument("--summary-root", required=True)
     get_summary_cmd.add_argument("--graph-root", required=True)
     get_summary_cmd.add_argument("--parsed-root", required=True)
     get_summary_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
@@ -396,7 +392,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     get_enclosing_context_cmd = subparsers.add_parser("get-enclosing-context", help="Return enclosing summary and statement context for a symbol.")
     get_enclosing_context_cmd.add_argument("--search-root", required=True)
-    get_enclosing_context_cmd.add_argument("--summary-root", required=True)
     get_enclosing_context_cmd.add_argument("--graph-root", required=True)
     get_enclosing_context_cmd.add_argument("--parsed-root", required=True)
     get_enclosing_context_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
@@ -418,14 +413,12 @@ def build_parser() -> argparse.ArgumentParser:
     plan_query_cmd.add_argument("--search-root", required=True)
     plan_query_cmd.add_argument("--graph-root", required=True)
     plan_query_cmd.add_argument("--parsed-root", required=True)
-    plan_query_cmd.add_argument("--summary-root")
     plan_query_cmd.add_argument("--repo", choices=sorted(ADAPTERS))
     plan_query_cmd.add_argument("task")
     plan_query_cmd.add_argument("--limit", type=int, default=8)
 
     prepare_bundle_cmd = subparsers.add_parser("prepare-answer-bundle", help="Prepare an answer bundle for an external LLM consumer.")
     prepare_bundle_cmd.add_argument("--search-root", required=True)
-    prepare_bundle_cmd.add_argument("--summary-root", required=True)
     prepare_bundle_cmd.add_argument("--graph-root", required=True)
     prepare_bundle_cmd.add_argument("--parsed-root", required=True)
     prepare_bundle_cmd.add_argument("--repo", choices=sorted(ADAPTERS))
@@ -435,7 +428,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     retrieve_iterative_cmd = subparsers.add_parser("retrieve-iterative", help="Refine retrieval using a prior answer bundle and new hints.")
     retrieve_iterative_cmd.add_argument("--search-root", required=True)
-    retrieve_iterative_cmd.add_argument("--summary-root", required=True)
     retrieve_iterative_cmd.add_argument("--graph-root", required=True)
     retrieve_iterative_cmd.add_argument("--parsed-root", required=True)
     retrieve_iterative_cmd.add_argument("--repo", choices=sorted(ADAPTERS))
@@ -448,7 +440,6 @@ def build_parser() -> argparse.ArgumentParser:
     export_prompts_cmd.add_argument("--search-root", required=True)
     export_prompts_cmd.add_argument("--graph-root", required=True)
     export_prompts_cmd.add_argument("--parsed-root", required=True)
-    export_prompts_cmd.add_argument("--summary-root", required=True)
     export_prompts_cmd.add_argument("--eval-root", required=True)
     export_prompts_cmd.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
     export_prompts_cmd.add_argument("--limit", type=int, default=8)
@@ -457,7 +448,6 @@ def build_parser() -> argparse.ArgumentParser:
     score_bundles_cmd.add_argument("--search-root", required=True)
     score_bundles_cmd.add_argument("--graph-root", required=True)
     score_bundles_cmd.add_argument("--parsed-root", required=True)
-    score_bundles_cmd.add_argument("--summary-root", required=True)
     score_bundles_cmd.add_argument("--eval-root", required=True)
     score_bundles_cmd.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
     score_bundles_cmd.add_argument("--limit", type=int, default=8)
@@ -470,7 +460,6 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_interactive_cmd.add_argument("--search-root", required=True)
     benchmark_interactive_cmd.add_argument("--graph-root", required=True)
     benchmark_interactive_cmd.add_argument("--parsed-root", required=True)
-    benchmark_interactive_cmd.add_argument("--summary-root", required=True)
     benchmark_interactive_cmd.add_argument("--eval-root", required=True)
     benchmark_interactive_cmd.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
     benchmark_interactive_cmd.add_argument("--limit", type=int, default=5)
@@ -931,7 +920,6 @@ def handle_run_benchmarks(args: argparse.Namespace) -> int:
         Path(args.graph_root).resolve(),
         Path(args.parsed_root).resolve(),
         eval_root,
-        summary_root=Path(args.summary_root).resolve() if args.summary_root else None,
         repos=tuple(args.repo or ()),
         limit=args.limit,
         modes=tuple(args.mode or ()),
@@ -1005,7 +993,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "run-benchmarks":
         return handle_run_benchmarks(args)
     if args.command == "repo-overview":
-        return print_json(repo_overview(Path(args.summary_root).resolve(), args.repo))
+        return print_json(repo_overview(Path(args.parsed_root).resolve(), args.repo))
     if args.command == "find-symbol":
         return print_json(find_symbol(Path(args.search_root).resolve(), args.repo, args.query, limit=args.limit))
     if args.command == "find-file":
@@ -1078,7 +1066,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         return print_json(
             compare_repos(
                 Path(args.search_root).resolve(),
-                Path(args.summary_root).resolve(),
                 Path(args.graph_root).resolve(),
                 Path(args.parsed_root).resolve(),
                 args.query,
@@ -1095,12 +1082,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.command == "find-runtime-handlers":
         return print_json(find_runtime_handlers(Path(args.search_root).resolve(), args.repo, limit=args.limit))
     if args.command == "summarize-path":
-        return print_json(summarize_path(Path(args.summary_root).resolve(), args.repo, args.path))
+        return print_json(summarize_path(Path(args.parsed_root).resolve(), args.repo, args.path))
     if args.command == "prepare-context":
         return print_json(
             prepare_context(
                 Path(args.search_root).resolve(),
-                Path(args.summary_root).resolve(),
                 Path(args.graph_root).resolve(),
                 Path(args.parsed_root).resolve(),
                 args.task,
@@ -1217,7 +1203,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         return print_json(
             get_summary(
                 Path(args.search_root).resolve(),
-                Path(args.summary_root).resolve(),
                 Path(args.graph_root).resolve(),
                 Path(args.parsed_root).resolve(),
                 args.repo,
@@ -1246,7 +1231,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         return print_json(
             get_enclosing_context(
                 Path(args.search_root).resolve(),
-                Path(args.summary_root).resolve(),
                 Path(args.graph_root).resolve(),
                 Path(args.parsed_root).resolve(),
                 args.repo,
@@ -1276,7 +1260,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 Path(args.parsed_root).resolve(),
                 args.task,
                 repo_name=args.repo,
-                summary_root=Path(args.summary_root).resolve() if args.summary_root else None,
                 limit=args.limit,
             )
         )
@@ -1284,7 +1267,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         return print_json(
             prepare_answer_bundle(
                 Path(args.search_root).resolve(),
-                Path(args.summary_root).resolve(),
                 Path(args.graph_root).resolve(),
                 Path(args.parsed_root).resolve(),
                 args.task,
@@ -1300,7 +1282,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         return print_json(
             retrieve_iterative(
                 Path(args.search_root).resolve(),
-                Path(args.summary_root).resolve(),
                 Path(args.graph_root).resolve(),
                 Path(args.parsed_root).resolve(),
                 args.task,
@@ -1316,7 +1297,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 Path(args.search_root).resolve(),
                 Path(args.graph_root).resolve(),
                 Path(args.parsed_root).resolve(),
-                Path(args.summary_root).resolve(),
                 Path(args.eval_root).resolve(),
                 repos=tuple(args.repo or ()),
                 limit=args.limit,
@@ -1328,7 +1308,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 Path(args.search_root).resolve(),
                 Path(args.graph_root).resolve(),
                 Path(args.parsed_root).resolve(),
-                Path(args.summary_root).resolve(),
                 Path(args.eval_root).resolve(),
                 repos=tuple(args.repo or ()),
                 limit=args.limit,
@@ -1347,7 +1326,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 Path(args.search_root).resolve(),
                 Path(args.graph_root).resolve(),
                 Path(args.parsed_root).resolve(),
-                Path(args.summary_root).resolve(),
                 Path(args.eval_root).resolve(),
                 repos=tuple(args.repo or ()),
                 limit=args.limit,

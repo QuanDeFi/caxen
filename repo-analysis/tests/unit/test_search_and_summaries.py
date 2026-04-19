@@ -275,7 +275,6 @@ class SearchAndSummaryTest(unittest.TestCase):
             metadata_store = get_metadata_store(
                 str(paths["parsed_root"].resolve()),
                 "demo",
-                summary_root=str(paths["summary_root"].resolve()),
                 eval_root=str((Path(tmpdir) / "eval").resolve()),
             )
 
@@ -320,7 +319,6 @@ class SearchAndSummaryTest(unittest.TestCase):
 
             context = get_enclosing_context(
                 paths["search_root"],
-                paths["summary_root"],
                 paths["graph_root"],
                 paths["parsed_root"],
                 "demo",
@@ -408,7 +406,6 @@ class SearchAndSummaryTest(unittest.TestCase):
 
             prepared = prepare_context(
                 paths["search_root"],
-                paths["summary_root"],
                 paths["graph_root"],
                 paths["parsed_root"],
                 "find the helper call path",
@@ -442,7 +439,6 @@ class SearchAndSummaryTest(unittest.TestCase):
             )
             prepare_answer_bundle(
                 paths["search_root"],
-                paths["summary_root"],
                 paths["graph_root"],
                 paths["parsed_root"],
                 "find the helper call path",
@@ -451,7 +447,6 @@ class SearchAndSummaryTest(unittest.TestCase):
             )
             retrieve_iterative(
                 paths["search_root"],
-                paths["summary_root"],
                 paths["graph_root"],
                 paths["parsed_root"],
                 "find the helper call path",
@@ -461,7 +456,6 @@ class SearchAndSummaryTest(unittest.TestCase):
             )
             compare_repos(
                 paths["search_root"],
-                paths["summary_root"],
                 paths["graph_root"],
                 paths["parsed_root"],
                 "find the helper implementation",
@@ -485,15 +479,15 @@ class SearchAndSummaryTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = seed_demo_workspace(Path(tmpdir))
 
-            overview = repo_overview(paths["summary_root"], "demo")
+            overview = repo_overview(paths["parsed_root"], "demo")
             self.assertEqual(overview["repo"], "demo")
             self.assertIn("Rust files", overview["project"]["summary"])
 
-            file_summary = summarize_path(paths["summary_root"], "demo", "src/lib.rs")
+            file_summary = summarize_path(paths["parsed_root"], "demo", "src/lib.rs")
             self.assertEqual(file_summary["kind"], "file")
             self.assertEqual(file_summary["summary"]["path"], "src/lib.rs")
 
-            directory_summary = summarize_path(paths["summary_root"], "demo", "src")
+            directory_summary = summarize_path(paths["parsed_root"], "demo", "src")
             self.assertEqual(directory_summary["kind"], "directory")
             self.assertEqual(directory_summary["summary"]["path"], "src")
             packages = load_summary_artifacts(paths["summary_root"], "demo")["packages"]
@@ -510,7 +504,6 @@ class SearchAndSummaryTest(unittest.TestCase):
                 paths["graph_root"],
                 paths["parsed_root"],
                 eval_root,
-                summary_root=paths["summary_root"],
                 repos=("demo",),
                 modes=("lexical_graph_rerank_summaries",),
                 benchmarks=[
@@ -542,7 +535,6 @@ class SearchAndSummaryTest(unittest.TestCase):
                 paths["search_root"],
                 paths["graph_root"],
                 paths["parsed_root"],
-                paths["summary_root"],
                 eval_root,
                 scenarios=[
                     {
@@ -603,7 +595,6 @@ class SearchAndSummaryTest(unittest.TestCase):
 
             context = get_enclosing_context(
                 paths["search_root"],
-                paths["summary_root"],
                 paths["graph_root"],
                 paths["parsed_root"],
                 "demo",
@@ -656,7 +647,6 @@ class SearchAndSummaryTest(unittest.TestCase):
 
             summary_payload = get_summary(
                 paths["search_root"],
-                paths["summary_root"],
                 paths["graph_root"],
                 paths["parsed_root"],
                 "demo",
@@ -693,14 +683,12 @@ class SearchAndSummaryTest(unittest.TestCase):
                 paths["parsed_root"],
                 "find the helper implementation",
                 repo_name="demo",
-                summary_root=paths["summary_root"],
                 limit=5,
             )
             self.assertEqual(plan_payload["plans"][0]["repo"], "demo")
 
             bundle = prepare_answer_bundle(
                 paths["search_root"],
-                paths["summary_root"],
                 paths["graph_root"],
                 paths["parsed_root"],
                 "find the helper call path",
@@ -713,7 +701,6 @@ class SearchAndSummaryTest(unittest.TestCase):
 
             refined = retrieve_iterative(
                 paths["search_root"],
-                paths["summary_root"],
                 paths["graph_root"],
                 paths["parsed_root"],
                 "find the helper call path",
@@ -746,7 +733,6 @@ class SearchAndSummaryTest(unittest.TestCase):
                 paths["search_root"],
                 paths["graph_root"],
                 paths["parsed_root"],
-                paths["summary_root"],
                 eval_root,
                 repos=("demo",),
                 limit=5,
@@ -759,7 +745,6 @@ class SearchAndSummaryTest(unittest.TestCase):
             metadata_store = get_metadata_store(
                 str(paths["parsed_root"].resolve()),
                 "demo",
-                summary_root=str(paths["summary_root"].resolve()),
                 eval_root=str(eval_root.resolve()),
             )
             cached_case = metadata_store.get_eval_case("demo_answer_bundle", "")
@@ -769,7 +754,6 @@ class SearchAndSummaryTest(unittest.TestCase):
                 paths["search_root"],
                 paths["graph_root"],
                 paths["parsed_root"],
-                paths["summary_root"],
                 eval_root,
                 repos=("demo",),
                 limit=5,
@@ -785,7 +769,6 @@ class SearchAndSummaryTest(unittest.TestCase):
                     paths["search_root"],
                     paths["graph_root"],
                     paths["parsed_root"],
-                    paths["summary_root"],
                     eval_root,
                     repos=("demo",),
                     limit=5,
@@ -797,7 +780,6 @@ class SearchAndSummaryTest(unittest.TestCase):
                     paths["search_root"],
                     paths["graph_root"],
                     paths["parsed_root"],
-                    paths["summary_root"],
                     eval_root,
                     repos=("demo",),
                     limit=5,

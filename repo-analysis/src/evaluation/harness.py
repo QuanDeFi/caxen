@@ -146,7 +146,6 @@ def run_benchmarks(
     parsed_root: Path,
     eval_root: Path,
     *,
-    summary_root: Path | None = None,
     repos: Sequence[str] = (),
     limit: int = 5,
     modes: Sequence[str] = DEFAULT_MODES,
@@ -181,7 +180,7 @@ def run_benchmarks(
     for case in cases:
         for mode in selected_modes:
             emit("case_started", repo=case["repo"], case_name=case["name"], mode=mode, completed_runs=completed_runs)
-            runs.append(run_case(case, mode, search_root, graph_root, parsed_root, summary_root, limit))
+            runs.append(run_case(case, mode, search_root, graph_root, parsed_root, limit))
             completed_runs += 1
             latest = runs[-1]
             emit(
@@ -212,7 +211,6 @@ def benchmark_interactive_commands(
     search_root: Path,
     graph_root: Path,
     parsed_root: Path,
-    summary_root: Path,
     eval_root: Path,
     *,
     repos: Sequence[str] = (),
@@ -273,7 +271,6 @@ def benchmark_interactive_commands(
                 "prepare-answer-bundle",
                 lambda: prepare_answer_bundle_tool(
                     search_root,
-                    summary_root,
                     graph_root,
                     parsed_root,
                     str(scenario["bundle_query"]),
@@ -312,7 +309,6 @@ def export_benchmark_prompts(
     search_root: Path,
     graph_root: Path,
     parsed_root: Path,
-    summary_root: Path,
     eval_root: Path,
     *,
     repos: Sequence[str] = (),
@@ -333,7 +329,6 @@ def export_benchmark_prompts(
             search_root,
             graph_root,
             parsed_root,
-            summary_root,
             case,
             limit=limit,
         )
@@ -364,7 +359,6 @@ def score_answer_bundles(
     search_root: Path,
     graph_root: Path,
     parsed_root: Path,
-    summary_root: Path,
     eval_root: Path,
     *,
     repos: Sequence[str] = (),
@@ -382,7 +376,6 @@ def score_answer_bundles(
             search_root,
             graph_root,
             parsed_root,
-            summary_root,
             case,
             limit=limit,
         )
@@ -472,7 +465,6 @@ def run_case(
     search_root: Path,
     graph_root: Path,
     parsed_root: Path,
-    summary_root: Path | None,
     limit: int,
 ) -> Dict[str, object]:
     started = time.perf_counter()
@@ -490,7 +482,6 @@ def run_case(
             parsed_root,
             case["repo"],
             case["query"],
-            summary_root=summary_root,
             limit=limit,
             use_graph=mode != "lexical_only",
             use_embeddings=mode in {"lexical_graph_vector_rerank", "lexical_graph_vector_rerank_summaries", "selective_on", "selective_off"},
@@ -511,17 +502,15 @@ def run_case(
             exact_hit = True
     answer_quality = grade_answer_quality(case, selected)
     bundle_quality = None
-    if summary_root is not None:
-        bundle = prepare_answer_bundle(
-            search_root,
-            summary_root,
-            graph_root,
-            parsed_root,
-            case["query"],
-            repo_name=case["repo"],
-            limit=limit,
-        )
-        bundle_quality = score_bundle(case, bundle)
+    bundle = prepare_answer_bundle(
+        search_root,
+        graph_root,
+        parsed_root,
+        case["query"],
+        repo_name=case["repo"],
+        limit=limit,
+    )
+    bundle_quality = score_bundle(case, bundle)
 
     return {
         "name": case["name"],
@@ -696,7 +685,6 @@ def load_or_build_cached_case(
     search_root: Path,
     graph_root: Path,
     parsed_root: Path,
-    summary_root: Path,
     case: Dict[str, object],
     *,
     limit: int,
@@ -707,14 +695,12 @@ def load_or_build_cached_case(
         search_root=search_root,
         graph_root=graph_root,
         parsed_root=parsed_root,
-        summary_root=summary_root,
     )
     cache_fingerprint = compute_case_cache_fingerprint(case, artifact_fingerprint, limit=limit)
 
     metadata_store = get_metadata_store(
         str(parsed_root.resolve()),
         repo_name,
-        summary_root=str(summary_root.resolve()),
         eval_root=str(cache_path.parent.resolve()),
     )
     cached = metadata_store.get_eval_case(str(case["name"]), cache_fingerprint)
@@ -728,7 +714,6 @@ def load_or_build_cached_case(
 
     bundle = prepare_answer_bundle(
         search_root,
-        summary_root,
         graph_root,
         parsed_root,
         str(case["query"]),
@@ -781,14 +766,12 @@ def compute_repo_artifact_fingerprint(
     search_root: Path,
     graph_root: Path,
     parsed_root: Path,
-    summary_root: Path,
 ) -> str:
     search_backend = get_search_backend(str(search_root.resolve()), repo_name)
     graph_backend = get_graph_backend(str(graph_root.resolve()), repo_name)
     metadata_store = get_metadata_store(
         str(parsed_root.resolve()),
         repo_name,
-        summary_root=str(summary_root.resolve()),
     )
     snapshot = {
         "search": search_backend.artifact_fingerprint(),

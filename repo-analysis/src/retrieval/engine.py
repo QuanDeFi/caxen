@@ -45,7 +45,6 @@ def retrieve_context(
     repo_name: str,
     query: str,
     *,
-    summary_root: Path | None = None,
     limit: int = 8,
     depth: int = 1,
     kinds: Sequence[str] = (),
@@ -62,7 +61,6 @@ def retrieve_context(
         metadata_store = get_metadata_store(
             str(parsed_root.resolve()),
             repo_name,
-            summary_root=str(summary_root.resolve()) if summary_root else None,
         )
         tokens = tokenize(query)
         query_profile = classify_query(tokens, query)
@@ -150,7 +148,7 @@ def retrieve_context(
                 "graph_enabled": effective_use_graph,
                 "embeddings_enabled": effective_use_embeddings,
                 "rerank_enabled": use_rerank,
-                "summaries_enabled": bool(use_summaries and summary_root is not None),
+                "summaries_enabled": bool(use_summaries),
                 "retrieval_gate": gate,
                 "query_profile": query_profile,
             },

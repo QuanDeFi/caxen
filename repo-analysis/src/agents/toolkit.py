@@ -70,8 +70,8 @@ def graph_neighbors_response(
     }
 
 
-def repo_overview(summary_root: Path, repo_name: str) -> Dict[str, object]:
-    metadata_store = metadata_store_from_summary_root(summary_root, repo_name)
+def repo_overview(parsed_root: Path, repo_name: str) -> Dict[str, object]:
+    metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name)
     project_summary = metadata_store.get_summary_by_id(stable_id("sum", repo_name, "project")) or {}
     return {
         "repo": repo_name,
@@ -148,7 +148,6 @@ def trace_calls(
 
 def compare_repos(
     search_root: Path,
-    summary_root: Path,
     graph_root: Path,
     parsed_root: Path,
     query: str,
@@ -158,7 +157,7 @@ def compare_repos(
 ) -> Dict[str, object]:
     comparisons = []
     for repo_name in repos:
-        metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name, summary_root=str(summary_root.resolve()))
+        metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name)
         project_summary = metadata_store.get_summary_by_id(stable_id("sum", repo_name, "project")) or {}
         cached = compare_repo_from_agent_cache(search_root, repo_name, query, project_summary, limit=limit)
         if cached is not None:
@@ -167,7 +166,6 @@ def compare_repos(
 
         bundle = prepare_answer_bundle(
             search_root,
-            summary_root,
             graph_root,
             parsed_root,
             query,
@@ -217,8 +215,8 @@ def find_runtime_handlers(search_root: Path, repo_name: str, *, limit: int = 10)
     }
 
 
-def summarize_path(summary_root: Path, repo_name: str, path: str) -> Dict[str, object]:
-    metadata_store = metadata_store_from_summary_root(summary_root, repo_name)
+def summarize_path(parsed_root: Path, repo_name: str, path: str) -> Dict[str, object]:
+    metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name)
     path_summaries = metadata_store.get_summary_by_path(path)
     if path_summaries:
         exact_kind = "file" if PurePosixPath(path).suffix else "directory"
@@ -243,13 +241,12 @@ def summarize_path(summary_root: Path, repo_name: str, path: str) -> Dict[str, o
 
 def get_summary(
     search_root: Path,
-    summary_root: Path,
     graph_root: Path,
     parsed_root: Path,
     repo_name: str,
     node_id: str,
 ) -> Dict[str, object]:
-    metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name, summary_root=str(summary_root.resolve()))
+    metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name)
     summary_by_id = metadata_store.get_summary_by_id(node_id)
     if summary_by_id is not None:
         return {"repo": repo_name, "node_id": node_id, "summary": summary_by_id}
@@ -313,7 +310,6 @@ def telemetry_snapshot() -> Dict[str, object]:
 
 def get_enclosing_context(
     search_root: Path,
-    summary_root: Path,
     graph_root: Path,
     parsed_root: Path,
     repo_name: str,
@@ -323,7 +319,7 @@ def get_enclosing_context(
     if not symbol:
         return {"repo": repo_name, "query": symbol_query, "context": None}
 
-    metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name, summary_root=str(summary_root.resolve()))
+    metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name)
     container = metadata_store.get_symbol(str(symbol.get("container_symbol_id") or ""))
     path_summary = metadata_store.get_summary_by_path(symbol["path"])
     return {
@@ -348,7 +344,6 @@ def get_enclosing_context(
 
 def prepare_context(
     search_root: Path,
-    summary_root: Path,
     graph_root: Path,
     parsed_root: Path,
     task: str,
@@ -358,7 +353,6 @@ def prepare_context(
 ) -> Dict[str, object]:
     bundle = prepare_answer_bundle(
         search_root,
-        summary_root,
         graph_root,
         parsed_root,
         task,
@@ -674,7 +668,6 @@ def plan_query(
     task: str,
     *,
     repo_name: Optional[str] = None,
-    summary_root: Optional[Path] = None,
     limit: int = 8,
 ) -> Dict[str, object]:
     return build_query_plan(
@@ -683,14 +676,12 @@ def plan_query(
         parsed_root,
         task,
         repo_name=repo_name,
-        summary_root=summary_root,
         limit=limit,
     )
 
 
 def prepare_answer_bundle(
     search_root: Path,
-    summary_root: Path,
     graph_root: Path,
     parsed_root: Path,
     task: str,
@@ -701,7 +692,6 @@ def prepare_answer_bundle(
 ) -> Dict[str, object]:
     return build_answer_bundle(
         search_root,
-        summary_root,
         graph_root,
         parsed_root,
         task,
@@ -713,7 +703,6 @@ def prepare_answer_bundle(
 
 def retrieve_iterative(
     search_root: Path,
-    summary_root: Path,
     graph_root: Path,
     parsed_root: Path,
     task: str,
@@ -725,7 +714,6 @@ def retrieve_iterative(
 ) -> Dict[str, object]:
     return build_iterative_bundle(
         search_root,
-        summary_root,
         graph_root,
         parsed_root,
         task,
@@ -963,11 +951,6 @@ def stable_package_id(repo_name: str, package_name: str) -> str:
     from symbols.indexer import stable_id
 
     return stable_id("pkg", repo_name, package_name)
-
-
-def metadata_store_from_summary_root(summary_root: Path, repo_name: str):
-    parsed_root = summary_root.parent / "parsed"
-    return get_metadata_store(str(parsed_root.resolve()), repo_name, summary_root=str(summary_root.resolve()))
 
 
 def parent_paths(path: str) -> List[str]:

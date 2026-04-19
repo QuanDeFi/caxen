@@ -21,7 +21,6 @@ def plan_query(
     task: str,
     *,
     repo_name: Optional[str] = None,
-    summary_root: Optional[Path] = None,
     limit: int = 8,
 ) -> Dict[str, object]:
     repos = (repo_name,) if repo_name else DEFAULT_REPOS
@@ -35,12 +34,11 @@ def plan_query(
             parsed_root,
             current_repo,
             task,
-            summary_root=summary_root,
             limit=min(max(limit, 3), 6),
             use_graph=False,
             use_embeddings=False,
             use_rerank=False,
-            use_summaries=bool(summary_root),
+            use_summaries=True,
             selective_retrieval=False,
         )
         retrieval_recipe = choose_recipe(query_profile)
@@ -64,7 +62,6 @@ def plan_query(
 
 def prepare_answer_bundle(
     search_root: Path,
-    summary_root: Path,
     graph_root: Path,
     parsed_root: Path,
     task: str,
@@ -81,7 +78,6 @@ def prepare_answer_bundle(
             parsed_root,
             normalized_task,
             repo_name=repo_name,
-            summary_root=summary_root,
             limit=limit,
         )
         bundles = []
@@ -91,7 +87,6 @@ def prepare_answer_bundle(
             metadata_store = get_metadata_store(
                 str(parsed_root.resolve()),
                 current_repo,
-                summary_root=str(summary_root.resolve()),
             )
             context = retrieve_context(
                 search_root,
@@ -99,7 +94,6 @@ def prepare_answer_bundle(
                 parsed_root,
                 current_repo,
                 normalized_task,
-                summary_root=summary_root,
                 limit=limit,
                 use_summaries=True,
                 selective_retrieval=True,
@@ -201,7 +195,6 @@ def prepare_answer_bundle(
 
 def retrieve_iterative(
     search_root: Path,
-    summary_root: Path,
     graph_root: Path,
     parsed_root: Path,
     task: str,
@@ -215,7 +208,6 @@ def retrieve_iterative(
     combined_hints = [*prior_hints, *refinement_hints]
     bundle = prepare_answer_bundle(
         search_root,
-        summary_root,
         graph_root,
         parsed_root,
         task,

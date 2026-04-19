@@ -14,7 +14,6 @@ import lmdb
 class LmdbMetadataStore:
     parsed_root: Path
     repo_name: str
-    summary_root: Optional[Path] = None
     eval_root: Optional[Path] = None
 
     @property

@@ -65,10 +65,9 @@ class MetadataStore(Protocol):
 
 
 @lru_cache(maxsize=16)
-def get_metadata_store(parsed_root: str, repo_name: str, summary_root: str | None = None, eval_root: str | None = None) -> MetadataStore:
+def get_metadata_store(parsed_root: str, repo_name: str, eval_root: str | None = None) -> MetadataStore:
     return LmdbMetadataStore(
         parsed_root=Path(parsed_root),
         repo_name=repo_name,
-        summary_root=Path(summary_root) if summary_root else None,
         eval_root=Path(eval_root) if eval_root else None,
     )
