@@ -328,11 +328,12 @@ fn list_bm25_docs(index_dir: &Path, offset: usize, limit: usize) -> Result<()> {
     let reader = index.reader()?;
     let searcher = reader.searcher();
 
-    let mut total_docs = 0usize;
-    let mut skipped = 0usize;
+    let target = offset.saturating_add(limit);
+    let mut seen = 0usize;
     let mut results: Vec<StoredSearchDocument> = Vec::with_capacity(limit);
+    let mut has_more = false;
 
-    for (segment_ord, segment_reader) in searcher.segment_readers().iter().enumerate() {
+    'segments: for (segment_ord, segment_reader) in searcher.segment_readers().iter().enumerate() {
         let alive_bitset = segment_reader.alive_bitset();
         for doc_id in 0..segment_reader.max_doc() {
             let is_alive = alive_bitset
@@ -343,42 +344,38 @@ fn list_bm25_docs(index_dir: &Path, offset: usize, limit: usize) -> Result<()> {
                 continue;
             }
 
-            total_docs += 1;
-
-            if skipped < offset {
-                skipped += 1;
-                continue;
+            if seen >= target {
+                has_more = true;
+                break 'segments;
             }
 
-            if results.len() >= limit {
-                continue;
+            if seen >= offset {
+                let address = DocAddress::new(segment_ord as u32, doc_id);
+                let document: Document = searcher.doc(address)?;
+                let metadata_json = get_first_text(&document, fields.metadata_json);
+
+                results.push(StoredSearchDocument {
+                    doc_id: get_first_text(&document, fields.doc_id),
+                    kind: get_first_text(&document, fields.kind),
+                    repo: get_first_text(&document, fields.repo),
+                    path: empty_to_none(get_first_text(&document, fields.path)),
+                    name: empty_to_none(get_first_text(&document, fields.name)),
+                    qualified_name: empty_to_none(get_first_text(&document, fields.qualified_name)),
+                    symbol_id: empty_to_none(get_first_text(&document, fields.symbol_id)),
+                    title: get_first_text(&document, fields.title),
+                    preview: get_first_text(&document, fields.preview),
+                    searchable: get_first_text(&document, fields.searchable),
+                    metadata: serde_json::from_str::<Value>(&metadata_json).unwrap_or_else(|_| json!({})),
+                });
             }
 
-            let address = DocAddress::new(segment_ord as u32, doc_id);
-            let document: Document = searcher.doc(address)?;
-            let metadata_json = get_first_text(&document, fields.metadata_json);
-
-            results.push(StoredSearchDocument {
-                doc_id: get_first_text(&document, fields.doc_id),
-                kind: get_first_text(&document, fields.kind),
-                repo: get_first_text(&document, fields.repo),
-                path: empty_to_none(get_first_text(&document, fields.path)),
-                name: empty_to_none(get_first_text(&document, fields.name)),
-                qualified_name: empty_to_none(get_first_text(&document, fields.qualified_name)),
-                symbol_id: empty_to_none(get_first_text(&document, fields.symbol_id)),
-                title: get_first_text(&document, fields.title),
-                preview: get_first_text(&document, fields.preview),
-                searchable: get_first_text(&document, fields.searchable),
-                metadata: serde_json::from_str::<Value>(&metadata_json).unwrap_or_else(|_| json!({})),
-            });
+            seen += 1;
         }
     }
 
-    let consumed = offset.saturating_add(results.len());
     print_json(json!({
         "results": results,
-        "total_docs": total_docs,
-        "next_offset": if consumed < total_docs { Some(consumed) } else { None },
+        "next_offset": if has_more { Some(offset.saturating_add(results.len())) } else { None },
     }))
 }
 
