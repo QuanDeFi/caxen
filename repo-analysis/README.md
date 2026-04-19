@@ -25,14 +25,18 @@ Optional:
 
 ## Main outputs
 
-- `data/raw/<repo>/`: raw inventory
-- `data/parsed/<repo>/`: `symbols.sqlite3`, parquet status, query manifest
-- `data/graph/<repo>/`: `graph.db`, graph manifest
-- `data/search/<repo>/`: `documents.jsonl`, `search_manifest.json`, BM25/Tantivy, and optional embeddings
-- `data/summaries/<repo>/`: `summary.sqlite3`
+- `data/raw/<repo>/`: raw inventory inputs
+- `data/parsed/<repo>/`: `metadata.lmdb`
+- `data/graph/<repo>/`: graph database served by the RyuGraph backend
+- `data/search/<repo>/`: `tantivy/` and optional embeddings
 - `data/eval/`: `eval.lmdb`, prompt exports, benchmark and scoring output
+- `data/summaries/<repo>/`: build progress only, if present
 
-Default runtime is DB-first. JSON inspection exports are not part of the runtime path.
+Default runtime is:
+
+- Tantivy for lexical retrieval
+- LMDB for metadata, summaries, and eval cache
+- RyuGraph for graph storage and traversal
 
 ## CLI
 
@@ -91,29 +95,24 @@ Commands:
 
 ## LLM agent use
 
-For grounded repo questions, use `repo-analysis` outputs before opening arbitrary files.
+For grounded repo questions, use repo-analysis outputs before opening arbitrary files.
 
 Recommended order:
 
-1. Read `data/parsed/<repo>/query_manifest.json` to see which artifacts exist.
-2. Use summaries first:
+1. Use summary/context tools first:
    `repo-overview`, `summarize-path`, `get-summary`
-3. Use lexical/symbol lookup next:
+2. Use lexical/symbol lookup next:
    `find-symbol`, `find-file`, `search-lexical`, `where-defined`
-4. Use graph expansion for relationships:
+3. Use graph expansion for relationships:
    `who-imports`, `callers-of`, `callees-of`, `reads-of`, `writes-of`, `refs-of`, `implements-of`, `inherits-of`, `path-between`, `expand-subgraph`, `statement-slice`
-5. Prepare final evidence for answering:
+4. Prepare final evidence for answering:
    `prepare-context`, `plan-query`, `prepare-answer-bundle`, `retrieve-iterative`
 
 Prefer these artifacts:
 
-- `data/summaries/<repo>/summary.sqlite3`
-- `data/parsed/<repo>/symbols.sqlite3`
-- `data/graph/<repo>/graph.db`
 - `data/parsed/<repo>/metadata.lmdb`
-- `data/search/<repo>/documents.jsonl`
-- `data/search/<repo>/search_manifest.json`
-- `data/eval/eval.lmdb`
+- `data/graph/<repo>/`
 - `data/search/<repo>/tantivy/`
+- `data/eval/eval.lmdb`
 
-Treat `prepare-answer-bundle` as the default handoff artifact for an external LLM. It is the compact, provenance-carrying context package.
+Treat `prepare-answer-bundle` as the default handoff artifact for an external LLM.

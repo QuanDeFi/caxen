@@ -13,18 +13,17 @@ Upstream source trees are preserved as close to upstream as possible. New analys
 
 ## What Repo Analysis Contains
 
-`repo-analysis` now provides:
+`repo-analysis` provides:
 
 - raw inventory generation for the upstream repos
-- DB-first Rust symbol, reference, and statement extraction in `symbols.sqlite3`
-- DB-first graph artifacts in SQLite, with optional JSON export
-- DB-first lexical search and agent cache in `search.sqlite3`, with BM25/Tantivy
+- Rust symbol, reference, statement, and summary extraction into `metadata.lmdb`
+- graph artifacts served by a RyuGraph backend
+- Tantivy-backed lexical search artifacts
 - optional embedding sidecar artifacts
-- DB-first repo, package, directory, file, and symbol summaries
 - graph query, retrieval-planning, answer-bundle, and evaluation CLI commands
 - native worker support for tree-sitter inspection and BM25 indexing
 - body/doc chunk indexing for symbol-level retrieval
-- summary sync back into the graph, `symbols.sqlite3`, and `summary.sqlite3`
+- summary sync into LMDB metadata and graph summary nodes/edges
 - explicit lookup/navigation tools for files, lexical search, signatures, bodies, enclosing context, implementations, inheritance, and bounded subgraph expansion
 
 The main implementation lives under:
@@ -40,5 +39,5 @@ Generated local artifacts live under:
 - `repo-analysis/data/parsed/`
 - `repo-analysis/data/graph/`
 - `repo-analysis/data/search/`
-- `repo-analysis/data/summaries/`
+- `repo-analysis/data/summaries/` (build progress only, if present)
 - `repo-analysis/data/eval/`
