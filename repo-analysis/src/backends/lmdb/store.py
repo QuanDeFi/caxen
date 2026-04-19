@@ -197,7 +197,7 @@ def open_lmdb_env(path: str, *, readonly: bool) -> lmdb.Environment:
         create=not readonly,
         max_dbs=16,
         readahead=readonly,
-        map_size=1 << 30,
+        map_size=1 << 36,
     )
 
 

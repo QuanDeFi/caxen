@@ -89,7 +89,7 @@ def write_lmdb_metadata_bundle(
 
     env = lmdb.open(
         str(target),
-        map_size=1 << 30,
+        map_size=1 << 36,
         subdir=True,
         create=True,
         max_dbs=16,
@@ -237,7 +237,7 @@ def update_lmdb_artifact_metadata(parsed_root: Path, repo_name: str, updates: Di
         create=False,
         max_dbs=17,
         readahead=False,
-        map_size=1 << 30,
+        map_size=1 << 36,
     )
     try:
         db = env.open_db(b"artifact_metadata")
