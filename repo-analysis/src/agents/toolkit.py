@@ -18,6 +18,9 @@ from symbols.indexer import stable_id
 
 
 DEFAULT_REPOS = ("carbon", "yellowstone-vixen")
+CALLABLE_SYMBOL_KINDS = ("function", "method", "associated_function")
+LOCAL_SYMBOL_KINDS = {"local"}
+GRAPH_NOISE_KINDS = {"statement", "symbol_ref"}
 
 
 def execute_graph_backend_request(
@@ -68,6 +71,10 @@ def graph_neighbors_response(
             "error": f"ambiguous symbol query: {symbol_query}",
         }
 
+    effective_node_kinds = tuple(node_kinds)
+    if not effective_node_kinds and operation in {"callers_of", "callees_of"}:
+        effective_node_kinds = CALLABLE_SYMBOL_KINDS
+
     request: Dict[str, object] = {
         "operation": operation or "neighbors",
         "seed": seed,
@@ -79,17 +86,23 @@ def graph_neighbors_response(
         request["direction"] = direction
     if operation is None or depth != 1:
         request["depth"] = depth
-    if node_kinds:
-        request["node_kinds"] = list(node_kinds)
+    if effective_node_kinds:
+        request["node_kinds"] = list(effective_node_kinds)
 
     response = execute_graph_backend_request(graph_root, repo_name, request)
+    neighbors = clean_graph_neighbors(
+        operation,
+        resolved_symbol,
+        response.get("results", []),
+        allowed_kinds=effective_node_kinds,
+    )
     return {
         "repo": repo_name,
         "query": symbol_query,
         "resolved_symbol": resolved_symbol,
         "candidates": candidates,
         "matches": response.get("seeds", []),
-        "neighbors": response.get("results", []),
+        "neighbors": neighbors,
     }
 
 
@@ -1004,6 +1017,71 @@ def kind_compare_rank(kind: str) -> int:
     return ranking.get(kind, 99)
 
 
+def clean_graph_neighbors(
+    operation: Optional[str],
+    resolved_symbol: Optional[Dict[str, object]],
+    neighbors: Sequence[Dict[str, object]],
+    *,
+    allowed_kinds: Sequence[str] = (),
+) -> List[Dict[str, object]]:
+    allowed_kind_set = {str(kind).lower() for kind in allowed_kinds if str(kind).strip()}
+    resolved_symbol_id = str((resolved_symbol or {}).get("symbol_id") or "")
+
+    cleaned: List[Dict[str, object]] = []
+    seen = set()
+    for neighbor in neighbors:
+        if not isinstance(neighbor, dict):
+            continue
+        if is_graph_noise_neighbor(neighbor):
+            continue
+
+        neighbor_kind = str(neighbor.get("kind") or "").lower()
+        if allowed_kind_set and neighbor_kind not in allowed_kind_set:
+            continue
+
+        neighbor_symbol_id = str(neighbor.get("symbol_id") or "")
+        neighbor_node_id = str(neighbor.get("node_id") or "")
+        if resolved_symbol_id and (neighbor_symbol_id == resolved_symbol_id or neighbor_node_id == resolved_symbol_id):
+            continue
+
+        if operation in {"callers_of", "callees_of"} and is_transitive_call_neighbor(neighbor):
+            continue
+
+        dedupe_key = (
+            neighbor_symbol_id,
+            neighbor_node_id,
+            str(neighbor.get("qualified_name") or ""),
+            str(neighbor.get("path") or ""),
+            neighbor_kind,
+            str((neighbor.get("edge_metadata") or {}).get("line") or ((neighbor.get("edge") or {}).get("metadata") or {}).get("line") or ""),
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        cleaned.append(neighbor)
+
+    return cleaned
+
+
+def is_graph_noise_neighbor(neighbor: Dict[str, object]) -> bool:
+    neighbor_kind = str(neighbor.get("kind") or "").lower()
+    node_id = str(neighbor.get("node_id") or "")
+    if neighbor_kind in GRAPH_NOISE_KINDS:
+        return True
+    if node_id.startswith("stmt:") or node_id.startswith("ref:"):
+        return True
+    return False
+
+
+def is_transitive_call_neighbor(neighbor: Dict[str, object]) -> bool:
+    edge_type = str(neighbor.get("edge_type") or ((neighbor.get("edge") or {}).get("type") or "")).upper()
+    if edge_type != "CALLS":
+        return False
+    edge_metadata = neighbor.get("edge_metadata") or ((neighbor.get("edge") or {}).get("metadata") or {})
+    semantic_level = str(edge_metadata.get("semantic_level") or "").lower()
+    return semantic_level == "transitive"
+
+
 def resolve_graph_seed(
     search_root: Path,
     parsed_root: Path,
@@ -1069,6 +1147,7 @@ def resolve_symbol_candidates(
 ) -> List[Dict[str, object]]:
     metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name)
     candidate_rows: List[Dict[str, object]] = []
+    allow_locals = query_explicitly_targets_local(symbol_query)
 
     def add_symbol(symbol_id: str, *, search_score: float = 0.0) -> None:
         symbol = metadata_store.get_symbol(symbol_id)
@@ -1076,6 +1155,9 @@ def resolve_symbol_candidates(
             return
         described = describe_symbol_row(symbol)
         if described is None:
+            return
+        kind = str(described.get("kind") or "").lower()
+        if kind in LOCAL_SYMBOL_KINDS and not allow_locals:
             return
         row = dict(described)
         row["_search_score"] = float(search_score)
@@ -1140,10 +1222,11 @@ def score_symbol_candidate(symbol_query: str, candidate: Dict[str, object]) -> f
 
     name = str(candidate.get("name") or "").lower()
     qualified_name = str(candidate.get("qualified_name") or "").lower()
+    container_qualified_name = str(candidate.get("container_qualified_name") or "").lower()
     path = str(candidate.get("path") or "").lower()
     kind = str(candidate.get("kind") or "").lower()
 
-    haystack = " ".join(part for part in (name, qualified_name, path, kind) if part)
+    haystack = " ".join(part for part in (name, qualified_name, container_qualified_name, path, kind) if part)
     score = float(candidate.get("_search_score") or 0.0)
 
     if symbol_query.startswith("sym:") and str(candidate.get("symbol_id") or "") == symbol_query:
@@ -1156,6 +1239,8 @@ def score_symbol_candidate(symbol_query: str, candidate: Dict[str, object]) -> f
         score += 180.0
     if lowered_query and lowered_query in qualified_name:
         score += 80.0
+    if lowered_query and lowered_query in container_qualified_name:
+        score += 24.0
     if lowered_query and lowered_query in path:
         score += 30.0
 
@@ -1167,6 +1252,9 @@ def score_symbol_candidate(symbol_query: str, candidate: Dict[str, object]) -> f
             token_hit = True
         elif token and token in name:
             score += 15.0
+            token_hit = True
+        elif token and token in container_qualified_name:
+            score += 10.0
             token_hit = True
         elif token and token in path:
             score += 8.0
@@ -1182,7 +1270,21 @@ def score_symbol_candidate(symbol_query: str, candidate: Dict[str, object]) -> f
     elif query_tokens:
         score -= (len(query_tokens) - token_hits) * 8.0
 
+    if kind in LOCAL_SYMBOL_KINDS and not query_explicitly_targets_local(symbol_query):
+        score -= 150.0
+
     return score
+
+
+def query_explicitly_targets_local(symbol_query: str) -> bool:
+    lowered = str(symbol_query or "").strip().lower()
+    if not lowered:
+        return False
+    if lowered.startswith("sym:"):
+        return True
+    if "@l" in lowered:
+        return True
+    return "::" in lowered and "@" in lowered
 
 
 def qualified_name_endswith_query(qualified_name: str, lowered_query: str) -> bool:

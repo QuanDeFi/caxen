@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from backends.metadata_store import get_metadata_store
 from common.native_tool import query_bm25_index
@@ -13,16 +13,21 @@ from search.indexer import list_documents
 
 QUERY_EXPANSIONS = {
     "deduplication": ("dedup", "dedupe", "duplicate", "duplicates"),
-    "dedup": ("dedupe", "duplicate", "duplicates"),
-    "dedupe": ("dedup", "duplicate", "duplicates"),
-    "duplicate": ("dedup", "dedupe", "duplicates"),
-    "duplicates": ("duplicate", "dedup", "dedupe"),
+    "dedup": ("deduplication", "dedupe", "duplicate", "duplicates"),
+    "dedupe": ("deduplication", "dedup", "duplicate", "duplicates"),
+    "duplicate": ("deduplication", "dedup", "dedupe", "duplicates"),
+    "duplicates": ("deduplication", "duplicate", "dedup", "dedupe"),
     "datasource": ("datasources", "source", "stream"),
     "datasources": ("datasource", "source", "stream"),
     "routing": ("route", "dispatch", "process", "run"),
     "route": ("routing", "dispatch", "process", "run"),
     "pipeline": ("process", "run", "dispatch"),
 }
+
+CONCEPTUAL_TYPE_KINDS = {"struct", "trait", "enum", "impl", "type"}
+CALLABLE_SYMBOL_KINDS = {"function", "method", "associated_function"}
+CONCEPTUAL_CONSTANT_KINDS = {"const", "static"}
+DEDUPLICATION_FAMILY = {"deduplication", "dedup", "dedupe", "duplicate", "duplicates"}
 
 
 class TantivySearchBackend:
@@ -209,11 +214,12 @@ def rerank_search_results(
 ) -> List[Dict[str, object]]:
     query_tokens = normalize_query_tokens(query)
     expanded_tokens = expand_query_tokens(query_tokens)
+    token_families = build_token_families(query_tokens)
 
     scored: List[Tuple[float, Dict[str, object]]] = []
     for item in results:
         reranked = dict(item)
-        score = score_search_result(query, query_tokens, expanded_tokens, reranked)
+        score = score_search_result(query, query_tokens, expanded_tokens, token_families, reranked)
         reranked["score"] = round(float(score), 6)
         reranked.pop("_best_native_score", None)
         reranked.pop("_variant_hits", None)
@@ -234,6 +240,7 @@ def score_search_result(
     query: str,
     query_tokens: Sequence[str],
     expanded_tokens: Sequence[str],
+    token_families: Sequence[Set[str]],
     item: Dict[str, object],
 ) -> float:
     lowered_query = str(query or "").strip().lower()
@@ -246,8 +253,10 @@ def score_search_result(
     metadata = item.get("metadata", {}) or {}
     tags = " ".join(str(tag).lower() for tag in metadata.get("tags", []) or ())
     kind = str(item.get("kind") or "")
+    symbol_kind = str(metadata.get("kind") or "").lower()
 
     haystack = " ".join(part for part in (name, qualified_name, title, preview, searchable, path, tags) if part)
+    identifier_text = normalize_identifier_text(" ".join(part for part in (name, qualified_name, title) if part))
     score = float(item.get("_best_native_score") or item.get("score") or 0.0)
 
     if lowered_query == qualified_name:
@@ -288,10 +297,23 @@ def score_search_result(
         if token_hit:
             exact_token_hits += 1
 
+    family_hits = 0
+    identifier_family_hits = 0
+    for family in token_families:
+        family_identifier_hit = any(normalize_identifier_text(token) in identifier_text for token in family if token)
+        family_haystack_hit = family_identifier_hit or any(token in haystack for token in family if token)
+        if family_haystack_hit:
+            family_hits += 1
+            if family_identifier_hit:
+                identifier_family_hits += 1
+                score += 18.0
+            else:
+                score += 8.0
+
     if query_tokens and exact_token_hits == len(query_tokens):
         score += 35.0
-    elif query_tokens:
-        score -= (len(query_tokens) - exact_token_hits) * 10.0
+    elif token_families:
+        score -= (len(token_families) - family_hits) * 12.0
 
     expansion_hits = 0
     for token in expanded_tokens:
@@ -303,14 +325,44 @@ def score_search_result(
     if variant_hits > 1:
         score += min(variant_hits - 1, 3) * 5.0
 
+    conceptual_query = is_multiword_conceptual_query(query_tokens)
+    if conceptual_query:
+        if kind == "type_body" or symbol_kind in CONCEPTUAL_TYPE_KINDS:
+            score += 32.0
+        elif kind == "symbol" and symbol_kind in CALLABLE_SYMBOL_KINDS:
+            score += 20.0
+        elif kind == "function_body":
+            score += 12.0
+        if symbol_kind in CONCEPTUAL_CONSTANT_KINDS:
+            score -= 40.0
+
+    if token_families and family_hits == len(token_families):
+        score += 30.0
+        if conceptual_query:
+            score += 24.0
+        if identifier_family_hits == len(token_families):
+            score += 18.0
+
+    if is_deduplication_filter_query(query_tokens, expanded_tokens):
+        if "deduplicationfilter" in identifier_text:
+            score += 120.0
+        elif "deduplication" in identifier_text and "filter" in identifier_text:
+            score += 80.0
+        if symbol_kind in CONCEPTUAL_TYPE_KINDS and "filter" in identifier_text:
+            score += 24.0
+        if symbol_kind in CONCEPTUAL_CONSTANT_KINDS:
+            score -= 25.0
+
     if kind == "symbol":
         score += 4.0
-    elif kind in {"function_body", "type_body"}:
+    elif kind == "type_body":
+        score += 3.0
+    elif kind == "function_body":
         score += 2.0
 
-    if query_tokens and exact_token_hits == 0 and expansion_hits == 0:
+    if query_tokens and exact_token_hits == 0 and family_hits == 0 and expansion_hits == 0:
         score -= 25.0
-    if len(query_tokens) >= 2 and exact_token_hits < max(1, len(query_tokens) // 2):
+    if len(query_tokens) >= 2 and family_hits < max(1, len(token_families) // 2):
         score -= 10.0
 
     return score
@@ -333,11 +385,72 @@ def expand_query_tokens(query_tokens: Sequence[str]) -> List[str]:
     return expanded
 
 
+def build_token_families(query_tokens: Sequence[str]) -> List[Set[str]]:
+    families: List[Set[str]] = []
+    seen_signatures = set()
+    for token in query_tokens:
+        family = expand_token_family(token)
+        signature = tuple(sorted(family))
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        families.append(family)
+    return families
+
+
+def expand_token_family(token: str) -> Set[str]:
+    normalized = str(token or "").strip().lower()
+    if not normalized:
+        return set()
+
+    family: Set[str] = {normalized}
+    pending = [normalized]
+    while pending:
+        current = pending.pop()
+
+        for expanded in QUERY_EXPANSIONS.get(current, ()):
+            expanded_normalized = str(expanded).strip().lower()
+            if not expanded_normalized or expanded_normalized in family:
+                continue
+            family.add(expanded_normalized)
+            pending.append(expanded_normalized)
+
+        for source, expansions in QUERY_EXPANSIONS.items():
+            source_normalized = str(source).strip().lower()
+            expanded_values = {str(value).strip().lower() for value in expansions}
+            if current == source_normalized or current in expanded_values:
+                if source_normalized and source_normalized not in family:
+                    family.add(source_normalized)
+                    pending.append(source_normalized)
+                for expanded_normalized in expanded_values:
+                    if expanded_normalized and expanded_normalized not in family:
+                        family.add(expanded_normalized)
+                        pending.append(expanded_normalized)
+
+    return family
+
+
+def normalize_identifier_text(value: str) -> str:
+    return "".join(char for char in str(value or "").lower() if char.isalnum() or char == "_")
+
+
+def is_multiword_conceptual_query(query_tokens: Sequence[str]) -> bool:
+    if len(query_tokens) < 2:
+        return False
+    return all(any(char.isalpha() for char in token) for token in query_tokens)
+
+
+def is_deduplication_filter_query(query_tokens: Sequence[str], expanded_tokens: Sequence[str]) -> bool:
+    token_set = {str(token).strip().lower() for token in query_tokens}
+    token_set.update(str(token).strip().lower() for token in expanded_tokens)
+    return "filter" in token_set and bool(token_set & DEDUPLICATION_FAMILY)
+
+
 def kind_rank(kind: str) -> int:
     ranking = {
         "symbol": 0,
-        "function_body": 1,
-        "type_body": 2,
+        "type_body": 1,
+        "function_body": 2,
         "file": 3,
         "directory": 4,
         "package": 5,
