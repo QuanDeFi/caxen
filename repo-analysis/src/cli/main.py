@@ -9,6 +9,17 @@ from typing import Dict, List, Optional
 
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
+REPO_ANALYSIS_ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+DATA_ROOT = REPO_ANALYSIS_ROOT / "data"
+
+DEFAULT_RAW_ROOT = DATA_ROOT / "raw"
+DEFAULT_PARSED_ROOT = DATA_ROOT / "parsed"
+DEFAULT_GRAPH_ROOT = DATA_ROOT / "graph"
+DEFAULT_SEARCH_ROOT = DATA_ROOT / "search"
+DEFAULT_SUMMARY_ROOT = DATA_ROOT / "summaries"
+DEFAULT_EVAL_ROOT = DATA_ROOT / "eval"
+
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
@@ -53,7 +64,12 @@ from adapters.yellowstone_vixen.adapter import inventory as inventory_yellowston
 from common.inventory import write_inventory
 from common.native_tool import probe_native_worker
 from embeddings.indexer import build_embedding_index, query_embedding_index
-from evaluation.harness import benchmark_interactive_commands, export_benchmark_prompts, run_benchmarks, score_answer_bundles
+from evaluation.harness import (
+    benchmark_interactive_commands,
+    export_benchmark_prompts,
+    run_benchmarks,
+    score_answer_bundles,
+)
 from graph.builder import build_graph_artifact
 from graph.store import write_graph_database
 from search.indexer import build_search_index
@@ -68,6 +84,62 @@ ADAPTERS = {
 }
 
 
+def add_workspace_root_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--workspace-root",
+        default=str(WORKSPACE_ROOT),
+        help=f"Workspace root. Default: {WORKSPACE_ROOT}",
+    )
+
+
+def add_raw_root_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--raw-root",
+        default=str(DEFAULT_RAW_ROOT),
+        help=f"Raw inventory root. Default: {DEFAULT_RAW_ROOT}",
+    )
+
+
+def add_parsed_root_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--parsed-root",
+        default=str(DEFAULT_PARSED_ROOT),
+        help=f"Parsed metadata root. Default: {DEFAULT_PARSED_ROOT}",
+    )
+
+
+def add_graph_root_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--graph-root",
+        default=str(DEFAULT_GRAPH_ROOT),
+        help=f"Graph root. Default: {DEFAULT_GRAPH_ROOT}",
+    )
+
+
+def add_search_root_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--search-root",
+        default=str(DEFAULT_SEARCH_ROOT),
+        help=f"Search root. Default: {DEFAULT_SEARCH_ROOT}",
+    )
+
+
+def add_summary_root_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--summary-root",
+        default=str(DEFAULT_SUMMARY_ROOT),
+        help=f"Summary root. Default: {DEFAULT_SUMMARY_ROOT}",
+    )
+
+
+def add_eval_root_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--eval-root",
+        default=str(DEFAULT_EVAL_ROOT),
+        help=f"Eval root. Default: {DEFAULT_EVAL_ROOT}",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="repo-analysis operator CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -76,15 +148,11 @@ def build_parser() -> argparse.ArgumentParser:
         "parse-repos",
         help="Collect normalized raw repo inventory for the upstream repos.",
     )
-    parse_repos.add_argument(
-        "--workspace-root",
-        required=True,
-        help="Absolute path to the umbrella workspace root.",
-    )
+    add_workspace_root_arg(parse_repos)
     parse_repos.add_argument(
         "--output-root",
-        required=True,
-        help="Directory where raw inventory JSON files should be written.",
+        default=str(DEFAULT_RAW_ROOT),
+        help=f"Directory where raw inventory JSON files should be written. Default: {DEFAULT_RAW_ROOT}",
     )
     parse_repos.add_argument(
         "--repo",
@@ -97,26 +165,10 @@ def build_parser() -> argparse.ArgumentParser:
         "build-index",
         help="Parse Rust source roots into symbol and graph artifacts.",
     )
-    build_index.add_argument(
-        "--workspace-root",
-        required=True,
-        help="Absolute path to the umbrella workspace root.",
-    )
-    build_index.add_argument(
-        "--raw-root",
-        required=True,
-        help="Directory containing raw inventory JSON files.",
-    )
-    build_index.add_argument(
-        "--parsed-root",
-        required=True,
-        help="Directory where parsed symbol artifacts should be written.",
-    )
-    build_index.add_argument(
-        "--graph-root",
-        required=True,
-        help="Directory where graph artifacts should be written.",
-    )
+    add_workspace_root_arg(build_index)
+    add_raw_root_arg(build_index)
+    add_parsed_root_arg(build_index)
+    add_graph_root_arg(build_index)
     build_index.add_argument(
         "--repo",
         action="append",
@@ -134,30 +186,32 @@ def build_parser() -> argparse.ArgumentParser:
         default=100,
         help="Emit progress logs every N parsed files.",
     )
+
     build_search = subparsers.add_parser(
         "build-search",
         help="Build lexical search artifacts over raw and parsed outputs.",
     )
-    build_search.add_argument("--workspace-root", required=True)
-    build_search.add_argument("--raw-root", required=True)
-    build_search.add_argument("--parsed-root", required=True)
-    build_search.add_argument("--search-root", required=True)
+    add_workspace_root_arg(build_search)
+    add_raw_root_arg(build_search)
+    add_parsed_root_arg(build_search)
+    add_search_root_arg(build_search)
     build_search.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
+
     build_summaries = subparsers.add_parser(
         "build-summaries",
         help="Build deterministic project/directory/file/symbol summaries.",
     )
-    build_summaries.add_argument("--raw-root", required=True)
-    build_summaries.add_argument("--parsed-root", required=True)
-    build_summaries.add_argument("--graph-root", required=True)
-    build_summaries.add_argument("--summary-root", required=True)
+    add_raw_root_arg(build_summaries)
+    add_parsed_root_arg(build_summaries)
+    add_graph_root_arg(build_summaries)
+    add_summary_root_arg(build_summaries)
     build_summaries.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
 
     build_embeddings = subparsers.add_parser(
         "build-embeddings",
         help="Build the optional embedding sidecar over search documents.",
     )
-    build_embeddings.add_argument("--search-root", required=True)
+    add_search_root_arg(build_embeddings)
     build_embeddings.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
     build_embeddings.add_argument("--provider", choices=("auto", "hashing", "openai"), default="auto")
     build_embeddings.add_argument("--model")
@@ -166,32 +220,32 @@ def build_parser() -> argparse.ArgumentParser:
         "run-benchmarks",
         help="Run the lightweight retrieval benchmark slice.",
     )
-    run_eval.add_argument("--search-root", required=True)
-    run_eval.add_argument("--graph-root", required=True)
-    run_eval.add_argument("--parsed-root", required=True)
-    run_eval.add_argument("--eval-root", required=True)
+    add_search_root_arg(run_eval)
+    add_graph_root_arg(run_eval)
+    add_parsed_root_arg(run_eval)
+    add_eval_root_arg(run_eval)
     run_eval.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
     run_eval.add_argument("--mode", action="append")
     run_eval.add_argument("--limit", type=int, default=5)
 
     repo_overview_cmd = subparsers.add_parser("repo-overview", help="Show the repo-level summary.")
-    repo_overview_cmd.add_argument("--parsed-root", required=True)
+    add_parsed_root_arg(repo_overview_cmd)
     repo_overview_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
 
     find_symbol_cmd = subparsers.add_parser("find-symbol", help="Search indexed symbols.")
-    find_symbol_cmd.add_argument("--search-root", required=True)
+    add_search_root_arg(find_symbol_cmd)
     find_symbol_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     find_symbol_cmd.add_argument("query")
     find_symbol_cmd.add_argument("--limit", type=int, default=10)
 
     find_file_cmd = subparsers.add_parser("find-file", help="Find indexed files and directories by path pattern.")
-    find_file_cmd.add_argument("--search-root", required=True)
+    add_search_root_arg(find_file_cmd)
     find_file_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     find_file_cmd.add_argument("path_pattern")
     find_file_cmd.add_argument("--limit", type=int, default=20)
 
     search_lexical_cmd = subparsers.add_parser("search-lexical", help="Run scoped lexical search over indexed documents.")
-    search_lexical_cmd.add_argument("--search-root", required=True)
+    add_search_root_arg(search_lexical_cmd)
     search_lexical_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     search_lexical_cmd.add_argument("query")
     search_lexical_cmd.add_argument("--kind", action="append")
@@ -199,38 +253,38 @@ def build_parser() -> argparse.ArgumentParser:
     search_lexical_cmd.add_argument("--limit", type=int, default=10)
 
     embedding_search_cmd = subparsers.add_parser("embedding-search", help="Run semantic search over embedding vectors.")
-    embedding_search_cmd.add_argument("--search-root", required=True)
+    add_search_root_arg(embedding_search_cmd)
     embedding_search_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     embedding_search_cmd.add_argument("query")
     embedding_search_cmd.add_argument("--limit", type=int, default=10)
 
     trace_calls_cmd = subparsers.add_parser("trace-calls", help="Trace callers and callees for a symbol.")
-    trace_calls_cmd.add_argument("--search-root", required=True)
-    trace_calls_cmd.add_argument("--graph-root", required=True)
-    trace_calls_cmd.add_argument("--parsed-root", required=True)
+    add_search_root_arg(trace_calls_cmd)
+    add_graph_root_arg(trace_calls_cmd)
+    add_parsed_root_arg(trace_calls_cmd)
     trace_calls_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     trace_calls_cmd.add_argument("symbol")
     trace_calls_cmd.add_argument("--limit", type=int, default=10)
 
     where_defined_cmd = subparsers.add_parser("where-defined", help="Resolve where a symbol is defined.")
-    where_defined_cmd.add_argument("--search-root", required=True)
-    where_defined_cmd.add_argument("--parsed-root", required=True)
+    add_search_root_arg(where_defined_cmd)
+    add_parsed_root_arg(where_defined_cmd)
     where_defined_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     where_defined_cmd.add_argument("symbol")
     where_defined_cmd.add_argument("--limit", type=int, default=10)
 
     who_imports_cmd = subparsers.add_parser("who-imports", help="Find importers of a symbol or module.")
-    who_imports_cmd.add_argument("--search-root", required=True)
-    who_imports_cmd.add_argument("--parsed-root", required=True)
-    who_imports_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(who_imports_cmd)
+    add_parsed_root_arg(who_imports_cmd)
+    add_graph_root_arg(who_imports_cmd)
     who_imports_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     who_imports_cmd.add_argument("symbol")
     who_imports_cmd.add_argument("--limit", type=int, default=20)
 
     adjacent_symbols_cmd = subparsers.add_parser("adjacent-symbols", help="List graph-adjacent symbols for a symbol query.")
-    adjacent_symbols_cmd.add_argument("--search-root", required=True)
-    adjacent_symbols_cmd.add_argument("--parsed-root", required=True)
-    adjacent_symbols_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(adjacent_symbols_cmd)
+    add_parsed_root_arg(adjacent_symbols_cmd)
+    add_graph_root_arg(adjacent_symbols_cmd)
     adjacent_symbols_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     adjacent_symbols_cmd.add_argument("symbol")
     adjacent_symbols_cmd.add_argument("--edge-type", action="append")
@@ -238,50 +292,50 @@ def build_parser() -> argparse.ArgumentParser:
     adjacent_symbols_cmd.add_argument("--limit", type=int, default=20)
 
     compare_repos_cmd = subparsers.add_parser("compare-repos", help="Compare retrieval context across repos.")
-    compare_repos_cmd.add_argument("--search-root", required=True)
-    compare_repos_cmd.add_argument("--graph-root", required=True)
-    compare_repos_cmd.add_argument("--parsed-root", required=True)
+    add_search_root_arg(compare_repos_cmd)
+    add_graph_root_arg(compare_repos_cmd)
+    add_parsed_root_arg(compare_repos_cmd)
     compare_repos_cmd.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
     compare_repos_cmd.add_argument("query")
     compare_repos_cmd.add_argument("--limit", type=int, default=5)
 
     find_parsers_cmd = subparsers.add_parser("find-parsers", help="Find parser-related paths and symbols.")
-    find_parsers_cmd.add_argument("--search-root", required=True)
+    add_search_root_arg(find_parsers_cmd)
     find_parsers_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     find_parsers_cmd.add_argument("--limit", type=int, default=10)
 
     find_datasources_cmd = subparsers.add_parser("find-datasources", help="Find datasource-related paths and symbols.")
-    find_datasources_cmd.add_argument("--search-root", required=True)
+    add_search_root_arg(find_datasources_cmd)
     find_datasources_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     find_datasources_cmd.add_argument("--limit", type=int, default=10)
 
     find_decoders_cmd = subparsers.add_parser("find-decoders", help="Find decoder-related paths and symbols.")
-    find_decoders_cmd.add_argument("--search-root", required=True)
+    add_search_root_arg(find_decoders_cmd)
     find_decoders_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     find_decoders_cmd.add_argument("--limit", type=int, default=10)
 
     find_runtime_handlers_cmd = subparsers.add_parser("find-runtime-handlers", help="Find runtime and handler surfaces.")
-    find_runtime_handlers_cmd.add_argument("--search-root", required=True)
+    add_search_root_arg(find_runtime_handlers_cmd)
     find_runtime_handlers_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     find_runtime_handlers_cmd.add_argument("--limit", type=int, default=10)
 
     summarize_path_cmd = subparsers.add_parser("summarize-path", help="Summarize a file or directory path.")
-    summarize_path_cmd.add_argument("--parsed-root", required=True)
+    add_parsed_root_arg(summarize_path_cmd)
     summarize_path_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     summarize_path_cmd.add_argument("path")
 
     prepare_context_cmd = subparsers.add_parser("prepare-context", help="Prepare a compact retrieval context for a task.")
-    prepare_context_cmd.add_argument("--search-root", required=True)
-    prepare_context_cmd.add_argument("--graph-root", required=True)
-    prepare_context_cmd.add_argument("--parsed-root", required=True)
+    add_search_root_arg(prepare_context_cmd)
+    add_graph_root_arg(prepare_context_cmd)
+    add_parsed_root_arg(prepare_context_cmd)
     prepare_context_cmd.add_argument("--repo", choices=sorted(ADAPTERS))
     prepare_context_cmd.add_argument("task")
     prepare_context_cmd.add_argument("--limit", type=int, default=8)
 
     graph_query_cmd = subparsers.add_parser("graph-query", help="Execute a graph query request.")
-    graph_query_cmd.add_argument("--search-root", required=True)
-    graph_query_cmd.add_argument("--parsed-root", required=True)
-    graph_query_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(graph_query_cmd)
+    add_parsed_root_arg(graph_query_cmd)
+    add_graph_root_arg(graph_query_cmd)
     graph_query_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     graph_query_cmd.add_argument("--request-file")
     graph_query_cmd.add_argument("--request-json")
@@ -296,9 +350,9 @@ def build_parser() -> argparse.ArgumentParser:
     graph_query_cmd.add_argument("--window", type=int, default=8)
 
     path_between_cmd = subparsers.add_parser("path-between", help="Find graph paths between two symbols or files.")
-    path_between_cmd.add_argument("--search-root", required=True)
-    path_between_cmd.add_argument("--parsed-root", required=True)
-    path_between_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(path_between_cmd)
+    add_parsed_root_arg(path_between_cmd)
+    add_graph_root_arg(path_between_cmd)
     path_between_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     path_between_cmd.add_argument("source")
     path_between_cmd.add_argument("target")
@@ -307,100 +361,100 @@ def build_parser() -> argparse.ArgumentParser:
     path_between_cmd.add_argument("--limit", type=int, default=5)
 
     statement_slice_cmd = subparsers.add_parser("statement-slice", help="Show a statement-level slice for a symbol.")
-    statement_slice_cmd.add_argument("--search-root", required=True)
-    statement_slice_cmd.add_argument("--parsed-root", required=True)
-    statement_slice_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(statement_slice_cmd)
+    add_parsed_root_arg(statement_slice_cmd)
+    add_graph_root_arg(statement_slice_cmd)
     statement_slice_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     statement_slice_cmd.add_argument("symbol")
     statement_slice_cmd.add_argument("--limit", type=int, default=20)
     statement_slice_cmd.add_argument("--window", type=int, default=8)
 
     callers_of_cmd = subparsers.add_parser("callers-of", help="List callers of a symbol.")
-    callers_of_cmd.add_argument("--search-root", required=True)
-    callers_of_cmd.add_argument("--parsed-root", required=True)
-    callers_of_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(callers_of_cmd)
+    add_parsed_root_arg(callers_of_cmd)
+    add_graph_root_arg(callers_of_cmd)
     callers_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     callers_of_cmd.add_argument("symbol")
     callers_of_cmd.add_argument("--limit", type=int, default=20)
 
     callees_of_cmd = subparsers.add_parser("callees-of", help="List callees of a symbol.")
-    callees_of_cmd.add_argument("--search-root", required=True)
-    callees_of_cmd.add_argument("--parsed-root", required=True)
-    callees_of_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(callees_of_cmd)
+    add_parsed_root_arg(callees_of_cmd)
+    add_graph_root_arg(callees_of_cmd)
     callees_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     callees_of_cmd.add_argument("symbol")
     callees_of_cmd.add_argument("--limit", type=int, default=20)
 
     reads_of_cmd = subparsers.add_parser("reads-of", help="List read relationships for a symbol.")
-    reads_of_cmd.add_argument("--search-root", required=True)
-    reads_of_cmd.add_argument("--parsed-root", required=True)
-    reads_of_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(reads_of_cmd)
+    add_parsed_root_arg(reads_of_cmd)
+    add_graph_root_arg(reads_of_cmd)
     reads_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     reads_of_cmd.add_argument("symbol")
     reads_of_cmd.add_argument("--limit", type=int, default=20)
 
     writes_of_cmd = subparsers.add_parser("writes-of", help="List write relationships for a symbol.")
-    writes_of_cmd.add_argument("--search-root", required=True)
-    writes_of_cmd.add_argument("--parsed-root", required=True)
-    writes_of_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(writes_of_cmd)
+    add_parsed_root_arg(writes_of_cmd)
+    add_graph_root_arg(writes_of_cmd)
     writes_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     writes_of_cmd.add_argument("symbol")
     writes_of_cmd.add_argument("--limit", type=int, default=20)
 
     refs_of_cmd = subparsers.add_parser("refs-of", help="List reference relationships for a symbol.")
-    refs_of_cmd.add_argument("--search-root", required=True)
-    refs_of_cmd.add_argument("--parsed-root", required=True)
-    refs_of_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(refs_of_cmd)
+    add_parsed_root_arg(refs_of_cmd)
+    add_graph_root_arg(refs_of_cmd)
     refs_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     refs_of_cmd.add_argument("symbol")
     refs_of_cmd.add_argument("--limit", type=int, default=20)
 
     implements_of_cmd = subparsers.add_parser("implements-of", help="List implementations of a trait or interface symbol.")
-    implements_of_cmd.add_argument("--search-root", required=True)
-    implements_of_cmd.add_argument("--parsed-root", required=True)
-    implements_of_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(implements_of_cmd)
+    add_parsed_root_arg(implements_of_cmd)
+    add_graph_root_arg(implements_of_cmd)
     implements_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     implements_of_cmd.add_argument("symbol")
     implements_of_cmd.add_argument("--limit", type=int, default=20)
 
     inherits_of_cmd = subparsers.add_parser("inherits-of", help="List inherited parents for a trait or type symbol.")
-    inherits_of_cmd.add_argument("--search-root", required=True)
-    inherits_of_cmd.add_argument("--parsed-root", required=True)
-    inherits_of_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(inherits_of_cmd)
+    add_parsed_root_arg(inherits_of_cmd)
+    add_graph_root_arg(inherits_of_cmd)
     inherits_of_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     inherits_of_cmd.add_argument("symbol")
     inherits_of_cmd.add_argument("--limit", type=int, default=20)
 
     get_summary_cmd = subparsers.add_parser("get-summary", help="Resolve a summary payload for a graph or summary node.")
-    get_summary_cmd.add_argument("--search-root", required=True)
-    get_summary_cmd.add_argument("--graph-root", required=True)
-    get_summary_cmd.add_argument("--parsed-root", required=True)
+    add_search_root_arg(get_summary_cmd)
+    add_graph_root_arg(get_summary_cmd)
+    add_parsed_root_arg(get_summary_cmd)
     get_summary_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     get_summary_cmd.add_argument("node_id")
 
     get_symbol_signature_cmd = subparsers.add_parser("get-symbol-signature", help="Return a resolved symbol signature.")
-    get_symbol_signature_cmd.add_argument("--search-root", required=True)
-    get_symbol_signature_cmd.add_argument("--parsed-root", required=True)
+    add_search_root_arg(get_symbol_signature_cmd)
+    add_parsed_root_arg(get_symbol_signature_cmd)
     get_symbol_signature_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     get_symbol_signature_cmd.add_argument("symbol")
 
     get_symbol_body_cmd = subparsers.add_parser("get-symbol-body", help="Return the indexed body chunk for a symbol.")
-    get_symbol_body_cmd.add_argument("--search-root", required=True)
-    get_symbol_body_cmd.add_argument("--parsed-root", required=True)
+    add_search_root_arg(get_symbol_body_cmd)
+    add_parsed_root_arg(get_symbol_body_cmd)
     get_symbol_body_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     get_symbol_body_cmd.add_argument("symbol")
 
     get_enclosing_context_cmd = subparsers.add_parser("get-enclosing-context", help="Return enclosing summary and statement context for a symbol.")
-    get_enclosing_context_cmd.add_argument("--search-root", required=True)
-    get_enclosing_context_cmd.add_argument("--graph-root", required=True)
-    get_enclosing_context_cmd.add_argument("--parsed-root", required=True)
+    add_search_root_arg(get_enclosing_context_cmd)
+    add_graph_root_arg(get_enclosing_context_cmd)
+    add_parsed_root_arg(get_enclosing_context_cmd)
     get_enclosing_context_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     get_enclosing_context_cmd.add_argument("symbol")
 
     expand_subgraph_cmd = subparsers.add_parser("expand-subgraph", help="Expand a bounded graph neighborhood from a seed.")
-    expand_subgraph_cmd.add_argument("--search-root", required=True)
-    expand_subgraph_cmd.add_argument("--parsed-root", required=True)
-    expand_subgraph_cmd.add_argument("--graph-root", required=True)
+    add_search_root_arg(expand_subgraph_cmd)
+    add_parsed_root_arg(expand_subgraph_cmd)
+    add_graph_root_arg(expand_subgraph_cmd)
     expand_subgraph_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
     expand_subgraph_cmd.add_argument("seed")
     expand_subgraph_cmd.add_argument("--edge-type", action="append")
@@ -410,26 +464,26 @@ def build_parser() -> argparse.ArgumentParser:
     expand_subgraph_cmd.add_argument("--budget", type=int, default=20)
 
     plan_query_cmd = subparsers.add_parser("plan-query", help="Plan the retrieval recipe for a task.")
-    plan_query_cmd.add_argument("--search-root", required=True)
-    plan_query_cmd.add_argument("--graph-root", required=True)
-    plan_query_cmd.add_argument("--parsed-root", required=True)
+    add_search_root_arg(plan_query_cmd)
+    add_graph_root_arg(plan_query_cmd)
+    add_parsed_root_arg(plan_query_cmd)
     plan_query_cmd.add_argument("--repo", choices=sorted(ADAPTERS))
     plan_query_cmd.add_argument("task")
     plan_query_cmd.add_argument("--limit", type=int, default=8)
 
     prepare_bundle_cmd = subparsers.add_parser("prepare-answer-bundle", help="Prepare an answer bundle for an external LLM consumer.")
-    prepare_bundle_cmd.add_argument("--search-root", required=True)
-    prepare_bundle_cmd.add_argument("--graph-root", required=True)
-    prepare_bundle_cmd.add_argument("--parsed-root", required=True)
+    add_search_root_arg(prepare_bundle_cmd)
+    add_graph_root_arg(prepare_bundle_cmd)
+    add_parsed_root_arg(prepare_bundle_cmd)
     prepare_bundle_cmd.add_argument("--repo", choices=sorted(ADAPTERS))
     prepare_bundle_cmd.add_argument("task")
     prepare_bundle_cmd.add_argument("--hint", action="append")
     prepare_bundle_cmd.add_argument("--limit", type=int, default=8)
 
     retrieve_iterative_cmd = subparsers.add_parser("retrieve-iterative", help="Refine retrieval using a prior answer bundle and new hints.")
-    retrieve_iterative_cmd.add_argument("--search-root", required=True)
-    retrieve_iterative_cmd.add_argument("--graph-root", required=True)
-    retrieve_iterative_cmd.add_argument("--parsed-root", required=True)
+    add_search_root_arg(retrieve_iterative_cmd)
+    add_graph_root_arg(retrieve_iterative_cmd)
+    add_parsed_root_arg(retrieve_iterative_cmd)
     retrieve_iterative_cmd.add_argument("--repo", choices=sorted(ADAPTERS))
     retrieve_iterative_cmd.add_argument("task")
     retrieve_iterative_cmd.add_argument("--prior-bundle")
@@ -437,32 +491,33 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve_iterative_cmd.add_argument("--limit", type=int, default=8)
 
     export_prompts_cmd = subparsers.add_parser("export-benchmark-prompts", help="Export deterministic benchmark prompt packages.")
-    export_prompts_cmd.add_argument("--search-root", required=True)
-    export_prompts_cmd.add_argument("--graph-root", required=True)
-    export_prompts_cmd.add_argument("--parsed-root", required=True)
-    export_prompts_cmd.add_argument("--eval-root", required=True)
+    add_search_root_arg(export_prompts_cmd)
+    add_graph_root_arg(export_prompts_cmd)
+    add_parsed_root_arg(export_prompts_cmd)
+    add_eval_root_arg(export_prompts_cmd)
     export_prompts_cmd.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
     export_prompts_cmd.add_argument("--limit", type=int, default=8)
 
     score_bundles_cmd = subparsers.add_parser("score-answer-bundles", help="Score whether prepared answer bundles are sufficient.")
-    score_bundles_cmd.add_argument("--search-root", required=True)
-    score_bundles_cmd.add_argument("--graph-root", required=True)
-    score_bundles_cmd.add_argument("--parsed-root", required=True)
-    score_bundles_cmd.add_argument("--eval-root", required=True)
+    add_search_root_arg(score_bundles_cmd)
+    add_graph_root_arg(score_bundles_cmd)
+    add_parsed_root_arg(score_bundles_cmd)
+    add_eval_root_arg(score_bundles_cmd)
     score_bundles_cmd.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
     score_bundles_cmd.add_argument("--limit", type=int, default=8)
 
     score_external_cmd = subparsers.add_parser("score-external-answers", help="Score externally produced answers against benchmark expectations.")
-    score_external_cmd.add_argument("--eval-root", required=True)
+    add_eval_root_arg(score_external_cmd)
     score_external_cmd.add_argument("--answers-path", required=True)
 
     benchmark_interactive_cmd = subparsers.add_parser("benchmark-interactive", help="Emit a baseline latency and telemetry report for interactive commands.")
-    benchmark_interactive_cmd.add_argument("--search-root", required=True)
-    benchmark_interactive_cmd.add_argument("--graph-root", required=True)
-    benchmark_interactive_cmd.add_argument("--parsed-root", required=True)
-    benchmark_interactive_cmd.add_argument("--eval-root", required=True)
+    add_search_root_arg(benchmark_interactive_cmd)
+    add_graph_root_arg(benchmark_interactive_cmd)
+    add_parsed_root_arg(benchmark_interactive_cmd)
+    add_eval_root_arg(benchmark_interactive_cmd)
     benchmark_interactive_cmd.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
     benchmark_interactive_cmd.add_argument("--limit", type=int, default=5)
+
     return parser
 
 
