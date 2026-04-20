@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path, PurePosixPath
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from backends.graph_backend import get_graph_backend
 from backends.metadata_store import get_metadata_store
@@ -37,6 +37,8 @@ def graph_root_from_parsed(parsed_root: Path) -> Path:
 
 
 def graph_neighbors_response(
+    search_root: Path,
+    parsed_root: Path,
     graph_root: Path,
     repo_name: str,
     symbol_query: str,
@@ -48,9 +50,27 @@ def graph_neighbors_response(
     node_kinds: Sequence[str] = (),
     limit: int = 20,
 ) -> Dict[str, object]:
+    seed, resolved_symbol, candidates, resolution = resolve_graph_seed(
+        search_root,
+        parsed_root,
+        repo_name,
+        symbol_query,
+        limit=max(limit, 10),
+    )
+    if resolution == "ambiguous":
+        return {
+            "repo": repo_name,
+            "query": symbol_query,
+            "resolved_symbol": None,
+            "candidates": candidates,
+            "matches": [],
+            "neighbors": [],
+            "error": f"ambiguous symbol query: {symbol_query}",
+        }
+
     request: Dict[str, object] = {
         "operation": operation or "neighbors",
-        "seed": symbol_query,
+        "seed": seed,
         "limit": limit,
     }
     if operation is None or edge_types:
@@ -61,10 +81,13 @@ def graph_neighbors_response(
         request["depth"] = depth
     if node_kinds:
         request["node_kinds"] = list(node_kinds)
+
     response = execute_graph_backend_request(graph_root, repo_name, request)
     return {
         "repo": repo_name,
         "query": symbol_query,
+        "resolved_symbol": resolved_symbol,
+        "candidates": candidates,
         "matches": response.get("seeds", []),
         "neighbors": response.get("results", []),
     }
@@ -304,6 +327,7 @@ def get_symbol_body(
             "body": documents[0] if documents else None,
         }
 
+
 def telemetry_snapshot() -> Dict[str, object]:
     return snapshot_telemetry()
 
@@ -423,7 +447,7 @@ def who_imports(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="who_imports", limit=limit)
+    return graph_neighbors_response(search_root, parsed_root, graph_root, repo_name, symbol_query, operation="who_imports", limit=limit)
 
 
 def adjacent_symbols(
@@ -438,6 +462,8 @@ def adjacent_symbols(
     limit: int = 20,
 ) -> Dict[str, object]:
     return graph_neighbors_response(
+        search_root,
+        parsed_root,
         graph_root,
         repo_name,
         symbol_query,
@@ -457,7 +483,7 @@ def callers_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="callers_of", limit=limit)
+    return graph_neighbors_response(search_root, parsed_root, graph_root, repo_name, symbol_query, operation="callers_of", limit=limit)
 
 
 def callees_of(
@@ -469,7 +495,7 @@ def callees_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="callees_of", limit=limit)
+    return graph_neighbors_response(search_root, parsed_root, graph_root, repo_name, symbol_query, operation="callees_of", limit=limit)
 
 
 def reads_of(
@@ -481,7 +507,7 @@ def reads_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="reads_of", limit=limit)
+    return graph_neighbors_response(search_root, parsed_root, graph_root, repo_name, symbol_query, operation="reads_of", limit=limit)
 
 
 def writes_of(
@@ -493,7 +519,7 @@ def writes_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="writes_of", limit=limit)
+    return graph_neighbors_response(search_root, parsed_root, graph_root, repo_name, symbol_query, operation="writes_of", limit=limit)
 
 
 def refs_of(
@@ -505,7 +531,7 @@ def refs_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="refs_of", limit=limit)
+    return graph_neighbors_response(search_root, parsed_root, graph_root, repo_name, symbol_query, operation="refs_of", limit=limit)
 
 
 def implements_of(
@@ -517,7 +543,7 @@ def implements_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="implements_of", limit=limit)
+    return graph_neighbors_response(search_root, parsed_root, graph_root, repo_name, symbol_query, operation="implements_of", limit=limit)
 
 
 def inherits_of(
@@ -529,7 +555,7 @@ def inherits_of(
     *,
     limit: int = 20,
 ) -> Dict[str, object]:
-    return graph_neighbors_response(graph_root, repo_name, symbol_query, operation="inherits_of", limit=limit)
+    return graph_neighbors_response(search_root, parsed_root, graph_root, repo_name, symbol_query, operation="inherits_of", limit=limit)
 
 
 def statement_slice(
@@ -543,12 +569,30 @@ def statement_slice(
     window: int = 8,
 ) -> Dict[str, object]:
     with trace_operation("statement_slice"):
+        seed, resolved_symbol, candidates, resolution = resolve_graph_seed(
+            search_root,
+            parsed_root,
+            repo_name,
+            symbol_query,
+            limit=max(limit, 10),
+        )
+        if resolution == "ambiguous":
+            return {
+                "repo": repo_name,
+                "query": symbol_query,
+                "resolved_symbol": None,
+                "candidates": candidates,
+                "matches": [],
+                "statements": [],
+                "error": f"ambiguous symbol query: {symbol_query}",
+            }
+
         response = execute_graph_backend_request(
             graph_root,
             repo_name,
             {
                 "operation": "statement_slice",
-                "seed": symbol_query,
+                "seed": seed,
                 "limit": limit,
                 "window": window,
             },
@@ -556,6 +600,8 @@ def statement_slice(
         return {
             "repo": repo_name,
             "query": symbol_query,
+            "resolved_symbol": resolved_symbol,
+            "candidates": candidates,
             "matches": response.get("seeds", []),
             "statements": response.get("results", []),
         }
@@ -574,13 +620,57 @@ def path_between(
     direction: str = "both",
 ) -> Dict[str, object]:
     with trace_operation("path_between"):
+        source_seed, resolved_source_symbol, source_candidates, source_resolution = resolve_graph_seed(
+            search_root,
+            parsed_root,
+            repo_name,
+            source_query,
+            limit=max(limit, 10),
+        )
+        if source_resolution == "ambiguous":
+            return {
+                "repo": repo_name,
+                "source_query": source_query,
+                "target_query": target_query,
+                "resolved_source_symbol": None,
+                "resolved_target_symbol": None,
+                "source_candidates": source_candidates,
+                "target_candidates": [],
+                "matches": [],
+                "targets": [],
+                "paths": [],
+                "error": f"ambiguous source symbol query: {source_query}",
+            }
+
+        target_seed, resolved_target_symbol, target_candidates, target_resolution = resolve_graph_seed(
+            search_root,
+            parsed_root,
+            repo_name,
+            target_query,
+            limit=max(limit, 10),
+        )
+        if target_resolution == "ambiguous":
+            return {
+                "repo": repo_name,
+                "source_query": source_query,
+                "target_query": target_query,
+                "resolved_source_symbol": resolved_source_symbol,
+                "resolved_target_symbol": None,
+                "source_candidates": source_candidates,
+                "target_candidates": target_candidates,
+                "matches": [],
+                "targets": [],
+                "paths": [],
+                "error": f"ambiguous target symbol query: {target_query}",
+            }
+
         response = execute_graph_backend_request(
             graph_root,
             repo_name,
             {
                 "operation": "path_between",
-                "seed": source_query,
-                "target": target_query,
+                "seed": source_seed,
+                "target": target_seed,
                 "limit": limit,
                 "edge_types": list(edge_types),
                 "direction": direction,
@@ -590,6 +680,10 @@ def path_between(
             "repo": repo_name,
             "source_query": source_query,
             "target_query": target_query,
+            "resolved_source_symbol": resolved_source_symbol,
+            "resolved_target_symbol": resolved_target_symbol,
+            "source_candidates": source_candidates,
+            "target_candidates": target_candidates,
             "matches": response.get("seeds", []),
             "targets": response.get("targets", []),
             "paths": response.get("results", []),
@@ -644,18 +738,38 @@ def symbol_summary(
     limit: int = 5,
 ) -> Dict[str, object]:
     with trace_operation("symbol_summary"):
+        seed, resolved_symbol, candidates, resolution = resolve_graph_seed(
+            search_root,
+            parsed_root,
+            repo_name,
+            symbol_query,
+            limit=max(limit, 10),
+        )
+        if resolution == "ambiguous":
+            return {
+                "repo": repo_name,
+                "query": symbol_query,
+                "resolved_symbol": None,
+                "candidates": candidates,
+                "matches": [],
+                "summaries": [],
+                "error": f"ambiguous symbol query: {symbol_query}",
+            }
+
         response = execute_graph_backend_request(
             graph_root,
             repo_name,
             {
                 "operation": "symbol_summary",
-                "seed": symbol_query,
+                "seed": seed,
                 "limit": limit,
             },
         )
         return {
             "repo": repo_name,
             "query": symbol_query,
+            "resolved_symbol": resolved_symbol,
+            "candidates": candidates,
             "matches": response.get("seeds", []),
             "summaries": response.get("results", []),
         }
@@ -890,6 +1004,201 @@ def kind_compare_rank(kind: str) -> int:
     return ranking.get(kind, 99)
 
 
+def resolve_graph_seed(
+    search_root: Path,
+    parsed_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 10,
+) -> Tuple[object, Optional[Dict[str, object]], List[Dict[str, object]], Optional[str]]:
+    query = str(symbol_query or "").strip()
+    if not query:
+        return symbol_query, None, [], None
+
+    candidates = resolve_symbol_candidates(search_root, parsed_root, repo_name, query, limit=max(limit, 10))
+    if not candidates:
+        return query, None, [], None
+
+    lowered_query = query.lower()
+    exact_qname = [candidate for candidate in candidates if str(candidate.get("qualified_name") or "").lower() == lowered_query]
+    exact_name = [candidate for candidate in candidates if str(candidate.get("name") or "").lower() == lowered_query]
+    suffix_matches = [candidate for candidate in candidates if qualified_name_endswith_query(str(candidate.get("qualified_name") or ""), lowered_query)]
+
+    selected: Optional[Dict[str, object]] = None
+    resolution: Optional[str] = None
+
+    if len(exact_qname) == 1:
+        selected = exact_qname[0]
+        resolution = "exact_qualified_name"
+    elif len(exact_name) == 1:
+        selected = exact_name[0]
+        resolution = "exact_name"
+    elif len(suffix_matches) == 1:
+        selected = suffix_matches[0]
+        resolution = "qualified_name_suffix"
+    elif len(candidates) == 1:
+        selected = candidates[0]
+        resolution = "single_candidate"
+    else:
+        top_score = float(candidates[0].get("_candidate_score") or 0.0)
+        second_score = float(candidates[1].get("_candidate_score") or 0.0)
+        if top_score >= 120.0 and (top_score - second_score) >= 25.0:
+            selected = candidates[0]
+            resolution = "strong_top_candidate"
+        else:
+            resolution = "ambiguous"
+
+    public_candidates = [strip_candidate_score(candidate) for candidate in candidates[:limit]]
+    if selected is None:
+        return query, None, public_candidates, resolution
+
+    symbol_id = str(selected.get("symbol_id") or "")
+    if not symbol_id:
+        return query, None, public_candidates, resolution
+    return {"node_id": symbol_id}, strip_candidate_score(selected), public_candidates, resolution
+
+
+def resolve_symbol_candidates(
+    search_root: Path,
+    parsed_root: Path,
+    repo_name: str,
+    symbol_query: str,
+    *,
+    limit: int = 10,
+) -> List[Dict[str, object]]:
+    metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name)
+    candidate_rows: List[Dict[str, object]] = []
+
+    def add_symbol(symbol_id: str, *, search_score: float = 0.0) -> None:
+        symbol = metadata_store.get_symbol(symbol_id)
+        if symbol is None:
+            return
+        described = describe_symbol_row(symbol)
+        if described is None:
+            return
+        row = dict(described)
+        row["_search_score"] = float(search_score)
+        candidate_rows.append(row)
+
+    if symbol_query.startswith("sym:"):
+        add_symbol(symbol_query, search_score=500.0)
+
+    for symbol_id in metadata_store.resolve_qname(symbol_query):
+        add_symbol(symbol_id, search_score=400.0)
+
+    for symbol_id in metadata_store.resolve_name(symbol_query, repo=repo_name):
+        add_symbol(symbol_id, search_score=300.0)
+
+    search_backend = get_search_backend(str(search_root.resolve()), repo_name)
+    lexical_results = search_backend.search(
+        symbol_query,
+        limit=max(limit * 4, 20),
+        kinds=("symbol",),
+    )
+    for result in lexical_results:
+        symbol_id = str(result.get("symbol_id") or "")
+        if not symbol_id:
+            continue
+        add_symbol(symbol_id, search_score=float(result.get("score") or 0.0))
+
+    return rank_symbol_candidates(symbol_query, candidate_rows, limit=limit)
+
+
+def rank_symbol_candidates(
+    symbol_query: str,
+    candidates: Sequence[Dict[str, object]],
+    *,
+    limit: int,
+) -> List[Dict[str, object]]:
+    scored: List[Tuple[float, Dict[str, object]]] = []
+    seen = set()
+
+    for candidate in candidates:
+        symbol_id = str(candidate.get("symbol_id") or "")
+        if not symbol_id or symbol_id in seen:
+            continue
+        seen.add(symbol_id)
+
+        scored_candidate = dict(candidate)
+        scored_candidate["_candidate_score"] = score_symbol_candidate(symbol_query, scored_candidate)
+        scored.append((float(scored_candidate["_candidate_score"]), scored_candidate))
+
+    scored.sort(
+        key=lambda item: (
+            -item[0],
+            str(item[1].get("path") or ""),
+            str(item[1].get("qualified_name") or item[1].get("name") or ""),
+        )
+    )
+    return [candidate for _score, candidate in scored[:limit]]
+
+
+def score_symbol_candidate(symbol_query: str, candidate: Dict[str, object]) -> float:
+    lowered_query = str(symbol_query or "").strip().lower()
+    query_tokens = normalize_query_tokens(symbol_query)
+
+    name = str(candidate.get("name") or "").lower()
+    qualified_name = str(candidate.get("qualified_name") or "").lower()
+    path = str(candidate.get("path") or "").lower()
+    kind = str(candidate.get("kind") or "").lower()
+
+    haystack = " ".join(part for part in (name, qualified_name, path, kind) if part)
+    score = float(candidate.get("_search_score") or 0.0)
+
+    if symbol_query.startswith("sym:") and str(candidate.get("symbol_id") or "") == symbol_query:
+        score += 1000.0
+    if lowered_query == qualified_name:
+        score += 400.0
+    if lowered_query == name:
+        score += 250.0
+    if qualified_name_endswith_query(qualified_name, lowered_query):
+        score += 180.0
+    if lowered_query and lowered_query in qualified_name:
+        score += 80.0
+    if lowered_query and lowered_query in path:
+        score += 30.0
+
+    token_hits = 0
+    for token in query_tokens:
+        token_hit = False
+        if token and token in qualified_name:
+            score += 18.0
+            token_hit = True
+        elif token and token in name:
+            score += 15.0
+            token_hit = True
+        elif token and token in path:
+            score += 8.0
+            token_hit = True
+        elif token and token in haystack:
+            score += 6.0
+            token_hit = True
+        if token_hit:
+            token_hits += 1
+
+    if query_tokens and token_hits == len(query_tokens):
+        score += 40.0
+    elif query_tokens:
+        score -= (len(query_tokens) - token_hits) * 8.0
+
+    return score
+
+
+def qualified_name_endswith_query(qualified_name: str, lowered_query: str) -> bool:
+    if not qualified_name or not lowered_query:
+        return False
+    qualified_name = qualified_name.lower()
+    return qualified_name == lowered_query or qualified_name.endswith(f"::{lowered_query}")
+
+
+def strip_candidate_score(candidate: Dict[str, object]) -> Dict[str, object]:
+    stripped = dict(candidate)
+    stripped.pop("_candidate_score", None)
+    stripped.pop("_search_score", None)
+    return stripped
+
+
 def resolve_symbol_query(search_root: Path, parsed_root: Path, repo_name: str, symbol_query: str) -> Optional[Dict[str, object]]:
     metadata_store = get_metadata_store(str(parsed_root.resolve()), repo_name)
     if symbol_query.startswith("sym:"):
@@ -902,6 +1211,12 @@ def resolve_symbol_query(search_root: Path, parsed_root: Path, repo_name: str, s
     name_matches = metadata_store.resolve_name(symbol_query, repo=repo_name)
     if name_matches:
         return metadata_store.get_symbol(name_matches[0])
+
+    ranked_candidates = resolve_symbol_candidates(search_root, parsed_root, repo_name, symbol_query, limit=5)
+    if ranked_candidates:
+        symbol_id = str(ranked_candidates[0].get("symbol_id") or "")
+        if symbol_id:
+            return metadata_store.get_symbol(symbol_id)
 
     matches = where_defined(search_root, parsed_root, repo_name, symbol_query, limit=1)["matches"]
     if not matches:

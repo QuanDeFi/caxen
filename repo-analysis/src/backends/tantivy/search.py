@@ -3,12 +3,26 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from backends.metadata_store import get_metadata_store
 from common.native_tool import query_bm25_index
 from common.text import tokenize
 from search.indexer import list_documents
+
+
+QUERY_EXPANSIONS = {
+    "deduplication": ("dedup", "dedupe", "duplicate", "duplicates"),
+    "dedup": ("dedupe", "duplicate", "duplicates"),
+    "dedupe": ("dedup", "duplicate", "duplicates"),
+    "duplicate": ("dedup", "dedupe", "duplicates"),
+    "duplicates": ("duplicate", "dedup", "dedupe"),
+    "datasource": ("datasources", "source", "stream"),
+    "datasources": ("datasource", "source", "stream"),
+    "routing": ("route", "dispatch", "process", "run"),
+    "route": ("routing", "dispatch", "process", "run"),
+    "pipeline": ("process", "run", "dispatch"),
+}
 
 
 class TantivySearchBackend:
@@ -31,17 +45,49 @@ class TantivySearchBackend:
         path_prefix: Optional[str] = None,
     ) -> List[Dict[str, object]]:
         normalized_query = " ".join(tokenize(query))
+        if not normalized_query:
+            return []
+
         tantivy_dir = self.search_root / self.repo_name / "tantivy"
-        if tantivy_dir.exists():
+        if not tantivy_dir.exists():
+            return []
+
+        fanout = max(limit * 8, 40)
+        merged: Dict[str, Dict[str, object]] = {}
+
+        for query_variant in build_query_variants(query):
+            variant = " ".join(tokenize(query_variant))
+            if not variant:
+                continue
+
             results = query_bm25_index(
                 tantivy_dir,
-                normalized_query,
-                limit=max(limit * 3, limit),
+                variant,
+                limit=fanout,
                 kinds=kinds,
                 path_prefix=path_prefix,
             )
-            return results[:limit]
-        return []
+            for item in results:
+                doc_id = str(item.get("doc_id") or "")
+                if not doc_id:
+                    doc_id = f"{item.get('kind')}::{item.get('path')}::{item.get('qualified_name') or item.get('name') or ''}"
+
+                native_score = float(item.get("score") or 0.0)
+                existing = merged.get(doc_id)
+                if existing is None:
+                    candidate = dict(item)
+                    candidate["_best_native_score"] = native_score
+                    candidate["_variant_hits"] = 1
+                    merged[doc_id] = candidate
+                    continue
+
+                existing["_variant_hits"] = int(existing.get("_variant_hits") or 1) + 1
+                existing["_best_native_score"] = max(float(existing.get("_best_native_score") or 0.0), native_score)
+                if native_score > float(existing.get("score") or 0.0):
+                    for key, value in item.items():
+                        existing[key] = value
+
+        return rerank_search_results(query, list(merged.values()), limit=limit)
 
     def find_file(self, path_pattern: str, *, limit: int) -> List[Dict[str, object]]:
         normalized_pattern = path_pattern.strip()
@@ -130,6 +176,174 @@ class TantivySearchBackend:
             if path.exists():
                 snapshot.extend(snapshot_artifact(path))
         return hashlib.sha1(json.dumps(snapshot, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def build_query_variants(query: str) -> List[str]:
+    base_tokens = [token for token in tokenize(query) if token]
+    if not base_tokens:
+        return []
+
+    variants: List[str] = [" ".join(base_tokens)]
+    for index, token in enumerate(base_tokens):
+        for expanded in QUERY_EXPANSIONS.get(token, ()):
+            alternate = list(base_tokens)
+            alternate[index] = expanded
+            variants.append(" ".join(alternate))
+
+    deduped: List[str] = []
+    seen = set()
+    for variant in variants:
+        normalized = " ".join(tokenize(variant))
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def rerank_search_results(
+    query: str,
+    results: Sequence[Dict[str, object]],
+    *,
+    limit: int,
+) -> List[Dict[str, object]]:
+    query_tokens = normalize_query_tokens(query)
+    expanded_tokens = expand_query_tokens(query_tokens)
+
+    scored: List[Tuple[float, Dict[str, object]]] = []
+    for item in results:
+        reranked = dict(item)
+        score = score_search_result(query, query_tokens, expanded_tokens, reranked)
+        reranked["score"] = round(float(score), 6)
+        reranked.pop("_best_native_score", None)
+        reranked.pop("_variant_hits", None)
+        scored.append((float(reranked["score"]), reranked))
+
+    scored.sort(
+        key=lambda pair: (
+            -pair[0],
+            kind_rank(str(pair[1].get("kind") or "")),
+            str(pair[1].get("path") or ""),
+            str(pair[1].get("qualified_name") or pair[1].get("name") or ""),
+        )
+    )
+    return [item for _score, item in scored[:limit]]
+
+
+def score_search_result(
+    query: str,
+    query_tokens: Sequence[str],
+    expanded_tokens: Sequence[str],
+    item: Dict[str, object],
+) -> float:
+    lowered_query = str(query or "").strip().lower()
+    name = str(item.get("name") or "").lower()
+    qualified_name = str(item.get("qualified_name") or "").lower()
+    title = str(item.get("title") or "").lower()
+    preview = str(item.get("preview") or "").lower()
+    searchable = str(item.get("searchable") or "").lower()
+    path = str(item.get("path") or "").lower()
+    metadata = item.get("metadata", {}) or {}
+    tags = " ".join(str(tag).lower() for tag in metadata.get("tags", []) or ())
+    kind = str(item.get("kind") or "")
+
+    haystack = " ".join(part for part in (name, qualified_name, title, preview, searchable, path, tags) if part)
+    score = float(item.get("_best_native_score") or item.get("score") or 0.0)
+
+    if lowered_query == qualified_name:
+        score += 180.0
+    if lowered_query == name:
+        score += 150.0
+    if lowered_query and qualified_name.endswith(f"::{lowered_query}"):
+        score += 140.0
+    if lowered_query and lowered_query in title:
+        score += 40.0
+    if lowered_query and lowered_query in preview:
+        score += 24.0
+    if lowered_query and lowered_query in path:
+        score += 18.0
+
+    exact_token_hits = 0
+    for token in query_tokens:
+        token_hit = False
+        if token and token in qualified_name:
+            score += 18.0
+            token_hit = True
+        elif token and token in name:
+            score += 16.0
+            token_hit = True
+        elif token and token in title:
+            score += 12.0
+            token_hit = True
+        elif token and token in preview:
+            score += 10.0
+            token_hit = True
+        elif token and token in path:
+            score += 8.0
+            token_hit = True
+        elif token and token in haystack:
+            score += 6.0
+            token_hit = True
+
+        if token_hit:
+            exact_token_hits += 1
+
+    if query_tokens and exact_token_hits == len(query_tokens):
+        score += 35.0
+    elif query_tokens:
+        score -= (len(query_tokens) - exact_token_hits) * 10.0
+
+    expansion_hits = 0
+    for token in expanded_tokens:
+        if token and token in haystack:
+            expansion_hits += 1
+    score += min(expansion_hits, 4) * 4.0
+
+    variant_hits = int(item.get("_variant_hits") or 1)
+    if variant_hits > 1:
+        score += min(variant_hits - 1, 3) * 5.0
+
+    if kind == "symbol":
+        score += 4.0
+    elif kind in {"function_body", "type_body"}:
+        score += 2.0
+
+    if query_tokens and exact_token_hits == 0 and expansion_hits == 0:
+        score -= 25.0
+    if len(query_tokens) >= 2 and exact_token_hits < max(1, len(query_tokens) // 2):
+        score -= 10.0
+
+    return score
+
+
+def normalize_query_tokens(query: str) -> List[str]:
+    return [token.lower() for token in tokenize(query) if token]
+
+
+def expand_query_tokens(query_tokens: Sequence[str]) -> List[str]:
+    expanded: List[str] = []
+    seen = set(query_tokens)
+    for token in query_tokens:
+        for expanded_token in QUERY_EXPANSIONS.get(token, ()):
+            normalized = str(expanded_token).strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            expanded.append(normalized)
+    return expanded
+
+
+def kind_rank(kind: str) -> int:
+    ranking = {
+        "symbol": 0,
+        "function_body": 1,
+        "type_body": 2,
+        "file": 3,
+        "directory": 4,
+        "package": 5,
+        "doc": 6,
+    }
+    return ranking.get(kind, 99)
 
 
 def snapshot_artifact(path: Path) -> List[Dict[str, object]]:
