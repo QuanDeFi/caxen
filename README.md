@@ -1,43 +1,50 @@
 # Caxen Workspace
 
-This repository is an umbrella workspace for comparative analysis of two Solana indexing frameworks and shared analysis tooling.
+This repository is an umbrella workspace for comparative analysis of two Solana indexing frameworks and a local repository-analysis toolkit.
 
-## Top-level model
+## Workspace layout
 
-- `carbon/`: upstream `sevenlabs-hq/carbon` pinned to an explicit submodule commit.
-- `yellowstone-vixen/`: upstream `rpcpool/yellowstone-vixen` pinned to an explicit commit.
-- `repo-analysis/`: all local parser/index/search/summarization/evaluation tooling.
+- `carbon/`  
+  Upstream `sevenlabs-hq/carbon`, pinned as a submodule commit.
 
-Upstream source trees are preserved as close to upstream as possible. New analysis code belongs under `repo-analysis/`.
+- `yellowstone-vixen/`  
+  Upstream `rpcpool/yellowstone-vixen`, pinned as a submodule commit.
 
+- `repo-analysis/`  
+  Local parsing, indexing, graph, search, summarization, retrieval, and evaluation tooling.
 
-## What Repo Analysis Contains
+Upstream source trees should stay as close to upstream as possible. Local analysis code belongs under `repo-analysis/`.
 
-`repo-analysis` provides:
+## What `repo-analysis` provides
 
-- raw inventory generation for the upstream repos
-- Rust symbol, reference, statement, and summary extraction into `metadata.lmdb`
-- graph artifacts served by a RyuGraph backend
-- Tantivy-backed lexical search artifacts
+`repo-analysis` builds and serves a layered repository memory for LLM-oriented code understanding:
+
+- raw inventory generation for upstream repos
+- Rust symbol, import, reference, statement, and summary extraction
+- LMDB-backed parsed metadata (`metadata.lmdb`)
+- RyuGraph-backed structural graph storage and traversal
+- Tantivy-backed lexical retrieval
 - optional embedding sidecar artifacts
-- graph query, retrieval-planning, answer-bundle, and evaluation CLI commands
+- graph query, retrieval planning, answer-bundle, and evaluation commands
 - native worker support for tree-sitter inspection and BM25 indexing
-- body/doc chunk indexing for symbol-level retrieval
-- summary sync into LMDB metadata and graph summary nodes/edges
-- explicit lookup/navigation tools for files, lexical search, signatures, bodies, enclosing context, implementations, inheritance, and bounded subgraph expansion
+- exact symbol/file/body/signature/context access
+- iterative retrieval and graph-backed context expansion
 
-The main implementation lives under:
+## Main implementation areas
 
 - `repo-analysis/src/`
 - `repo-analysis/native/`
 - `repo-analysis/scripts/`
 - `repo-analysis/tests/`
 
-Generated local artifacts live under:
+## Generated local artifacts
+
+Artifacts are written under `repo-analysis/data/`:
 
 - `repo-analysis/data/raw/`
 - `repo-analysis/data/parsed/`
 - `repo-analysis/data/graph/`
 - `repo-analysis/data/search/`
-- `repo-analysis/data/summaries/` (build progress only, if present)
+- `repo-analysis/data/summaries/`  
+  Primarily summary build progress, if present
 - `repo-analysis/data/eval/`
