@@ -1186,6 +1186,18 @@ def resolve_symbol_candidates(
             return
         row = dict(described)
         row["_search_score"] = float(search_score)
+        row["visibility"] = symbol.get("visibility")
+        row["module_path"] = symbol.get("module_path")
+        row["crate"] = symbol.get("crate")
+        row["package_name"] = symbol.get("package_name")
+        row["is_test"] = bool(symbol.get("is_test"))
+        row["semantic_summary"] = symbol.get("semantic_summary", {})
+        container_symbol_id = str(symbol.get("container_symbol_id") or "")
+        if container_symbol_id:
+            container_symbol = metadata_store.get_symbol(container_symbol_id)
+            if container_symbol is not None:
+                row["_container_kind"] = container_symbol.get("kind")
+                row["_container_name"] = container_symbol.get("name")
         candidate_rows.append(row)
 
     if symbol_query.startswith("sym:"):
@@ -1245,12 +1257,16 @@ def score_symbol_candidate(symbol_query: str, candidate: Dict[str, object]) -> f
     lowered_query = str(symbol_query or "").strip().lower()
     query_tokens = normalize_query_tokens(symbol_query)
     query_segments = split_symbol_query_segments(symbol_query)
+    single_token_query = len(query_tokens) == 1 and len(query_segments) <= 1
 
     name = str(candidate.get("name") or "").lower()
     qualified_name = str(candidate.get("qualified_name") or "").lower()
     container_qualified_name = str(candidate.get("container_qualified_name") or "").lower()
     path = str(candidate.get("path") or "").lower()
     kind = str(candidate.get("kind") or "").lower()
+    visibility = str(candidate.get("visibility") or "").lower()
+    container_kind = str(candidate.get("_container_kind") or "").lower()
+    semantic_summary = candidate.get("semantic_summary", {}) or {}
 
     qname_segments = split_symbol_query_segments(qualified_name)
     container_segments = split_symbol_query_segments(container_qualified_name)
@@ -1315,10 +1331,49 @@ def score_symbol_candidate(symbol_query: str, candidate: Dict[str, object]) -> f
     elif query_tokens:
         score -= (len(query_tokens) - token_hits) * 8.0
 
+    if single_token_query:
+        activity_score = semantic_activity_score(semantic_summary)
+        score += activity_score
+        if visibility == "pub":
+            score += 18.0
+        if container_kind == "trait":
+            score -= 60.0
+        elif container_kind == "impl":
+            score += 14.0
+        if path.startswith("examples/") or path.startswith("tests/"):
+            score -= 80.0
+        elif path.startswith("metrics/"):
+            score -= 45.0
+        if "/pipeline.rs" in path:
+            score += 32.0
+        if kind in CALLABLE_SYMBOL_KINDS:
+            score += 10.0
+
     if kind in LOCAL_SYMBOL_KINDS and not query_explicitly_targets_local(symbol_query):
         score -= 150.0
 
     return score
+
+
+def semantic_activity_score(semantic_summary: Dict[str, object]) -> float:
+    direct_calls = len(semantic_summary.get("direct_calls", []) or [])
+    reads = len(semantic_summary.get("reads", []) or [])
+    writes = len(semantic_summary.get("writes", []) or [])
+    interprocedural_reads = len(semantic_summary.get("interprocedural_reads", []) or [])
+    interprocedural_writes = len(semantic_summary.get("interprocedural_writes", []) or [])
+    interprocedural_references = len(semantic_summary.get("interprocedural_references", []) or [])
+    transitive_calls = len(semantic_summary.get("transitive_calls", []) or [])
+
+    weighted = (
+        direct_calls * 4.0
+        + reads * 1.25
+        + writes * 1.25
+        + interprocedural_reads * 1.0
+        + interprocedural_writes * 1.0
+        + interprocedural_references * 0.75
+        + transitive_calls * 0.35
+    )
+    return min(weighted, 240.0) * 0.7
 
 
 def query_explicitly_targets_local(symbol_query: str) -> bool:

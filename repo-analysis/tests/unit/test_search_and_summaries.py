@@ -33,8 +33,10 @@ from agents.toolkit import (
     summarize_path,
     trace_calls,
     where_defined,
+    rank_symbol_candidates,
 )
 from backends.metadata_store import get_metadata_store
+from backends.tantivy.search import TantivySearchBackend, rerank_search_results
 from common.telemetry import reset_telemetry, snapshot_telemetry
 from embeddings.indexer import build_embedding_index, query_embedding_index
 from evaluation.harness import export_benchmark_prompts, run_benchmarks, score_answer_bundles, score_external_answers
@@ -252,6 +254,164 @@ class SearchAndSummaryTest(unittest.TestCase):
 
             body = get_symbol_body(paths["search_root"], paths["parsed_root"], "demo", "answer")
             self.assertEqual(body["body"]["kind"], "function_body")
+
+    def test_default_tantivy_search_excludes_statement_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            search_root = Path(tmpdir) / "search"
+            tantivy_dir = search_root / "demo" / "tantivy"
+            tantivy_dir.mkdir(parents=True)
+
+            backend = TantivySearchBackend(search_root, "demo")
+            with mock.patch("backends.tantivy.search.query_bm25_index", return_value=[] ) as query_mock:
+                backend.search("duplicate filter", limit=5)
+
+            self.assertTrue(query_mock.called)
+            kinds = query_mock.call_args.kwargs["kinds"]
+            self.assertNotIn("statement", kinds)
+            self.assertIn("symbol", kinds)
+            self.assertIn("type_body", kinds)
+
+    def test_rerank_search_results_prefers_canonical_dedup_symbols_over_noise(self) -> None:
+        results = [
+            {
+                "doc_id": "dedup-struct",
+                "kind": "symbol",
+                "name": "DeduplicationFilter",
+                "qualified_name": "carbon_core::filter::DeduplicationFilter",
+                "title": "carbon_core::filter::DeduplicationFilter",
+                "preview": "pub struct DeduplicationFilter {",
+                "path": "crates/core/src/filter.rs",
+                "searchable": "DeduplicationFilter duplicate deduplication filter",
+                "score": 50.0,
+                "metadata": {"kind": "struct", "tags": []},
+            },
+            {
+                "doc_id": "dedup-impl",
+                "kind": "symbol",
+                "name": "impl Filter for DeduplicationFilter",
+                "qualified_name": "carbon_core::filter::impl Filter for DeduplicationFilter",
+                "title": "carbon_core::filter::impl Filter for DeduplicationFilter",
+                "preview": "impl Filter for DeduplicationFilter {",
+                "path": "crates/core/src/filter.rs",
+                "searchable": "impl Filter for DeduplicationFilter duplicate filter",
+                "score": 52.0,
+                "metadata": {"kind": "impl", "tags": []},
+            },
+            {
+                "doc_id": "dedup-method",
+                "kind": "symbol",
+                "name": "filter_instruction",
+                "qualified_name": "carbon_core::filter::DeduplicationFilter::filter_instruction",
+                "title": "carbon_core::filter::DeduplicationFilter::filter_instruction",
+                "preview": "fn filter_instruction(&self, ...) -> FilterResult {",
+                "path": "crates/core/src/filter.rs",
+                "searchable": "DeduplicationFilter filter instruction duplicate",
+                "score": 49.0,
+                "metadata": {"kind": "method", "tags": []},
+            },
+            {
+                "doc_id": "dedup-body",
+                "kind": "type_body",
+                "name": "impl Filter for DeduplicationFilter",
+                "qualified_name": "carbon_core::filter::impl Filter for DeduplicationFilter",
+                "title": "carbon_core::filter::impl Filter for DeduplicationFilter body",
+                "preview": "impl Filter for DeduplicationFilter { fn filter_instruction(...) }",
+                "path": "crates/core/src/filter.rs",
+                "searchable": "impl Filter for DeduplicationFilter body duplicate filter",
+                "score": 53.0,
+                "metadata": {"kind": "impl", "tags": []},
+            },
+            {
+                "doc_id": "dedup-field",
+                "kind": "symbol",
+                "name": "seen_instructions",
+                "qualified_name": "carbon_core::filter::DeduplicationFilter::seen_instructions",
+                "title": "carbon_core::filter::DeduplicationFilter::seen_instructions",
+                "preview": "seen_instructions: Arc<RwLock<...>>",
+                "path": "crates/core/src/filter.rs",
+                "searchable": "seen_instructions duplicate filter instructions",
+                "score": 54.0,
+                "metadata": {"kind": "field", "tags": []},
+            },
+            {
+                "doc_id": "dedup-statement",
+                "kind": "statement",
+                "name": "let@L126",
+                "qualified_name": "carbon_core::filter::DeduplicationFilter::filter_instruction",
+                "title": "crates/core/src/filter.rs:126",
+                "preview": "let key = (sig, path)",
+                "path": "crates/core/src/filter.rs",
+                "searchable": "statement let key duplicate filter",
+                "score": 60.0,
+                "metadata": {"kind": "let", "tags": []},
+            },
+        ]
+
+        ranked = rerank_search_results("duplicate filter", results, limit=6)
+        ranked_ids = [item["doc_id"] for item in ranked]
+
+        self.assertEqual(ranked_ids[0], "dedup-struct")
+        self.assertIn("dedup-impl", ranked_ids[:3])
+        self.assertIn("dedup-method", ranked_ids[:5])
+        self.assertGreater(ranked_ids.index("dedup-field"), ranked_ids.index("dedup-method"))
+        self.assertEqual(ranked_ids[-1], "dedup-statement")
+
+    def test_rank_symbol_candidates_prefers_central_concrete_method_for_short_query(self) -> None:
+        candidates = [
+            {
+                "symbol_id": "trait-run",
+                "name": "run",
+                "qualified_name": "carbon_core::instruction::InstructionPipes::run",
+                "kind": "method",
+                "path": "crates/core/src/instruction.rs",
+                "visibility": "private",
+                "_container_kind": "trait",
+                "semantic_summary": {},
+                "_search_score": 280.0,
+            },
+            {
+                "symbol_id": "pipe-run",
+                "name": "run",
+                "qualified_name": "carbon_core::account::AccountPipe::run",
+                "kind": "method",
+                "path": "crates/core/src/account.rs",
+                "visibility": "private",
+                "_container_kind": "impl",
+                "semantic_summary": {
+                    "direct_calls": [{}] * 6,
+                    "reads": [{}] * 16,
+                    "writes": [],
+                    "interprocedural_reads": [{}] * 7,
+                    "interprocedural_writes": [],
+                    "interprocedural_references": [{}] * 7,
+                    "transitive_calls": [],
+                },
+                "_search_score": 290.0,
+            },
+            {
+                "symbol_id": "pipeline-run",
+                "name": "run",
+                "qualified_name": "carbon_core::pipeline::Pipeline::run",
+                "kind": "method",
+                "path": "crates/core/src/pipeline.rs",
+                "visibility": "pub",
+                "_container_kind": "impl",
+                "semantic_summary": {
+                    "direct_calls": [{}] * 38,
+                    "reads": [{}] * 59,
+                    "writes": [{}] * 3,
+                    "interprocedural_reads": [{}] * 249,
+                    "interprocedural_writes": [{}] * 4,
+                    "interprocedural_references": [{}] * 396,
+                    "transitive_calls": [{}] * 124,
+                },
+                "_search_score": 260.0,
+            },
+        ]
+
+        ranked = rank_symbol_candidates("run", candidates, limit=3)
+
+        self.assertEqual(ranked[0]["qualified_name"], "carbon_core::pipeline::Pipeline::run")
 
     def test_parser_probe_and_embedding_sidecar_are_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

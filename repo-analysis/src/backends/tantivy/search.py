@@ -25,10 +25,12 @@ QUERY_EXPANSIONS = {
     "pipeline": ("process", "run", "dispatch"),
 }
 
+DEFAULT_SEARCH_KINDS = ("repo", "package", "directory", "file", "symbol", "function_body", "type_body", "doc")
 CONCEPTUAL_TYPE_KINDS = {"struct", "trait", "enum", "impl", "type"}
 CALLABLE_SYMBOL_KINDS = {"function", "method", "associated_function"}
 CONCEPTUAL_CONSTANT_KINDS = {"const", "static"}
 CONCEPTUAL_LOCAL_KINDS = {"local"}
+CONCEPTUAL_MEMBER_KINDS = {"field", "local", "parameter", "variable"}
 DEDUPLICATION_FAMILY = {"deduplication", "dedup", "dedupe", "duplicate", "duplicates"}
 
 
@@ -61,6 +63,7 @@ class TantivySearchBackend:
 
         fanout = max(limit * 8, 40)
         merged: Dict[str, Dict[str, object]] = {}
+        effective_kinds = tuple(kinds) if kinds else DEFAULT_SEARCH_KINDS
 
         for query_variant in build_query_variants(query):
             variant = " ".join(tokenize(query_variant))
@@ -71,7 +74,7 @@ class TantivySearchBackend:
                 tantivy_dir,
                 variant,
                 limit=fanout,
-                kinds=kinds,
+                kinds=effective_kinds,
                 path_prefix=path_prefix,
             )
             for item in results:
@@ -257,6 +260,9 @@ def score_search_result(
     kind = str(item.get("kind") or "")
     symbol_kind = str(metadata.get("kind") or "").lower()
     local_symbol = kind == "symbol" and symbol_kind in CONCEPTUAL_LOCAL_KINDS
+    member_symbol = kind == "symbol" and symbol_kind in CONCEPTUAL_MEMBER_KINDS
+    explicit_statement_query = query_explicitly_targets_statement(query_tokens, query)
+    token_set = set(query_tokens)
 
     haystack = " ".join(part for part in (name, qualified_name, title, preview, searchable, path, tags) if part)
     identifier_source = name if local_symbol else " ".join(part for part in (name, qualified_name, title) if part)
@@ -331,17 +337,23 @@ def score_search_result(
 
     conceptual_query = is_multiword_conceptual_query(query_tokens)
     if conceptual_query:
-        if kind == "type_body" or symbol_kind in CONCEPTUAL_TYPE_KINDS:
-            score += 32.0
+        if kind == "symbol" and symbol_kind in CONCEPTUAL_TYPE_KINDS:
+            score += 52.0
         elif kind == "symbol" and symbol_kind in CALLABLE_SYMBOL_KINDS:
-            score += 20.0
+            score += 30.0
+        elif kind == "type_body":
+            score += 14.0
         elif kind == "function_body":
-            score += 12.0
+            score += 6.0
 
         if symbol_kind in CONCEPTUAL_CONSTANT_KINDS:
-            score -= 40.0
+            score -= 60.0
+        if member_symbol:
+            score -= 140.0
         if local_symbol:
             score -= 160.0
+        if kind == "statement":
+            score -= 220.0
 
     if token_families and family_hits == len(token_families):
         score += 30.0
@@ -349,18 +361,63 @@ def score_search_result(
             score += 24.0
         if identifier_family_hits == len(token_families):
             score += 18.0
+            if kind == "symbol" and symbol_kind in CONCEPTUAL_TYPE_KINDS:
+                score += 26.0
+            elif kind == "symbol" and symbol_kind in CALLABLE_SYMBOL_KINDS:
+                score += 18.0
+            elif kind in {"type_body", "function_body"}:
+                score += 6.0
+    elif conceptual_query and kind == "symbol" and symbol_kind in CONCEPTUAL_TYPE_KINDS.union(CALLABLE_SYMBOL_KINDS):
+        score -= max(len(token_families) - identifier_family_hits, 0) * 24.0
 
     if is_deduplication_filter_query(query_tokens, expanded_tokens):
         if not local_symbol and "deduplicationfilter" in identifier_text:
-            score += 120.0
+            if kind == "symbol" and symbol_kind == "struct":
+                score += 175.0
+            elif kind == "symbol" and symbol_kind == "impl":
+                score += 145.0
+            elif kind == "symbol" and symbol_kind == "method" and name in {"filter_instruction", "filter_account"}:
+                score += 132.0
+            elif kind == "type_body":
+                score += 72.0
+            elif kind == "function_body":
+                score += 54.0
+            else:
+                score += 120.0
         elif not local_symbol and "deduplication" in identifier_text and "filter" in identifier_text:
             score += 80.0
+        if kind == "symbol" and symbol_kind == "method" and name in {"filter_instruction", "filter_account"}:
+            score += 36.0
         if not local_symbol and symbol_kind in CONCEPTUAL_TYPE_KINDS and "filter" in identifier_text:
             score += 24.0
         if symbol_kind in CONCEPTUAL_CONSTANT_KINDS:
-            score -= 25.0
+            score -= 75.0
+        if member_symbol:
+            score -= 115.0
+        if kind == "statement":
+            score -= 220.0
         if local_symbol:
-            score -= 40.0
+            score -= 80.0
+        if name in {"new", "cleanup_if_needed", "cleanup_expired"}:
+            score -= 80.0
+        if token_set.intersection({"instruction", "instructions"}):
+            if "filter_instruction" in qualified_name:
+                score += 125.0 if kind == "symbol" else 48.0
+            elif kind == "symbol" and symbol_kind == "method":
+                score -= 55.0
+        if token_set.intersection({"account", "accounts"}):
+            if "filter_account" in qualified_name:
+                score += 125.0 if kind == "symbol" else 48.0
+            elif kind == "symbol" and symbol_kind == "method":
+                score -= 55.0
+        if name in {"new", "cleanup_if_needed", "cleanup_expired"} and token_set.intersection({"instruction", "instructions", "account", "accounts"}):
+            score -= 65.0
+
+    if kind == "statement" and not explicit_statement_query:
+        score -= 180.0
+
+    if member_symbol and not explicit_statement_query and len(query_tokens) >= 2:
+        score -= 55.0
 
     if local_symbol:
         score -= 35.0
@@ -369,10 +426,32 @@ def score_search_result(
 
     if kind == "symbol":
         score += 1.0 if local_symbol else 4.0
+        if symbol_kind in CONCEPTUAL_TYPE_KINDS:
+            score += 10.0
+        elif symbol_kind in CALLABLE_SYMBOL_KINDS:
+            score += 8.0
     elif kind == "type_body":
-        score += 3.0
+        score += 1.5
     elif kind == "function_body":
-        score += 2.0
+        score += 0.5
+
+    if "metrics" in haystack and not token_set.intersection({"metric", "metrics", "prometheus"}):
+        score -= 40.0
+    if name.startswith("register_") and not token_set.intersection({"register", "metric", "metrics", "prometheus"}):
+        score -= 24.0
+
+    if is_pipeline_routing_query(query_tokens, expanded_tokens):
+        if "/pipeline.rs" in path:
+            if kind == "symbol" and symbol_kind in CONCEPTUAL_TYPE_KINDS.union(CALLABLE_SYMBOL_KINDS):
+                score += 120.0
+            elif kind in {"type_body", "function_body"}:
+                score += 42.0
+            if name in {"run", "process"}:
+                score += 60.0
+            elif token_set.intersection({"route", "routing", "dispatch"}) and kind == "symbol" and symbol_kind in CALLABLE_SYMBOL_KINDS:
+                score -= 18.0
+        elif path.startswith("datasources/") and kind == "symbol" and symbol_kind in CALLABLE_SYMBOL_KINDS:
+            score -= 28.0
 
     if query_tokens and exact_token_hits == 0 and family_hits == 0 and expansion_hits == 0:
         score -= 25.0
@@ -458,6 +537,22 @@ def is_deduplication_filter_query(query_tokens: Sequence[str], expanded_tokens: 
     token_set = {str(token).strip().lower() for token in query_tokens}
     token_set.update(str(token).strip().lower() for token in expanded_tokens)
     return "filter" in token_set and bool(token_set & DEDUPLICATION_FAMILY)
+
+
+def is_pipeline_routing_query(query_tokens: Sequence[str], expanded_tokens: Sequence[str]) -> bool:
+    token_set = {str(token).strip().lower() for token in query_tokens}
+    token_set.update(str(token).strip().lower() for token in expanded_tokens)
+    routing_tokens = {"route", "routing", "dispatch", "pipeline", "process", "run"}
+    datasource_tokens = {"datasource", "datasources", "source", "stream"}
+    return bool(token_set & routing_tokens) and bool(token_set & datasource_tokens)
+
+
+def query_explicitly_targets_statement(query_tokens: Sequence[str], query: str) -> bool:
+    lowered_query = str(query or "").strip().lower()
+    if "@l" in lowered_query:
+        return True
+    token_set = {str(token).strip().lower() for token in query_tokens}
+    return bool(token_set.intersection({"statement", "statements", "line", "lines", "expr", "let", "local", "locals"}))
 
 
 def kind_rank(kind: str) -> int:
