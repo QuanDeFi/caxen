@@ -13,6 +13,9 @@ if str(SRC_ROOT) not in sys.path:
 from agents.toolkit import (
     compare_repos,
     execute_graph_query,
+    find_datasources,
+    find_decoders,
+    find_runtime_handlers,
     expand_subgraph,
     find_file,
     find_symbol,
@@ -36,7 +39,7 @@ from agents.toolkit import (
     rank_symbol_candidates,
 )
 from backends.metadata_store import get_metadata_store
-from backends.tantivy.search import TantivySearchBackend, rerank_search_results
+from backends.tantivy.search import TantivySearchBackend, build_query_variants, rerank_search_results
 from common.telemetry import reset_telemetry, snapshot_telemetry
 from embeddings.indexer import build_embedding_index, query_embedding_index
 from evaluation.harness import export_benchmark_prompts, run_benchmarks, score_answer_bundles, score_external_answers
@@ -192,8 +195,8 @@ class SearchAndSummaryTest(unittest.TestCase):
             {
                 "kind": "symbol",
                 "name": "source",
-                "qualified_name": "yellowstone_vixen::Runtime::source",
-                "path": "crates/runtime/src/lib.rs",
+                "qualified_name": "acme_runtime::Runtime::source",
+                "path": "crates/runtime/src/runtime.rs",
                 "score": 4.2,
                 "metadata": {"kind": "field"},
                 "reasons": ["lexical"],
@@ -201,7 +204,7 @@ class SearchAndSummaryTest(unittest.TestCase):
             {
                 "kind": "symbol",
                 "name": "SourceTrait",
-                "qualified_name": "yellowstone_vixen::sources::SourceTrait",
+                "qualified_name": "acme_runtime::source::SourceTrait",
                 "path": "crates/runtime/src/sources.rs",
                 "score": 3.9,
                 "metadata": {"kind": "trait"},
@@ -271,53 +274,111 @@ class SearchAndSummaryTest(unittest.TestCase):
             self.assertIn("symbol", kinds)
             self.assertIn("type_body", kinds)
 
+    def test_tantivy_search_uses_broad_fanout_for_small_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            search_root = Path(tmpdir) / "search"
+            tantivy_dir = search_root / "demo" / "tantivy"
+            tantivy_dir.mkdir(parents=True)
+
+            backend = TantivySearchBackend(search_root, "demo")
+            with mock.patch("backends.tantivy.search.query_bm25_index", return_value=[] ) as query_mock:
+                backend.search("slot replay capabilities", limit=5)
+
+            self.assertTrue(query_mock.called)
+            self.assertGreaterEqual(query_mock.call_args.kwargs["limit"], 100)
+
+    def test_build_query_variants_adds_adjacent_phrase_windows(self) -> None:
+        variants = build_query_variants("slot replay capabilities")
+        self.assertIn("slot replay", variants)
+        self.assertIn("replay capabilities", variants)
+        self.assertIn("slot replay capabilities", variants)
+
+    def test_search_index_indexes_markdown_file_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = seed_demo_workspace(Path(tmpdir))
+            readme_path = paths["repo_root"] / "README.md"
+            readme_path.write_text(
+                "The demo runtime provides never miss data guarantees via slot replay capabilities.\n",
+                encoding="utf-8",
+            )
+
+            repo_map_path = paths["raw_root"] / "demo" / "repo_map.json"
+            repo_map = json.loads(repo_map_path.read_text(encoding="utf-8"))
+            repo_map["files"].append(
+                {
+                    "path": "README.md",
+                    "size": readme_path.stat().st_size,
+                    "extension": ".md",
+                    "language": "Markdown",
+                    "generated": False,
+                }
+            )
+            repo_map_path.write_text(json.dumps(repo_map), encoding="utf-8")
+
+            build_search_index(
+                "demo",
+                paths["repo_root"],
+                paths["raw_root"],
+                paths["parsed_root"],
+                paths["search_root"],
+            )
+
+            lexical = search_lexical(
+                paths["search_root"],
+                "demo",
+                "never miss data guarantees",
+                limit=5,
+            )
+            top_paths = [item["path"] for item in lexical["results"]]
+            self.assertIn("README.md", top_paths)
+
     def test_rerank_search_results_prefers_canonical_dedup_symbols_over_noise(self) -> None:
         results = [
             {
                 "doc_id": "dedup-struct",
                 "kind": "symbol",
-                "name": "DeduplicationFilter",
-                "qualified_name": "carbon_core::filter::DeduplicationFilter",
-                "title": "carbon_core::filter::DeduplicationFilter",
-                "preview": "pub struct DeduplicationFilter {",
-                "path": "crates/core/src/filter.rs",
-                "searchable": "DeduplicationFilter duplicate deduplication filter",
+                "name": "DuplicateFilter",
+                "qualified_name": "acme_runtime::filter::DuplicateFilter",
+                "title": "acme_runtime::filter::DuplicateFilter",
+                "preview": "pub struct DuplicateFilter {",
+                "path": "crates/runtime/src/filter.rs",
+                "searchable": "DuplicateFilter duplicate deduplication filter",
                 "score": 50.0,
                 "metadata": {"kind": "struct", "tags": []},
             },
             {
                 "doc_id": "dedup-impl",
                 "kind": "symbol",
-                "name": "impl Filter for DeduplicationFilter",
-                "qualified_name": "carbon_core::filter::impl Filter for DeduplicationFilter",
-                "title": "carbon_core::filter::impl Filter for DeduplicationFilter",
-                "preview": "impl Filter for DeduplicationFilter {",
-                "path": "crates/core/src/filter.rs",
-                "searchable": "impl Filter for DeduplicationFilter duplicate filter",
+                "name": "impl Filter for DuplicateFilter",
+                "qualified_name": "acme_runtime::filter::impl Filter for DuplicateFilter",
+                "title": "acme_runtime::filter::impl Filter for DuplicateFilter",
+                "preview": "impl Filter for DuplicateFilter {",
+                "path": "crates/runtime/src/filter.rs",
+                "searchable": "impl Filter for DuplicateFilter duplicate filter",
                 "score": 52.0,
                 "metadata": {"kind": "impl", "tags": []},
             },
             {
                 "doc_id": "dedup-method",
                 "kind": "symbol",
-                "name": "filter_instruction",
-                "qualified_name": "carbon_core::filter::DeduplicationFilter::filter_instruction",
-                "title": "carbon_core::filter::DeduplicationFilter::filter_instruction",
-                "preview": "fn filter_instruction(&self, ...) -> FilterResult {",
-                "path": "crates/core/src/filter.rs",
-                "searchable": "DeduplicationFilter filter instruction duplicate",
+                "name": "filter_event",
+                "qualified_name": "acme_runtime::filter::DuplicateFilter::filter_event",
+                "title": "acme_runtime::filter::DuplicateFilter::filter_event",
+                "preview": "fn filter_event(&self, ...) -> FilterResult {",
+                "path": "crates/runtime/src/filter.rs",
+                "searchable": "DuplicateFilter filter event duplicate",
                 "score": 49.0,
                 "metadata": {"kind": "method", "tags": []},
             },
             {
                 "doc_id": "dedup-body",
                 "kind": "type_body",
-                "name": "impl Filter for DeduplicationFilter",
-                "qualified_name": "carbon_core::filter::impl Filter for DeduplicationFilter",
-                "title": "carbon_core::filter::impl Filter for DeduplicationFilter body",
-                "preview": "impl Filter for DeduplicationFilter { fn filter_instruction(...) }",
-                "path": "crates/core/src/filter.rs",
-                "searchable": "impl Filter for DeduplicationFilter body duplicate filter",
+                "name": "impl Filter for DuplicateFilter",
+                "qualified_name": "acme_runtime::filter::impl Filter for DuplicateFilter",
+                "title": "acme_runtime::filter::impl Filter for DuplicateFilter body",
+                "preview": "impl Filter for DuplicateFilter { fn filter_event(...) }",
+                "path": "crates/runtime/src/filter.rs",
+                "searchable": "impl Filter for DuplicateFilter body duplicate filter",
                 "score": 53.0,
                 "metadata": {"kind": "impl", "tags": []},
             },
@@ -325,10 +386,10 @@ class SearchAndSummaryTest(unittest.TestCase):
                 "doc_id": "dedup-field",
                 "kind": "symbol",
                 "name": "seen_instructions",
-                "qualified_name": "carbon_core::filter::DeduplicationFilter::seen_instructions",
-                "title": "carbon_core::filter::DeduplicationFilter::seen_instructions",
+                "qualified_name": "acme_runtime::filter::DuplicateFilter::seen_items",
+                "title": "acme_runtime::filter::DuplicateFilter::seen_items",
                 "preview": "seen_instructions: Arc<RwLock<...>>",
-                "path": "crates/core/src/filter.rs",
+                "path": "crates/runtime/src/filter.rs",
                 "searchable": "seen_instructions duplicate filter instructions",
                 "score": 54.0,
                 "metadata": {"kind": "field", "tags": []},
@@ -337,10 +398,10 @@ class SearchAndSummaryTest(unittest.TestCase):
                 "doc_id": "dedup-statement",
                 "kind": "statement",
                 "name": "let@L126",
-                "qualified_name": "carbon_core::filter::DeduplicationFilter::filter_instruction",
-                "title": "crates/core/src/filter.rs:126",
+                "qualified_name": "acme_runtime::filter::DuplicateFilter::filter_event",
+                "title": "crates/runtime/src/filter.rs:126",
                 "preview": "let key = (sig, path)",
-                "path": "crates/core/src/filter.rs",
+                "path": "crates/runtime/src/filter.rs",
                 "searchable": "statement let key duplicate filter",
                 "score": 60.0,
                 "metadata": {"kind": "let", "tags": []},
@@ -361,9 +422,9 @@ class SearchAndSummaryTest(unittest.TestCase):
             {
                 "symbol_id": "trait-run",
                 "name": "run",
-                "qualified_name": "carbon_core::instruction::InstructionPipes::run",
+                "qualified_name": "acme_runtime::traits::Runnable::run",
                 "kind": "method",
-                "path": "crates/core/src/instruction.rs",
+                "path": "crates/runtime/src/traits.rs",
                 "visibility": "private",
                 "_container_kind": "trait",
                 "semantic_summary": {},
@@ -372,9 +433,9 @@ class SearchAndSummaryTest(unittest.TestCase):
             {
                 "symbol_id": "pipe-run",
                 "name": "run",
-                "qualified_name": "carbon_core::account::AccountPipe::run",
+                "qualified_name": "acme_runtime::workers::TaskWorker::run",
                 "kind": "method",
-                "path": "crates/core/src/account.rs",
+                "path": "crates/runtime/src/worker.rs",
                 "visibility": "private",
                 "_container_kind": "impl",
                 "semantic_summary": {
@@ -389,11 +450,11 @@ class SearchAndSummaryTest(unittest.TestCase):
                 "_search_score": 290.0,
             },
             {
-                "symbol_id": "pipeline-run",
+                "symbol_id": "engine-run",
                 "name": "run",
-                "qualified_name": "carbon_core::pipeline::Pipeline::run",
+                "qualified_name": "acme_runtime::engine::RuntimeEngine::run",
                 "kind": "method",
-                "path": "crates/core/src/pipeline.rs",
+                "path": "crates/runtime/src/engine.rs",
                 "visibility": "pub",
                 "_container_kind": "impl",
                 "semantic_summary": {
@@ -411,7 +472,162 @@ class SearchAndSummaryTest(unittest.TestCase):
 
         ranked = rank_symbol_candidates("run", candidates, limit=3)
 
-        self.assertEqual(ranked[0]["qualified_name"], "carbon_core::pipeline::Pipeline::run")
+        self.assertEqual(ranked[0]["qualified_name"], "acme_runtime::engine::RuntimeEngine::run")
+
+    def test_rank_symbol_candidates_prefers_nominal_symbol_for_pascal_case_query(self) -> None:
+        candidates = [
+            {
+                "symbol_id": "source-method",
+                "name": "source",
+                "qualified_name": "acme_runtime::builder::RuntimeBuilder::source",
+                "kind": "method",
+                "path": "crates/runtime/src/builder.rs",
+                "visibility": "pub",
+                "_container_kind": "impl",
+                "semantic_summary": {
+                    "direct_calls": [{}] * 12,
+                    "reads": [{}] * 8,
+                    "writes": [{}] * 2,
+                    "interprocedural_reads": [{}] * 12,
+                    "interprocedural_writes": [],
+                    "interprocedural_references": [{}] * 16,
+                    "transitive_calls": [{}] * 8,
+                },
+                "_search_score": 320.0,
+            },
+            {
+                "symbol_id": "source-trait",
+                "name": "Source",
+                "qualified_name": "acme_runtime::source::Source",
+                "kind": "trait",
+                "path": "crates/runtime/src/source.rs",
+                "visibility": "pub",
+                "_container_kind": "",
+                "semantic_summary": {},
+                "_search_score": 290.0,
+            },
+        ]
+
+        ranked = rank_symbol_candidates("Source", candidates, limit=2)
+
+        self.assertEqual(ranked[0]["qualified_name"], "acme_runtime::source::Source")
+
+    def test_find_datasources_prefers_trait_and_impl_surfaces(self) -> None:
+        backend = mock.Mock()
+        backend.search.return_value = [
+            {
+                "kind": "symbol",
+                "name": "KafkaRecord",
+                "qualified_name": "acme_kafka_source::KafkaRecord",
+                "title": "acme_kafka_source::KafkaRecord",
+                "path": "sources/kafka-source/src/lib.rs",
+                "score": 380.0,
+                "metadata": {"kind": "struct", "tags": []},
+            },
+            {
+                "kind": "symbol",
+                "name": "Source",
+                "qualified_name": "acme_runtime::source::Source",
+                "title": "acme_runtime::source::Source",
+                "path": "crates/runtime/src/source.rs",
+                "score": 300.0,
+                "metadata": {"kind": "trait", "tags": []},
+            },
+            {
+                "kind": "symbol",
+                "name": "impl Source for KafkaSource",
+                "qualified_name": "acme_kafka_source::impl Source for KafkaSource",
+                "title": "acme_kafka_source::impl Source for KafkaSource",
+                "path": "sources/kafka-source/src/lib.rs",
+                "score": 320.0,
+                "metadata": {"kind": "impl", "tags": []},
+            },
+        ]
+
+        with mock.patch("agents.toolkit.get_search_backend", return_value=backend):
+            result = find_datasources(Path("/tmp/search"), "demo", limit=3)
+
+        qnames = [item["qualified_name"] for item in result["results"]]
+        self.assertEqual(qnames[0], "acme_runtime::source::Source")
+        self.assertIn("impl Source for KafkaSource", qnames[1])
+
+    def test_find_decoders_prefers_decoder_surfaces_over_leaf_decode_methods(self) -> None:
+        backend = mock.Mock()
+        backend.search.return_value = [
+            {
+                "kind": "symbol",
+                "name": "decode_event",
+                "qualified_name": "acme_json_decoder::JsonDecoder::decode_event",
+                "title": "acme_json_decoder::JsonDecoder::decode_event",
+                "path": "decoders/json-decoder/src/lib.rs",
+                "score": 360.0,
+                "metadata": {"kind": "method", "tags": []},
+            },
+            {
+                "kind": "symbol",
+                "name": "EventDecoder",
+                "qualified_name": "acme_runtime::decode::EventDecoder",
+                "title": "acme_runtime::decode::EventDecoder",
+                "path": "crates/runtime/src/decode.rs",
+                "score": 280.0,
+                "metadata": {"kind": "trait", "tags": []},
+            },
+            {
+                "kind": "symbol",
+                "name": "impl EventDecoder for JsonDecoder",
+                "qualified_name": "acme_json_decoder::impl EventDecoder for JsonDecoder",
+                "title": "acme_json_decoder::impl EventDecoder for JsonDecoder",
+                "path": "decoders/json-decoder/src/lib.rs",
+                "score": 300.0,
+                "metadata": {"kind": "impl", "tags": []},
+            },
+        ]
+
+        with mock.patch("agents.toolkit.get_search_backend", return_value=backend):
+            result = find_decoders(Path("/tmp/search"), "demo", limit=3)
+
+        qnames = [item["qualified_name"] for item in result["results"]]
+        self.assertEqual(qnames[0], "acme_runtime::decode::EventDecoder")
+        self.assertIn("impl EventDecoder for JsonDecoder", qnames[1])
+
+    def test_find_runtime_handlers_prefers_pipeline_runtime_surfaces(self) -> None:
+        backend = mock.Mock()
+        backend.search.return_value = [
+            {
+                "kind": "symbol",
+                "name": "handler",
+                "qualified_name": "acme_runtime::graphql::router::handler",
+                "title": "acme_runtime::graphql::router::handler",
+                "path": "crates/runtime/src/graphql/router.rs",
+                "score": 120.0,
+                "metadata": {"kind": "function", "tags": []},
+            },
+            {
+                "kind": "symbol",
+                "name": "run",
+                "qualified_name": "acme_runtime::engine::RuntimeEngine::run",
+                "title": "acme_runtime::engine::RuntimeEngine::run",
+                "path": "crates/runtime/src/engine.rs",
+                "score": 180.0,
+                "metadata": {"kind": "method", "tags": []},
+            },
+            {
+                "kind": "symbol",
+                "name": "RuntimeEngine",
+                "qualified_name": "acme_runtime::engine::RuntimeEngine",
+                "title": "acme_runtime::engine::RuntimeEngine",
+                "path": "crates/runtime/src/engine.rs",
+                "score": 170.0,
+                "metadata": {"kind": "struct", "tags": []},
+            },
+        ]
+
+        with mock.patch("agents.toolkit.get_search_backend", return_value=backend):
+            result = find_runtime_handlers(Path("/tmp/search"), "demo", limit=3)
+
+        qnames = [item["qualified_name"] for item in result["results"]]
+        self.assertEqual(qnames[0], "acme_runtime::engine::RuntimeEngine")
+        self.assertEqual(qnames[1], "acme_runtime::engine::RuntimeEngine::run")
 
     def test_parser_probe_and_embedding_sidecar_are_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

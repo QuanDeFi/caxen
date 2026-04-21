@@ -1,0 +1,67 @@
+{
+  "query_expansions": {
+    "deduplication": ["dedup", "dedupe", "duplicate", "duplicates"],
+    "dedup": ["deduplication", "dedupe", "duplicate", "duplicates"],
+    "dedupe": ["deduplication", "dedup", "duplicate", "duplicates"],
+    "duplicate": ["deduplication", "dedup", "dedupe", "duplicates"],
+    "duplicates": ["deduplication", "duplicate", "dedup", "dedupe"],
+    "datasource": ["datasources", "source", "stream", "connector"],
+    "datasources": ["datasource", "source", "stream", "connector"],
+    "routing": ["route", "dispatch", "process", "run", "flow", "pipeline", "workflow"],
+    "route": ["routing", "dispatch", "process", "run", "flow", "pipeline", "workflow"],
+    "pipeline": ["process", "run", "dispatch", "workflow", "route", "routing"],
+    "parser": ["decoder", "codec", "deserializer"],
+    "decoder": ["parser", "codec", "deserializer"],
+    "codec": ["parser", "decoder", "deserializer"]
+  },
+  "concept_families": {
+    "deduplication": ["deduplication", "dedup", "dedupe", "duplicate", "duplicates"],
+    "datasource": ["datasource", "datasources", "source", "stream", "connector"],
+    "routing": ["route", "routing", "dispatch", "pipeline", "process", "run", "flow", "workflow"],
+    "parser": ["parser", "decoder", "codec", "deserializer"]
+  },
+  "discovery_profiles": {
+    "parser": {
+      "query": "parser decoder codec deserializer parse decode grammar syntax trait impl interface",
+      "path_keywords": ["parser", "parsers", "decoder", "decoders", "codec"],
+      "anchor_queries": ["parser", "decoder", "codec", "parser trait", "decoder trait", "impl parser", "impl decoder"],
+      "surface_keywords": ["parser", "decoder", "codec", "deserializer"],
+      "focus_keywords": ["parser", "decoder", "codec"],
+      "callable_keywords": ["parse", "decode", "deserialize"],
+      "deprioritize_keywords": [],
+      "prefer_symbol_kinds": ["trait", "impl", "struct", "module"]
+    },
+    "datasource": {
+      "query": "datasource source connector stream consumer producer consume subscribe replay backfill trait impl interface",
+      "path_keywords": ["datasource", "datasources", "source", "stream", "connector"],
+      "anchor_queries": ["datasource", "source", "connector", "datasource trait", "source trait", "impl datasource", "impl source"],
+      "surface_keywords": ["datasource", "source", "connector"],
+      "focus_keywords": ["datasource", "source", "connector"],
+      "callable_keywords": ["consume", "poll", "subscribe", "fetch", "update_types"],
+      "deprioritize_keywords": [],
+      "prefer_symbol_kinds": ["trait", "impl", "struct", "module"],
+      "implementation_path_keywords": ["datasources/"]
+    },
+    "decoder": {
+      "query": "decoder parser codec deserializer decode instruction account transaction trait impl interface",
+      "path_keywords": ["decoder", "decoders", "parser", "codec", "instruction"],
+      "anchor_queries": ["decoder", "parser", "codec", "deserializer", "decoder trait", "parser trait", "impl decoder", "impl parser"],
+      "surface_keywords": ["decoder", "parser", "codec", "deserializer"],
+      "focus_keywords": ["decoder", "parser", "codec", "deserializer"],
+      "callable_keywords": ["decode", "decode_instruction", "decode_account", "parse", "deserialize"],
+      "deprioritize_keywords": [],
+      "prefer_symbol_kinds": ["trait", "impl", "struct", "module"]
+    },
+    "runtime": {
+      "query": "runtime pipeline handler processor executor scheduler worker filter exporter run process execute handle dispatch",
+      "path_keywords": ["runtime", "pipeline", "handler", "processor", "executor", "scheduler", "worker", "filter", "exporter"],
+      "anchor_queries": ["runtime", "pipeline", "processor", "handler", "runtime pipeline", "pipeline run", "pipeline process"],
+      "surface_keywords": ["runtime", "pipeline", "processor", "executor", "scheduler", "worker", "filter", "exporter"],
+      "focus_keywords": ["pipeline", "runtime", "run", "process"],
+      "callable_keywords": ["run", "process", "execute", "handle", "dispatch"],
+      "deprioritize_keywords": ["graphql"]
+      ,
+      "prefer_symbol_kinds": ["struct", "trait", "impl", "module", "method", "function"]
+    }
+  }
+}

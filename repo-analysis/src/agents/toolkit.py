@@ -7,6 +7,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from backends.graph_backend import get_graph_backend
 from backends.metadata_store import get_metadata_store
 from backends.search_backend import get_search_backend
+from common.retrieval_profiles import get_discovery_profile
 from common.telemetry import snapshot_telemetry, trace_operation
 from retrieval.engine import retrieve_context
 from retrieval.planner import (
@@ -21,6 +22,9 @@ DEFAULT_REPOS = ("carbon", "yellowstone-vixen")
 CALLABLE_SYMBOL_KINDS = ("function", "method", "associated_function")
 LOCAL_SYMBOL_KINDS = {"local"}
 GRAPH_NOISE_KINDS = {"statement", "symbol_ref"}
+NOMINAL_SYMBOL_KINDS = {"trait", "struct", "enum", "type"}
+DISCOVERY_SURFACE_KINDS = {"trait", "struct", "enum", "type", "impl", "module"}
+DISCOVERY_NOISE_KINDS = {"field", "local", "parameter", "variant", "const", "static"}
 
 
 def execute_graph_backend_request(
@@ -226,28 +230,28 @@ def compare_repos(
 def find_parsers(search_root: Path, repo_name: str, *, limit: int = 10) -> Dict[str, object]:
     return {
         "repo": repo_name,
-        "results": themed_results(search_root, repo_name, "parser parse instruction", ("parser", "parsers"), limit),
+        "results": themed_results(search_root, repo_name, profile="parser", limit=limit),
     }
 
 
 def find_datasources(search_root: Path, repo_name: str, *, limit: int = 10) -> Dict[str, object]:
     return {
         "repo": repo_name,
-        "results": themed_results(search_root, repo_name, "datasource source stream", ("datasource", "datasources"), limit),
+        "results": themed_results(search_root, repo_name, profile="datasource", limit=limit),
     }
 
 
 def find_decoders(search_root: Path, repo_name: str, *, limit: int = 10) -> Dict[str, object]:
     return {
         "repo": repo_name,
-        "results": themed_results(search_root, repo_name, "decoder decode instruction account", ("decoder", "decoders"), limit),
+        "results": themed_results(search_root, repo_name, profile="decoder", limit=limit),
     }
 
 
 def find_runtime_handlers(search_root: Path, repo_name: str, *, limit: int = 10) -> Dict[str, object]:
     return {
         "repo": repo_name,
-        "results": themed_results(search_root, repo_name, "runtime handler source", ("runtime", "handler", "handlers"), limit),
+        "results": themed_results(search_root, repo_name, profile="runtime", limit=limit),
     }
 
 
@@ -863,28 +867,303 @@ def score_external_answers(
 def themed_results(
     search_root: Path,
     repo_name: str,
-    query: str,
-    path_keywords: Sequence[str],
+    *,
     limit: int,
+    profile: str = "generic",
+    query: str = "",
+    path_keywords: Sequence[str] = (),
 ) -> List[Dict[str, object]]:
     search_backend = get_search_backend(str(search_root.resolve()), repo_name)
-    results = search_backend.search(query, limit=max(limit * 3, 20), kinds=("directory", "file", "symbol"))
+    profile_config = get_discovery_profile(profile)
+    effective_query = str(query or profile_config.get("query") or "").strip()
+    profile_keywords = normalize_discovery_terms(profile_config.get("path_keywords", ()))
+    requested_keywords = normalize_discovery_terms(path_keywords)
+    effective_keywords = dedupe_nonempty_terms((*profile_keywords, *requested_keywords))
+    discovery_terms = dedupe_nonempty_terms(
+        (
+            *effective_keywords,
+            *normalize_discovery_terms(profile_config.get("surface_keywords", ())),
+            *normalize_discovery_terms(profile_config.get("callable_keywords", ())),
+            *normalize_discovery_terms(profile_config.get("deprioritize_keywords", ())),
+        )
+    )
+    search_queries = tuple(dedupe_nonempty_terms((effective_query, *profile_config.get("anchor_queries", ()))))
+    if not search_queries:
+        return search_backend.list_documents(limit=limit, kinds=("directory", "file"))
+
+    results = []
+    merged = {}
+    search_fanout = max(limit * 12, 96)
+    for search_query in search_queries:
+        for result in search_backend.search(
+            search_query,
+            limit=search_fanout,
+            kinds=("directory", "file", "symbol"),
+        ):
+            doc_id = str(result.get("doc_id") or "")
+            if not doc_id:
+                doc_id = "::".join(
+                    (
+                        str(result.get("kind") or ""),
+                        str(result.get("path") or ""),
+                        str(result.get("qualified_name") or result.get("name") or ""),
+                    )
+                )
+            existing = merged.get(doc_id)
+            if existing is None or float(result.get("score") or 0.0) > float(existing.get("score") or 0.0):
+                merged[doc_id] = result
+    results = list(merged.values())
     filtered = []
     for result in results:
-        haystack = " ".join(
-            str(item or "").lower()
-            for item in (
-                result.get("path"),
-                result.get("name"),
-                result.get("qualified_name"),
-                " ".join(result.get("metadata", {}).get("tags", [])),
+        haystack = discovery_haystack(result)
+        if not discovery_terms or any(keyword in haystack for keyword in discovery_terms):
+            filtered.append(result)
+    candidate_pool = filtered or results
+    if candidate_pool:
+        scored = []
+        for result in candidate_pool:
+            scored.append((score_themed_result(result, profile_config, discovery_terms), result))
+        scored.sort(
+            key=lambda item: (
+                -item[0],
+                kind_compare_rank(str(item[1].get("kind") or "")),
+                str(item[1].get("path") or ""),
+                str(item[1].get("qualified_name") or item[1].get("name") or ""),
             )
         )
-        if any(keyword in haystack for keyword in path_keywords):
-            filtered.append(result)
-    if filtered:
-        return filtered[:limit]
+        deduped_results = []
+        seen = set()
+        for _score, result in scored:
+            dedupe_key = (
+                str(result.get("kind") or ""),
+                str(result.get("path") or ""),
+                str(result.get("qualified_name") or result.get("name") or ""),
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            deduped_results.append(result)
+            if len(deduped_results) >= limit:
+                break
+        return deduped_results
     return search_backend.list_documents(limit=limit, kinds=("directory", "file"))
+
+
+def score_themed_result(
+    result: Dict[str, object],
+    profile_config: Dict[str, object],
+    discovery_terms: Sequence[str],
+) -> float:
+    score = float(result.get("score") or 0.0) * 0.3
+    kind = str(result.get("kind") or "").lower()
+    metadata = result.get("metadata", {}) or {}
+    symbol_kind = str(metadata.get("kind") or "").lower()
+    name = str(result.get("name") or "")
+    qualified_name = str(result.get("qualified_name") or "")
+    title = str(result.get("title") or "")
+    path = str(result.get("path") or "")
+    lowered_name = name.lower()
+    lowered_qname = qualified_name.lower()
+    lowered_title = title.lower()
+    lowered_path = path.lower()
+    haystack = discovery_haystack(result)
+    identifier_text = normalize_identifier_text(" ".join((name, qualified_name, title)))
+    normalized_name = normalize_identifier_text(lowered_name)
+    surface_keywords = normalize_discovery_terms(profile_config.get("surface_keywords", ()))
+    focus_keywords = normalize_discovery_terms(profile_config.get("focus_keywords", ()))
+    callable_keywords = normalize_discovery_terms(profile_config.get("callable_keywords", ()))
+    deprioritize_keywords = normalize_discovery_terms(profile_config.get("deprioritize_keywords", ()))
+    preferred_symbol_kinds = normalize_discovery_terms(profile_config.get("prefer_symbol_kinds", ()))
+    implementation_path_keywords = normalize_discovery_terms(profile_config.get("implementation_path_keywords", ()))
+    keyword_hits = sum(1 for keyword in discovery_terms if keyword in haystack)
+    identifier_hits = sum(1 for keyword in discovery_terms if discovery_term_matches_identifier(keyword, identifier_text, lowered_name, lowered_qname))
+    path_hits = sum(1 for keyword in discovery_terms if keyword in lowered_path)
+    surface_hits = sum(
+        1
+        for keyword in surface_keywords
+        if discovery_term_matches_identifier(keyword, identifier_text, lowered_name, lowered_qname)
+    )
+    exact_surface_hits = sum(
+        1
+        for keyword in surface_keywords
+        if keyword == lowered_name or lowered_qname.endswith(f"::{keyword}")
+    )
+    strong_surface_hits = sum(
+        1
+        for keyword in surface_keywords
+        if (
+            normalize_identifier_text(keyword)
+            and (
+                normalized_name == normalize_identifier_text(keyword)
+                or normalized_name.startswith(normalize_identifier_text(keyword))
+                or normalized_name.endswith(normalize_identifier_text(keyword))
+            )
+        )
+    )
+    callable_hits = sum(
+        1
+        for keyword in callable_keywords
+        if keyword == lowered_name or lowered_name.startswith(f"{keyword}_") or lowered_name.endswith(f"_{keyword}")
+    )
+    focus_hits = sum(
+        1
+        for keyword in focus_keywords
+        if focus_term_matches_identifier(keyword, lowered_name, lowered_qname)
+    )
+
+    score += keyword_hits * 8.0
+    score += identifier_hits * 24.0
+    score += path_hits * 6.0
+    if kind == "directory":
+        score += 12.0
+    elif kind == "file":
+        score += 18.0
+    elif kind == "symbol":
+        if symbol_kind in NOMINAL_SYMBOL_KINDS:
+            score += 88.0
+        elif symbol_kind == "impl":
+            score += 46.0
+        elif symbol_kind in DISCOVERY_NOISE_KINDS:
+            score -= 85.0
+        elif symbol_kind in CALLABLE_SYMBOL_KINDS:
+            score -= 18.0
+        if symbol_kind in preferred_symbol_kinds:
+            kind_rank = preferred_symbol_kinds.index(symbol_kind)
+            score += max(len(preferred_symbol_kinds) - kind_rank, 1) * 34.0
+
+    if surface_hits:
+        score += surface_hits * 24.0
+        if kind == "symbol" and symbol_kind in NOMINAL_SYMBOL_KINDS:
+            score += 56.0
+        elif kind == "symbol" and symbol_kind == "impl":
+            score += 34.0
+        if exact_surface_hits:
+            score += exact_surface_hits * 84.0
+            if kind == "symbol" and symbol_kind in NOMINAL_SYMBOL_KINDS:
+                score += 36.0
+        if strong_surface_hits:
+            if kind == "symbol" and symbol_kind in NOMINAL_SYMBOL_KINDS:
+                score += strong_surface_hits * 72.0
+            elif kind == "symbol" and symbol_kind == "impl":
+                score += strong_surface_hits * 42.0
+            elif kind == "symbol" and symbol_kind in CALLABLE_SYMBOL_KINDS:
+                score += strong_surface_hits * 18.0
+
+    if focus_hits:
+        score += focus_hits * 34.0
+        if kind == "symbol" and symbol_kind in NOMINAL_SYMBOL_KINDS:
+            score += focus_hits * 18.0
+        elif kind == "symbol" and symbol_kind == "impl":
+            score += focus_hits * 10.0
+        elif kind == "symbol" and symbol_kind in CALLABLE_SYMBOL_KINDS:
+            score += focus_hits * 12.0
+    elif focus_keywords and surface_hits and kind == "symbol":
+        score -= 110.0
+
+    if kind == "symbol" and symbol_kind == "impl" and surface_hits:
+        score += 40.0
+        if "impl " in lowered_qname or "impl " in lowered_title:
+            score += 20.0
+
+    if kind == "symbol" and symbol_kind in CALLABLE_SYMBOL_KINDS:
+        if callable_hits:
+            score += callable_hits * 16.0
+            if surface_hits == 0:
+                score -= 10.0
+        else:
+            score -= 42.0
+
+    if kind == "symbol" and symbol_kind in {"module", "namespace"} and surface_hits:
+        score += 24.0
+
+    implementation_path_hits = sum(1 for keyword in implementation_path_keywords if keyword in lowered_path)
+    if implementation_path_hits and kind == "symbol":
+        if symbol_kind == "impl":
+            score += implementation_path_hits * 72.0
+        elif symbol_kind in NOMINAL_SYMBOL_KINDS:
+            score += implementation_path_hits * 36.0
+
+    if kind == "symbol" and identifier_hits == 0 and surface_hits == 0 and callable_hits == 0 and path_hits:
+        score -= 60.0
+
+    for keyword in deprioritize_keywords:
+        if keyword in haystack:
+            score -= 60.0
+
+    if lowered_path.startswith("examples/") or lowered_path.startswith("tests/"):
+        score -= 40.0
+
+    return score
+
+
+def discovery_haystack(result: Dict[str, object]) -> str:
+    metadata = result.get("metadata", {}) or {}
+    tags = " ".join(str(tag).lower() for tag in metadata.get("tags", []) or ())
+    return " ".join(
+        str(item or "").lower()
+        for item in (
+            result.get("path"),
+            result.get("name"),
+            result.get("qualified_name"),
+            result.get("title"),
+            tags,
+        )
+    )
+
+
+def discovery_term_matches_identifier(term: str, identifier_text: str, lowered_name: str, lowered_qname: str) -> bool:
+    normalized_term = normalize_identifier_text(term)
+    if not normalized_term:
+        return False
+    if normalize_identifier_text(lowered_name) == normalized_term:
+        return True
+    if lowered_qname.endswith(f"::{term}"):
+        return True
+    return normalized_term in identifier_text
+
+
+def focus_term_matches_identifier(term: str, lowered_name: str, lowered_qname: str) -> bool:
+    normalized_term = str(term or "").strip().lower()
+    if not normalized_term:
+        return False
+    if lowered_name == normalized_term or lowered_qname.endswith(f"::{normalized_term}"):
+        return True
+    return normalized_term in split_symbol_query_segments(lowered_name) or normalized_term in split_symbol_query_segments(lowered_qname)
+
+
+def normalize_discovery_terms(values: Sequence[object] | object) -> Tuple[str, ...]:
+    if isinstance(values, (str, bytes)):
+        values = [values]
+    normalized = []
+    seen = set()
+    for value in values:
+        term = str(value or "").strip().lower()
+        if not term or term in seen:
+            continue
+        seen.add(term)
+        normalized.append(term)
+    return tuple(normalized)
+
+
+def dedupe_nonempty_terms(values: Sequence[object] | object) -> Tuple[str, ...]:
+    if isinstance(values, (str, bytes)):
+        values = [values]
+    normalized = []
+    seen = set()
+    for value in values:
+        term = str(value or "").strip()
+        if not term:
+            continue
+        lowered = term.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(term)
+    return tuple(normalized)
+
+
+def normalize_identifier_text(value: str) -> str:
+    return "".join(char for char in str(value or "").lower() if char.isalnum() or char == "_")
 
 
 def compare_repo_from_agent_cache(
@@ -1254,12 +1533,14 @@ def rank_symbol_candidates(
 
 
 def score_symbol_candidate(symbol_query: str, candidate: Dict[str, object]) -> float:
+    raw_query = str(symbol_query or "").strip()
     lowered_query = str(symbol_query or "").strip().lower()
     query_tokens = normalize_query_tokens(symbol_query)
     query_segments = split_symbol_query_segments(symbol_query)
     single_token_query = len(query_tokens) == 1 and len(query_segments) <= 1
 
-    name = str(candidate.get("name") or "").lower()
+    candidate_name = str(candidate.get("name") or "")
+    name = candidate_name.lower()
     qualified_name = str(candidate.get("qualified_name") or "").lower()
     container_qualified_name = str(candidate.get("container_qualified_name") or "").lower()
     path = str(candidate.get("path") or "").lower()
@@ -1331,6 +1612,16 @@ def score_symbol_candidate(symbol_query: str, candidate: Dict[str, object]) -> f
     elif query_tokens:
         score -= (len(query_tokens) - token_hits) * 8.0
 
+    if single_token_query and looks_like_nominal_symbol_query(raw_query):
+        if candidate_name == raw_query and kind in NOMINAL_SYMBOL_KINDS:
+            score += 180.0
+        elif name == lowered_query and kind in NOMINAL_SYMBOL_KINDS:
+            score += 120.0
+        elif kind in CALLABLE_SYMBOL_KINDS:
+            score -= 110.0
+        if candidate_name and candidate_name[:1].islower():
+            score -= 50.0
+
     if single_token_query:
         activity_score = semantic_activity_score(semantic_summary)
         score += activity_score
@@ -1344,8 +1635,6 @@ def score_symbol_candidate(symbol_query: str, candidate: Dict[str, object]) -> f
             score -= 80.0
         elif path.startswith("metrics/"):
             score -= 45.0
-        if "/pipeline.rs" in path:
-            score += 32.0
         if kind in CALLABLE_SYMBOL_KINDS:
             score += 10.0
 
@@ -1374,6 +1663,13 @@ def semantic_activity_score(semantic_summary: Dict[str, object]) -> float:
         + transitive_calls * 0.35
     )
     return min(weighted, 240.0) * 0.7
+
+
+def looks_like_nominal_symbol_query(symbol_query: str) -> bool:
+    raw = str(symbol_query or "").strip()
+    if not raw or "::" in raw or "(" in raw or raw.startswith("sym:"):
+        return False
+    return raw[:1].isupper() and any(char.islower() for char in raw)
 
 
 def query_explicitly_targets_local(symbol_query: str) -> bool:

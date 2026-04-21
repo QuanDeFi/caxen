@@ -28,6 +28,7 @@ TEXT_EXTENSIONS = {
     ".js",
     ".json",
     ".jsx",
+    ".md",
     ".proto",
     ".py",
     ".rs",
