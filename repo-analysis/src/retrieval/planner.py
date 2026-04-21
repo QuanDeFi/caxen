@@ -28,7 +28,7 @@ def plan_query(
     query_profile = classify_query(tokens, task)
     plans = []
     for current_repo in repos:
-        lexical_preview = retrieve_context(
+        preview_context = retrieve_context(
             search_root,
             graph_root,
             parsed_root,
@@ -49,7 +49,9 @@ def plan_query(
                 "candidate_seed_types": candidate_seed_types(query_profile),
                 "retrieval_recipe": retrieval_recipe,
                 "stopping_criteria": stopping_criteria(query_profile, limit),
-                "lexical_preview": lexical_preview["selected_context"],
+                "summary_preview": preview_context["summary_results"],
+                "symbol_preview": preview_context["symbol_results"],
+                "lexical_preview": preview_context["selected_context"],
             }
         )
 
@@ -100,7 +102,7 @@ def prepare_answer_bundle(
             )
             project_summary = metadata_store.get_summary_by_id(stable_id("sum", current_repo, "project")) or {}
             selected_context = context["selected_context"]
-            symbol_candidates = [item for item in selected_context if item.get("symbol_id")]
+            symbol_candidates = context["symbol_results"] or [item for item in selected_context if item.get("symbol_id")]
             file_candidates = [item for item in selected_context if item.get("path")]
 
             graph_neighborhoods = []
@@ -169,6 +171,12 @@ def prepare_answer_bundle(
                     "focus": str(project_summary.get("focus") or ""),
                     "project_summary": str(project_summary.get("summary") or ""),
                     "retrieval_recipe": repo_plan["retrieval_recipe"],
+                    "stage_context": {
+                        "summary": context["summary_results"],
+                        "symbol": context["symbol_results"],
+                        "graph": context["graph_results"],
+                        "body": context["body_results"],
+                    },
                     "selected_context": selected_context,
                     "top_symbols": compact_candidates(symbol_candidates, limit=5),
                     "top_files": compact_candidates(file_candidates, limit=5),
@@ -225,24 +233,21 @@ def retrieve_iterative(
 
 def choose_recipe(query_profile: Dict[str, object]) -> List[str]:
     intent = str(query_profile.get("intent") or "exploration")
-    if intent == "symbol":
-        return ["lexical_bm25", "symbol_resolution", "graph_neighbors", "statement_slice", "answer_bundle"]
-    if intent == "architecture":
-        return ["lexical_bm25", "graph_expansion", "summary_rollups", "symbol_localization", "answer_bundle"]
-    if intent == "docs":
-        return ["summary_rollups", "lexical_bm25", "graph_neighbors_if_needed", "answer_bundle"]
-    return ["lexical_bm25", "graph_expansion", "symbol_localization", "summary_rollups", "answer_bundle"]
+    recipe = ["summary_rollups", "symbol_localization"]
+    if intent != "docs":
+        recipe.append("graph_neighbors")
+        recipe.append("body_hydration")
+    recipe.append("answer_bundle")
+    return recipe
 
 
 def candidate_seed_types(query_profile: Dict[str, object]) -> List[str]:
     intent = str(query_profile.get("intent") or "exploration")
-    if intent == "symbol":
-        return ["symbol", "statement", "file"]
-    if intent == "architecture":
-        return ["directory", "file", "symbol"]
     if intent == "docs":
-        return ["repo", "directory", "file"]
-    return ["symbol", "file", "directory"]
+        return ["summary", "file", "doc"]
+    if intent == "symbol":
+        return ["summary", "symbol", "body"]
+    return ["summary", "symbol", "graph"]
 
 
 def stopping_criteria(query_profile: Dict[str, object], limit: int) -> Dict[str, object]:
@@ -250,17 +255,17 @@ def stopping_criteria(query_profile: Dict[str, object], limit: int) -> Dict[str,
     return {
         "max_selected_context": limit,
         "stop_on_exact_symbol_hit": intent == "symbol",
-        "stop_on_path_hit": intent in {"architecture", "docs"},
-        "max_graph_expansions": 32 if intent == "architecture" else 16,
+        "stop_on_path_hit": intent == "docs",
+        "max_graph_expansions": 16 if intent == "symbol" else 32,
     }
 
 
 def recommended_edge_types(intent: str) -> List[str]:
-    if intent == "architecture":
-        return ["IMPORTS", "CALLS", "IMPLEMENTS", "INHERITS", "USES", "CONTAINS"]
     if intent == "symbol":
         return ["CALLS", "READS", "WRITES", "REFS", "USES"]
-    return ["CALLS", "IMPORTS", "USES", "CONTAINS"]
+    if intent == "docs":
+        return ["CONTAINS", "IMPORTS"]
+    return ["CALLS", "IMPORTS", "IMPLEMENTS", "USES", "CONTAINS"]
 
 
 def normalize_task(task: str, refinement_hints: Sequence[str]) -> str:

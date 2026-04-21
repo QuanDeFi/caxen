@@ -24,7 +24,7 @@ PROFILE = InventoryProfile(
         "pnpm test",
     ),
     notes=(
-        "Treat Carbon as a Rust-first monorepo with meaningful boundaries across crates, datasources, decoders, examples, metrics, and packages.",
+        "Treat Carbon as a Rust-first monorepo with meaningful boundaries across crates, packages, metrics, and top-level workspace surfaces.",
         "TypeScript tooling is concentrated under packages/* and driven by pnpm/turbo.",
     ),
 )

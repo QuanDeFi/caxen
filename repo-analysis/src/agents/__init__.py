@@ -1,9 +1,5 @@
 from .toolkit import (
     compare_repos,
-    find_datasources,
-    find_decoders,
-    find_parsers,
-    find_runtime_handlers,
     find_symbol,
     prepare_context,
     repo_overview,
@@ -13,10 +9,6 @@ from .toolkit import (
 
 __all__ = [
     "compare_repos",
-    "find_datasources",
-    "find_decoders",
-    "find_parsers",
-    "find_runtime_handlers",
     "find_symbol",
     "prepare_context",
     "repo_overview",

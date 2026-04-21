@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from common.native_tool import build_bm25_index, native_worker_available, query_bm25_index
-from common.text import tokenize
+from common.text import path_terms, tokenize
 from common.telemetry import trace_operation
 from symbols.indexer import stable_id, timestamp_now
 from symbols.persistence import load_symbol_index, update_lmdb_artifact_metadata
@@ -637,7 +637,7 @@ def path_prefixes(path: str) -> List[str]:
 
 
 def build_symbol_tags(symbol: Dict[str, object]) -> List[str]:
-    tags = path_tags(symbol["path"])
+    tags = path_terms(symbol["path"])
     tags.append(symbol["kind"])
     if symbol.get("is_test"):
         tags.append("test")
@@ -680,12 +680,7 @@ def extract_symbol_chunk(repo_root: Path, symbol: Dict[str, object]) -> str:
 
 
 def path_tags(path: str) -> List[str]:
-    parts = [part.lower() for part in PurePosixPath(path).parts]
-    tags = []
-    for keyword in ("parser", "parsers", "datasource", "datasources", "decoder", "decoders", "runtime", "handler", "handlers", "source", "sources", "metric", "metrics", "example", "examples", "test", "tests"):
-        if keyword in parts:
-            tags.append(keyword)
-    return sorted(dict.fromkeys(tags))
+    return path_terms(path)
 
 
 def read_indexable_file(path: Path, file_record: Dict[str, object]) -> str:

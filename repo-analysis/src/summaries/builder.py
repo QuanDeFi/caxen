@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, Iterable, List, Tuple
 
+from common.text import path_terms
 from graph.query import inspect_graph_backend_payload_uncached
 from graph.store import write_graph_database
 from symbols.indexer import stable_id, timestamp_now
@@ -106,7 +107,7 @@ def build_project_summary(
     symbols: Dict[str, object],
     graph: Dict[str, object],
 ) -> Dict[str, object]:
-    focus = infer_repo_focus(repo_name)
+    focus = infer_repo_focus(manifest)
     source_roots = list(manifest.get("parser_relevant_source_roots", []))
     language_mix = [f"{item['language']}:{item['files']}" for item in manifest.get("language_mix", [])[:5]]
     kind_counts = symbols.get("summary", {}).get("kind_counts", [])
@@ -117,7 +118,7 @@ def build_project_summary(
         f"{symbols['summary']['symbols']} symbols, {symbols['summary']['imports']} imports, "
         f"{symbols['summary'].get('statements', 0)} statements, "
         f"and {graph['summary']['edges']} graph edges. "
-        f"Parser-relevant source roots: {', '.join(source_roots) or 'none detected'}."
+        f"Indexed source roots: {', '.join(source_roots) or 'none detected'}."
     )
     return {
         "summary_id": stable_id("sum", repo_name, "project"),
@@ -454,20 +455,23 @@ def directory_prefixes(path: str) -> List[str]:
 
 
 def path_tags(path: str) -> List[str]:
-    tags = []
-    parts = [part.lower() for part in PurePosixPath(path).parts]
-    for keyword in ("parser", "parsers", "datasource", "datasources", "decoder", "decoders", "runtime", "handler", "handlers", "source", "sources", "example", "examples", "test", "tests"):
-        if keyword in parts:
-            tags.append(keyword)
-    return sorted(dict.fromkeys(tags))
+    return path_terms(path)
 
 
-def infer_repo_focus(repo_name: str) -> str:
-    if repo_name == "carbon":
-        return "a Rust-first Solana indexing workspace centered on datasources, decoders, and processing pipelines"
-    if repo_name == "yellowstone-vixen":
-        return "a Rust-first Solana parsing/runtime workspace centered on runtime handlers, parsers, and sources"
-    return "a parser-first repository analysis target"
+def infer_repo_focus(manifest: Dict[str, object]) -> str:
+    analysis_surfaces = list(manifest.get("module_graph_seeds", {}).get("analysis_surfaces", []))
+    source_roots = list(manifest.get("parser_relevant_source_roots", []))
+    language_mix = [str(item.get("language") or "").strip() for item in manifest.get("language_mix", [])]
+
+    if analysis_surfaces:
+        return f"a structure-first codebase centered on {', '.join(analysis_surfaces[:4])}"
+    if source_roots:
+        return f"a structure-first codebase rooted at {', '.join(source_roots[:4])}"
+
+    primary_languages = [language for language in language_mix if language]
+    if primary_languages:
+        return f"a structure-first codebase built mostly in {', '.join(primary_languages[:3])}"
+    return "a structure-first codebase"
 
 
 def load_json(path: Path) -> Dict[str, object]:

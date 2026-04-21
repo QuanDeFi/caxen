@@ -30,11 +30,7 @@ from agents.toolkit import (
     compare_repos,
     execute_graph_query,
     expand_subgraph,
-    find_datasources,
-    find_decoders,
     find_file,
-    find_parsers,
-    find_runtime_handlers,
     find_symbol,
     get_enclosing_context,
     get_summary,
@@ -298,26 +294,6 @@ def build_parser() -> argparse.ArgumentParser:
     compare_repos_cmd.add_argument("--repo", action="append", choices=sorted(ADAPTERS))
     compare_repos_cmd.add_argument("query")
     compare_repos_cmd.add_argument("--limit", type=int, default=5)
-
-    find_parsers_cmd = subparsers.add_parser("find-parsers", help="Find parser-related paths and symbols.")
-    add_search_root_arg(find_parsers_cmd)
-    find_parsers_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
-    find_parsers_cmd.add_argument("--limit", type=int, default=10)
-
-    find_datasources_cmd = subparsers.add_parser("find-datasources", help="Find datasource-related paths and symbols.")
-    add_search_root_arg(find_datasources_cmd)
-    find_datasources_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
-    find_datasources_cmd.add_argument("--limit", type=int, default=10)
-
-    find_decoders_cmd = subparsers.add_parser("find-decoders", help="Find decoder-related paths and symbols.")
-    add_search_root_arg(find_decoders_cmd)
-    find_decoders_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
-    find_decoders_cmd.add_argument("--limit", type=int, default=10)
-
-    find_runtime_handlers_cmd = subparsers.add_parser("find-runtime-handlers", help="Find runtime and handler surfaces.")
-    add_search_root_arg(find_runtime_handlers_cmd)
-    find_runtime_handlers_cmd.add_argument("--repo", required=True, choices=sorted(ADAPTERS))
-    find_runtime_handlers_cmd.add_argument("--limit", type=int, default=10)
 
     summarize_path_cmd = subparsers.add_parser("summarize-path", help="Summarize a file or directory path.")
     add_parsed_root_arg(summarize_path_cmd)
@@ -1219,14 +1195,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 limit=args.limit,
             )
         )
-    if args.command == "find-parsers":
-        return print_json(find_parsers(Path(args.search_root).resolve(), args.repo, limit=args.limit))
-    if args.command == "find-datasources":
-        return print_json(find_datasources(Path(args.search_root).resolve(), args.repo, limit=args.limit))
-    if args.command == "find-decoders":
-        return print_json(find_decoders(Path(args.search_root).resolve(), args.repo, limit=args.limit))
-    if args.command == "find-runtime-handlers":
-        return print_json(find_runtime_handlers(Path(args.search_root).resolve(), args.repo, limit=args.limit))
     if args.command == "summarize-path":
         return print_json(summarize_path(Path(args.parsed_root).resolve(), args.repo, args.path))
     if args.command == "prepare-context":

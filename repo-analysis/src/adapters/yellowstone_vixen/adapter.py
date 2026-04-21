@@ -20,8 +20,8 @@ PROFILE = InventoryProfile(
         "cd tests/proc-macro-events && cargo test",
     ),
     notes=(
-        "Treat Yellowstone Vixen runtime, parsers, handlers, sources, and stream components as first-class analysis surfaces.",
-        "Examples and tests are important because the repo documents extension patterns through runnable pipelines and parser fixtures.",
+        "Treat Yellowstone Vixen as a Rust workspace with important crate, test, example, and documentation surfaces.",
+        "Examples and tests are important because the repo documents extension patterns through runnable pipelines and fixtures.",
     ),
 )
 

@@ -4,23 +4,26 @@ import re
 from pathlib import PurePosixPath
 from typing import Dict, Iterable, List
 
+from common.retrieval import RANK_KIND_WEIGHTS, RANK_SYMBOL_KIND_WEIGHTS, semantic_activity_score
+
 
 KIND_PRIORITY = {
-    "symbol": 5,
-    "function": 5,
-    "method": 5,
-    "struct": 5,
-    "enum": 5,
-    "trait": 5,
-    "impl": 4,
-    "statement": 4,
+    "symbol": 6,
+    "type_body": 5,
+    "function_body": 4,
     "file": 3,
+    "doc": 3,
     "directory": 2,
-    "repo": 1,
-    "module_ref": 0,
-    "symbol_ref": 0,
-    "type_ref": 0,
+    "package": 1,
+    "repo": 0,
+    "statement": -2,
+    "module_ref": -3,
+    "symbol_ref": -3,
+    "type_ref": -3,
 }
+CALLABLE_SYMBOL_KINDS = {"function", "method", "associated_function"}
+NOMINAL_SYMBOL_KINDS = {"trait", "struct", "enum", "type"}
+LOCAL_LIKE_KINDS = {"field", "local", "parameter", "variable"}
 
 
 def identifier_terms(value: str) -> List[str]:
@@ -38,120 +41,117 @@ def rerank_candidates(
     query_profile: Dict[str, object] | None = None,
 ) -> List[Dict[str, object]]:
     query_profile = query_profile or {}
-    prefer_tags = set(query_profile.get("prefer_tags", []))
-    prefer_symbol_kinds = set(query_profile.get("prefer_symbol_kinds", []))
-    requested_symbol_kinds = set(query_profile.get("requested_symbol_kinds", []))
-    prefer_symbols = bool(query_profile.get("prefer_symbols"))
-    prefer_docs = bool(query_profile.get("prefer_docs"))
-    type_intent = bool(query_profile.get("type_intent"))
-    member_intent = bool(query_profile.get("member_intent"))
-    intent = str(query_profile.get("intent") or "")
+    explicit_statement = bool(query_profile.get("explicit_statement"))
+    exploratory = query_profile.get("intent") == "exploration"
+    query_text = " ".join(query_tokens).strip().lower()
+
     ranked = []
     for candidate in candidates:
-        searchable = " ".join(
-            str(item or "").lower()
-            for item in (
-                candidate.get("name"),
-                candidate.get("qualified_name"),
-                candidate.get("path"),
-                candidate.get("title"),
-                candidate.get("preview"),
-            )
-        )
-        lexical_bonus = sum(0.25 for token in query_tokens if token in searchable)
-        exact_bonus = 0.0
-        name = str(candidate.get("name") or "").lower()
-        qualified_name = str(candidate.get("qualified_name") or "").lower()
-        metadata = candidate.get("metadata", {}) or {}
-        tags = {str(tag).lower() for tag in metadata.get("tags", [])}
+        metadata = dict(candidate.get("metadata", {}) or {})
+        kind = str(candidate.get("kind") or "")
         symbol_kind = str(
             metadata.get("kind")
             or metadata.get("symbol_kind")
             or metadata.get("node_kind")
-            or candidate.get("kind")
             or ""
         ).lower()
-        identifier_overlap_terms = set(identifier_terms(str(candidate.get("name") or "")))
+        name = str(candidate.get("name") or "")
+        qualified_name = str(candidate.get("qualified_name") or "")
+        path = str(candidate.get("path") or "")
+        title = str(candidate.get("title") or "")
+        preview = str(candidate.get("preview") or "")
+        visibility = str(metadata.get("visibility") or "").lower()
+        graph_distance = metadata.get("graph_distance")
+        containment_depth = metadata.get("containment_depth")
+        summary_relevance = float(metadata.get("summary_relevance") or 0.0)
+        semantic_summary = metadata.get("semantic_summary", {}) or {}
+
+        lowered_name = name.lower()
+        lowered_qname = qualified_name.lower()
+        searchable = " ".join(
+            value.lower()
+            for value in (name, qualified_name, path, title, preview)
+            if value
+        )
+
+        score = float(candidate.get("score") or 0.0)
+
+        if query_text:
+            if query_text == lowered_qname:
+                score += 180.0
+            if query_text == lowered_name:
+                score += 150.0
+            if lowered_qname.endswith(f"::{query_text}"):
+                score += 110.0
+
+        identifier_overlap_terms = set(identifier_terms(name))
         if qualified_name:
             identifier_overlap_terms.update(identifier_terms(qualified_name.split("::")[-1]))
-        identifier_bonus = sum(0.3 for token in query_tokens if token in identifier_overlap_terms)
-        if any(token == name for token in query_tokens):
-            exact_bonus += 0.75
-        final_name = qualified_name.split("::")[-1] if qualified_name else ""
-        if any(token == final_name for token in query_tokens):
-            exact_bonus += 0.5
-        if "trait" in query_tokens and symbol_kind == "trait":
-            exact_bonus += 0.9
-        if "struct" in query_tokens and symbol_kind == "struct":
-            exact_bonus += 0.75
-        if "enum" in query_tokens and symbol_kind == "enum":
-            exact_bonus += 0.75
-        if "type" in query_tokens and symbol_kind == "type":
-            exact_bonus += 0.75
 
-        kind = str(candidate.get("kind") or "")
-        priority_bonus = KIND_PRIORITY.get(kind, 0) * 0.05
-        path_penalty = -1.0 if not candidate.get("path") else 0.0
-        unresolved_penalty = -0.75 if kind in {"module_ref", "symbol_ref", "type_ref"} else 0.0
-        reasons = set(candidate.get("reasons", []))
-        lexical_reason_bonus = 0.5 if "lexical" in reasons else 0.0
-        localization_bonus = 0.25 if "symbol-localization" in reasons else 0.0
-        embedding_bonus = 0.15 if "embedding" in reasons else 0.0
-        tag_bonus = 0.3 * sum(1 for tag in prefer_tags if tag in tags)
-        symbol_kind_bonus = 0.25 * sum(1 for tag in prefer_symbol_kinds if tag == kind or tag in tags)
-        kind_intent_bonus = 0.0
-        if prefer_symbols and kind in {"symbol", "statement"}:
-            kind_intent_bonus += 0.35
-        if intent == "architecture" and kind in {"symbol", "file"}:
-            kind_intent_bonus += 0.2
-        if prefer_docs and kind in {"repo", "directory", "file"}:
-            kind_intent_bonus += 0.35
-        if type_intent:
-            if symbol_kind in {"trait", "struct", "enum", "type", "impl"}:
-                kind_intent_bonus += 0.85
-            if symbol_kind in {"field", "local", "parameter", "variable"}:
-                kind_intent_bonus -= 0.85
-        if member_intent and symbol_kind in {"field", "local", "parameter", "variable", "method"}:
-            kind_intent_bonus += 0.45
-        requested_type_kinds = requested_symbol_kinds.intersection({"trait", "struct", "enum", "type", "class", "interface"})
-        if requested_type_kinds:
-            if symbol_kind in requested_type_kinds or ("class" in requested_type_kinds and symbol_kind == "struct"):
-                kind_intent_bonus += 1.1
-            elif symbol_kind in {"trait", "struct", "enum", "type", "impl"}:
-                kind_intent_bonus -= 0.9
-        requested_member_kinds = requested_symbol_kinds.intersection({"field", "property", "member", "local", "variable", "param", "parameter", "method"})
-        if requested_member_kinds:
-            if symbol_kind in {"field", "local", "parameter", "variable", "method"}:
-                kind_intent_bonus += 0.75
-            elif symbol_kind in {"trait", "struct", "enum", "type", "impl"}:
-                kind_intent_bonus -= 0.4
-        path = str(candidate.get("path") or "")
+        token_hits = 0
+        for token in query_tokens:
+            if token and token in lowered_qname:
+                score += 16.0
+                token_hits += 1
+            elif token and token in lowered_name:
+                score += 14.0
+                token_hits += 1
+            elif token and token in title.lower():
+                score += 9.0
+                token_hits += 1
+            elif token and token in preview.lower():
+                score += 7.0
+                token_hits += 1
+            elif token and token in path.lower():
+                score += 6.0
+                token_hits += 1
+            elif token and token in searchable:
+                score += 4.0
+                token_hits += 1
+
+            if token and token in identifier_overlap_terms:
+                score += 5.0
+
+        if query_tokens and token_hits == len(query_tokens):
+            score += 26.0
+        elif query_tokens and token_hits == 0:
+            score -= 18.0
+
+        score += RANK_KIND_WEIGHTS.get(kind, 0.0)
+        score += RANK_SYMBOL_KIND_WEIGHTS.get(symbol_kind, 0.0)
+        score += KIND_PRIORITY.get(kind, 0) * 0.5
+
+        if graph_distance is not None:
+            score += max(20.0 - (float(graph_distance) - 1.0) * 6.0, 2.0)
+        if containment_depth is not None:
+            score += max(18.0 - float(containment_depth) * 4.0, 4.0)
+
+        if visibility == "pub":
+            score += 8.0
+        elif visibility == "private" and kind == "symbol":
+            score -= 2.0
+
+        if kind == "symbol" and symbol_kind in NOMINAL_SYMBOL_KINDS:
+            score += semantic_activity_score(semantic_summary) * (0.12 if exploratory else 0.08)
+        elif kind == "symbol" and symbol_kind == "impl":
+            score += semantic_activity_score(semantic_summary) * (0.16 if exploratory else 0.1)
+        elif kind == "symbol" and symbol_kind in CALLABLE_SYMBOL_KINDS:
+            score += semantic_activity_score(semantic_summary) * (0.34 if exploratory else 0.14)
+
+        score += summary_relevance * 28.0
+
+        if kind in {"module_ref", "symbol_ref", "type_ref"}:
+            score -= 30.0
+        if kind == "statement" and not explicit_statement:
+            score -= 60.0
+        if symbol_kind in LOCAL_LIKE_KINDS and not explicit_statement:
+            score -= 28.0
+        if kind in {"function_body", "type_body"} and symbol_kind not in {"", "trait", "struct", "enum", "type", "impl"}:
+            score -= 6.0
+
         suffix = PurePosixPath(path).suffix.lower() if path else ""
-        path_name = PurePosixPath(path).stem.lower() if path else ""
-        path_bonus = 0.0
-        if path_name:
-            path_terms = set(identifier_terms(path_name))
-            path_bonus += sum(0.15 for token in query_tokens if token in path_terms)
-            if type_intent and "source" in query_tokens and path_name in {"source", "sources"}:
-                path_bonus += 0.5
-        markdown_penalty = -0.6 if suffix == ".md" and not prefer_docs else 0.0
-        score = (
-            float(candidate.get("score") or 0.0)
-            + lexical_bonus
-            + exact_bonus
-            + identifier_bonus
-            + priority_bonus
-            + path_penalty
-            + unresolved_penalty
-            + lexical_reason_bonus
-            + localization_bonus
-            + embedding_bonus
-            + tag_bonus
-            + symbol_kind_bonus
-            + kind_intent_bonus
-            + path_bonus
-            + markdown_penalty
-        )
+        if suffix == ".md" and kind not in {"file", "doc"} and not query_profile.get("explicit_docs"):
+            score -= 4.0
 
         updated = dict(candidate)
         updated["score"] = round(score, 6)
