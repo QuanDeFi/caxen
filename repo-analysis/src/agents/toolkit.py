@@ -1099,9 +1099,20 @@ def resolve_graph_seed(
         return query, None, [], None
 
     lowered_query = query.lower()
+    query_segments = split_symbol_query_segments(query)
+
     exact_qname = [candidate for candidate in candidates if str(candidate.get("qualified_name") or "").lower() == lowered_query]
     exact_name = [candidate for candidate in candidates if str(candidate.get("name") or "").lower() == lowered_query]
     suffix_matches = [candidate for candidate in candidates if qualified_name_endswith_query(str(candidate.get("qualified_name") or ""), lowered_query)]
+    segment_matches = [
+        candidate
+        for candidate in candidates
+        if query_segments
+        and candidate_matches_query_segments(
+            query_segments,
+            split_symbol_query_segments(str(candidate.get("qualified_name") or "")),
+        )
+    ]
 
     selected: Optional[Dict[str, object]] = None
     resolution: Optional[str] = None
@@ -1115,6 +1126,9 @@ def resolve_graph_seed(
     elif len(suffix_matches) == 1:
         selected = suffix_matches[0]
         resolution = "qualified_name_suffix"
+    elif len(segment_matches) == 1:
+        selected = segment_matches[0]
+        resolution = "qualified_name_segments"
     elif len(candidates) == 1:
         selected = candidates[0]
         resolution = "single_candidate"
@@ -1127,7 +1141,18 @@ def resolve_graph_seed(
         else:
             resolution = "ambiguous"
 
-    public_candidates = [strip_candidate_score(candidate) for candidate in candidates[:limit]]
+    public_candidates = select_public_symbol_candidates(
+        query,
+        candidates,
+        selected,
+        resolution,
+        limit=limit,
+        exact_qname=exact_qname,
+        exact_name=exact_name,
+        suffix_matches=suffix_matches,
+        segment_matches=segment_matches,
+    )
+
     if selected is None:
         return query, None, public_candidates, resolution
 
@@ -1219,12 +1244,16 @@ def rank_symbol_candidates(
 def score_symbol_candidate(symbol_query: str, candidate: Dict[str, object]) -> float:
     lowered_query = str(symbol_query or "").strip().lower()
     query_tokens = normalize_query_tokens(symbol_query)
+    query_segments = split_symbol_query_segments(symbol_query)
 
     name = str(candidate.get("name") or "").lower()
     qualified_name = str(candidate.get("qualified_name") or "").lower()
     container_qualified_name = str(candidate.get("container_qualified_name") or "").lower()
     path = str(candidate.get("path") or "").lower()
     kind = str(candidate.get("kind") or "").lower()
+
+    qname_segments = split_symbol_query_segments(qualified_name)
+    container_segments = split_symbol_query_segments(container_qualified_name)
 
     haystack = " ".join(part for part in (name, qualified_name, container_qualified_name, path, kind) if part)
     score = float(candidate.get("_search_score") or 0.0)
@@ -1243,6 +1272,22 @@ def score_symbol_candidate(symbol_query: str, candidate: Dict[str, object]) -> f
         score += 24.0
     if lowered_query and lowered_query in path:
         score += 30.0
+
+    if len(query_segments) >= 2:
+        tail = query_segments[-1]
+        prefix_segments = query_segments[:-1]
+
+        if tail and name == tail:
+            score += 35.0
+
+        if candidate_matches_query_segments(query_segments, qname_segments):
+            score += 180.0
+        elif prefix_segments and candidate_matches_query_segments(prefix_segments, qname_segments) and name == tail:
+            score += 120.0
+        elif prefix_segments and candidate_matches_query_segments(prefix_segments, container_segments) and name == tail:
+            score += 100.0
+        elif name == tail:
+            score -= 20.0
 
     token_hits = 0
     for token in query_tokens:
@@ -1292,6 +1337,102 @@ def qualified_name_endswith_query(qualified_name: str, lowered_query: str) -> bo
         return False
     qualified_name = qualified_name.lower()
     return qualified_name == lowered_query or qualified_name.endswith(f"::{lowered_query}")
+
+
+def split_symbol_query_segments(value: str) -> List[str]:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return []
+    parts = []
+    for segment in raw.split("::"):
+        normalized = "".join(char for char in segment if char.isalnum() or char == "_")
+        if normalized:
+            parts.append(normalized)
+    return parts
+
+
+def candidate_matches_query_segments(query_segments: Sequence[str], candidate_segments: Sequence[str]) -> bool:
+    if not query_segments or not candidate_segments:
+        return False
+    if len(candidate_segments) < len(query_segments):
+        return False
+
+    window = len(query_segments)
+    for start in range(0, len(candidate_segments) - window + 1):
+        if list(candidate_segments[start : start + window]) == list(query_segments):
+            return True
+    return False
+
+
+def select_public_symbol_candidates(
+    symbol_query: str,
+    candidates: Sequence[Dict[str, object]],
+    selected: Optional[Dict[str, object]],
+    resolution: Optional[str],
+    *,
+    limit: int,
+    exact_qname: Sequence[Dict[str, object]] = (),
+    exact_name: Sequence[Dict[str, object]] = (),
+    suffix_matches: Sequence[Dict[str, object]] = (),
+    segment_matches: Sequence[Dict[str, object]] = (),
+) -> List[Dict[str, object]]:
+    cap = max(1, min(limit, 8))
+    selected_id = str((selected or {}).get("symbol_id") or "")
+    selected_name = str((selected or {}).get("name") or "").lower()
+    top_score = float((selected or {}).get("_candidate_score") or 0.0)
+
+    if resolution == "exact_qualified_name":
+        pool = list(exact_qname)
+    elif resolution == "exact_name":
+        pool = list(exact_name)
+    elif resolution in {"qualified_name_suffix", "qualified_name_segments"}:
+        pool = list(suffix_matches or segment_matches)
+    elif resolution == "single_candidate":
+        pool = [selected] if selected else []
+    elif resolution == "strong_top_candidate":
+        pool = []
+        for candidate in candidates:
+            candidate_score = float(candidate.get("_candidate_score") or 0.0)
+            candidate_name = str(candidate.get("name") or "").lower()
+            candidate_id = str(candidate.get("symbol_id") or "")
+            if selected_name and candidate_id != selected_id and candidate_name != selected_name:
+                continue
+            if top_score and candidate_score < (top_score - 30.0):
+                continue
+            pool.append(candidate)
+        if not pool and selected is not None:
+            pool = [selected]
+    else:
+        pool = list(candidates[:cap])
+
+    if selected is not None and selected_id and not any(str(candidate.get("symbol_id") or "") == selected_id for candidate in pool):
+        pool.insert(0, selected)
+
+    focused: List[Dict[str, object]] = []
+    seen = set()
+    for candidate in pool:
+        candidate_id = str(candidate.get("symbol_id") or "")
+        if not candidate_id or candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+
+        candidate_name = str(candidate.get("name") or "").lower()
+        if resolution in {"exact_qualified_name", "qualified_name_suffix", "qualified_name_segments", "single_candidate"}:
+            if selected_id and candidate_id != selected_id:
+                continue
+        elif resolution in {"exact_name", "strong_top_candidate"}:
+            if selected_name and candidate_id != selected_id and candidate_name != selected_name:
+                continue
+
+        focused.append(strip_candidate_score(candidate))
+        if len(focused) >= cap:
+            break
+
+    if focused:
+        return focused
+    if selected is not None:
+        return [strip_candidate_score(selected)]
+    return [strip_candidate_score(candidate) for candidate in candidates[:cap]]
 
 
 def strip_candidate_score(candidate: Dict[str, object]) -> Dict[str, object]:

@@ -1,3 +1,4 @@
+# repo-analysis/src/backends/tantivy/search.py
 from __future__ import annotations
 
 import hashlib
@@ -27,6 +28,7 @@ QUERY_EXPANSIONS = {
 CONCEPTUAL_TYPE_KINDS = {"struct", "trait", "enum", "impl", "type"}
 CALLABLE_SYMBOL_KINDS = {"function", "method", "associated_function"}
 CONCEPTUAL_CONSTANT_KINDS = {"const", "static"}
+CONCEPTUAL_LOCAL_KINDS = {"local"}
 DEDUPLICATION_FAMILY = {"deduplication", "dedup", "dedupe", "duplicate", "duplicates"}
 
 
@@ -254,9 +256,11 @@ def score_search_result(
     tags = " ".join(str(tag).lower() for tag in metadata.get("tags", []) or ())
     kind = str(item.get("kind") or "")
     symbol_kind = str(metadata.get("kind") or "").lower()
+    local_symbol = kind == "symbol" and symbol_kind in CONCEPTUAL_LOCAL_KINDS
 
     haystack = " ".join(part for part in (name, qualified_name, title, preview, searchable, path, tags) if part)
-    identifier_text = normalize_identifier_text(" ".join(part for part in (name, qualified_name, title) if part))
+    identifier_source = name if local_symbol else " ".join(part for part in (name, qualified_name, title) if part)
+    identifier_text = normalize_identifier_text(identifier_source)
     score = float(item.get("_best_native_score") or item.get("score") or 0.0)
 
     if lowered_query == qualified_name:
@@ -306,9 +310,9 @@ def score_search_result(
             family_hits += 1
             if family_identifier_hit:
                 identifier_family_hits += 1
-                score += 18.0
+                score += 6.0 if local_symbol else 18.0
             else:
-                score += 8.0
+                score += 2.0 if local_symbol else 8.0
 
     if query_tokens and exact_token_hits == len(query_tokens):
         score += 35.0
@@ -333,28 +337,38 @@ def score_search_result(
             score += 20.0
         elif kind == "function_body":
             score += 12.0
+
         if symbol_kind in CONCEPTUAL_CONSTANT_KINDS:
             score -= 40.0
+        if local_symbol:
+            score -= 160.0
 
     if token_families and family_hits == len(token_families):
         score += 30.0
-        if conceptual_query:
+        if conceptual_query and not local_symbol:
             score += 24.0
         if identifier_family_hits == len(token_families):
             score += 18.0
 
     if is_deduplication_filter_query(query_tokens, expanded_tokens):
-        if "deduplicationfilter" in identifier_text:
+        if not local_symbol and "deduplicationfilter" in identifier_text:
             score += 120.0
-        elif "deduplication" in identifier_text and "filter" in identifier_text:
+        elif not local_symbol and "deduplication" in identifier_text and "filter" in identifier_text:
             score += 80.0
-        if symbol_kind in CONCEPTUAL_TYPE_KINDS and "filter" in identifier_text:
+        if not local_symbol and symbol_kind in CONCEPTUAL_TYPE_KINDS and "filter" in identifier_text:
             score += 24.0
         if symbol_kind in CONCEPTUAL_CONSTANT_KINDS:
             score -= 25.0
+        if local_symbol:
+            score -= 40.0
+
+    if local_symbol:
+        score -= 35.0
+        if len(name) <= 4:
+            score -= 15.0
 
     if kind == "symbol":
-        score += 4.0
+        score += 1.0 if local_symbol else 4.0
     elif kind == "type_body":
         score += 3.0
     elif kind == "function_body":
