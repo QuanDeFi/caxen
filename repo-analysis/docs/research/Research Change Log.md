@@ -2,6 +2,9 @@
 
 ## 2026-04-23
 
+- Reordered `Research Sources.md` and `Research Summaries.md` within each top-level section by date from oldest to newest, adding missing date evidence for previously undated academic and documentation entries before renumbering both files to keep numbering aligned.
+
+- Added `Research Index.md`, a chapter-style topical index for the research folder covering `Research 1.md` through `Research 15.md` plus the bibliography, summaries, and change log files.
 - Removed duplicate academic source entry for `An Exploratory Study of Code Retrieval Techniques in Coding Agents` that duplicated the same Preprints.org paper via a version-specific URL.
 - Removed duplicate academic source entry for `Structure-Grounded Knowledge Retrieval via Code Dependencies for Multi-Step Data Reasoning` that duplicated the same arXiv paper via a `papers.cool` mirror URL.
 - Removed the matching duplicate summary entries from `Research Summaries.md`.

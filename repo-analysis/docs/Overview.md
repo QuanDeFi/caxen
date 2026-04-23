@@ -33,7 +33,6 @@ It extracts structured code information such as:
 - references
 - statements
 - symbol bodies
-- summary records
 
 This becomes the canonical exact-access metadata layer.
 
@@ -62,7 +61,7 @@ It generates higher-level summaries for:
 - files
 - symbols
 
-These are useful for compressed navigation and LLM context preparation.
+These are precomputed in the summaries phase, synced into the metadata layer, and used for compressed navigation and LLM context preparation.
 
 ### 6. Evaluation and benchmarking
 It can prepare benchmark prompts, score answer bundles, and measure retrieval quality and interactive latency.
